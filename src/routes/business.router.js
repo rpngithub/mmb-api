@@ -5,7 +5,8 @@ const authenticate = require('../middlewares/authenticate');
 const optionalAuth = require('../middlewares/optionalAuth');
 const rateLimiter  = require('../middlewares/rateLimiter');
 const validate     = require('../middlewares/validate');
-const { createBusinessSchema, updateBusinessSchema, adoptThemeSchema } = require('../validators/business.validator');
+const { createBusinessSchema, updateBusinessSchema, adoptVariantSchema } = require('../validators/business.validator');
+const deprecated = require('../middlewares/deprecated');
 
 /**
  * @swagger
@@ -157,25 +158,27 @@ router.get('/:uid', authenticate, controller.getOne);
 router.patch('/:uid', authenticate, validate(updateBusinessSchema), controller.update);
 router.delete('/:uid', authenticate, controller.remove);
 
-// ---- Adopted themes ("Add to your Business"; owner-scoped) ----
+// ---- Adopted variants ("Use This Brand Series"; owner-scoped) ----
 /**
  * @swagger
- * /businesses/{uid}/themes:
+ * /businesses/{uid}/variants:
  *   get:
- *     summary: List themes adopted into this business (with template cards)
+ *     summary: List variants adopted into this business (with template cards)
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
  *       200:
- *         description: Array of adopted themes, each with its active template cards
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ThemeListResponse' } } }
+ *         description: Array of adopted variants, each with its active template cards
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantListResponse' } } }
  *   post:
- *     summary: Adopt a theme into this business ("Add to your Business")
+ *     summary: Adopt a variant into this business ("Use This Brand Series")
  *     description: >-
- *       Requires the owner's ACTIVE subscription plan to entitle the theme (403 otherwise).
- *       Idempotent — re-adopting an already-added theme is a no-op. The adoption is a durable
- *       grant: the business keeps access to the theme's templates even if the plan later lapses.
+ *       Requires the owner's ACTIVE subscription plan to entitle the VARIANT (403 otherwise).
+ *       Note the button label says brand series but the grant is per-variant: adopting one
+ *       variant does not unlock its siblings in the same series. Idempotent - re-adopting an
+ *       already-added variant is a no-op. The adoption is a durable grant: the business keeps
+ *       access to the variant's templates even if the plan later lapses.
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -183,29 +186,39 @@ router.delete('/:uid', authenticate, controller.remove);
  *       required: true
  *       content:
  *         application/json:
- *           schema: { type: object, required: [theme_uid], properties: { theme_uid: { type: string, format: uuid } } }
+ *           schema:
+ *             type: object
+ *             properties:
+ *               variant_uid: { type: string, format: uuid }
+ *               theme_uid:   { type: string, format: uuid, deprecated: true, description: "Pre-rename name for `variant_uid`." }
  *     responses:
  *       201:
- *         description: The adopted theme with its template cards
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ThemeResponse' } } }
+ *         description: The adopted variant with its template cards
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantResponse' } } }
  *       403:
- *         description: Plan does not include this theme, or business not owned by caller
+ *         description: Plan does not include this variant, or business not owned by caller
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
- * /businesses/{uid}/themes/{themeUid}:
+ * /businesses/{uid}/variants/{variantUid}:
  *   delete:
- *     summary: Remove an adopted theme from this business
+ *     summary: Remove an adopted variant from this business
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: path, name: uid,      required: true, schema: { type: string, format: uuid } }
- *       - { in: path, name: themeUid, required: true, schema: { type: string, format: uuid } }
+ *       - { in: path, name: uid,        required: true, schema: { type: string, format: uuid } }
+ *       - { in: path, name: variantUid, required: true, schema: { type: string, format: uuid } }
  *     responses:
  *       200:
  *         description: Removed
  *         content: { application/json: { schema: { $ref: '#/components/schemas/SuccessResponse' } } }
  */
-router.get('/:uid/themes', authenticate, controller.listThemes);
-router.post('/:uid/themes', authenticate, validate(adoptThemeSchema), controller.adoptTheme);
-router.delete('/:uid/themes/:themeUid', authenticate, controller.removeTheme);
+router.get('/:uid/variants', authenticate, controller.listVariants);
+router.post('/:uid/variants', authenticate, validate(adoptVariantSchema), controller.adoptVariant);
+router.delete('/:uid/variants/:variantUid', authenticate, controller.removeVariant);
+
+// Deprecated aliases (Theme -> Variant rename). Same handlers, annotated with RFC 8594
+// headers and kept out of Swagger so new integrations do not discover them.
+router.get('/:uid/themes', authenticate, deprecated('/api/v1/businesses/{uid}/variants'), controller.listVariants);
+router.post('/:uid/themes', authenticate, deprecated('/api/v1/businesses/{uid}/variants'), validate(adoptVariantSchema), controller.adoptVariant);
+router.delete('/:uid/themes/:themeUid', authenticate, deprecated('/api/v1/businesses/{uid}/variants'), controller.removeVariant);
 
 module.exports = router;

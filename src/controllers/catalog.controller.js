@@ -8,9 +8,9 @@ const templateCategories = async (req, res) => send(res, await catalog.listTempl
 const assetCategories    = async (req, res) => send(res, await catalog.listAssetCategories(req.query));
 const tags               = async (req, res) => send(res, await catalog.listTags());
 const templateSizes      = async (req, res) => send(res, await catalog.listTemplateSizes());
-const themeGroups        = async (req, res) => send(res, await catalog.listThemeGroups());
-const themes             = async (req, res) => send(res, await catalog.listThemes(req.query));
-const themeDetail        = async (req, res) => send(res, await catalog.getThemeDetail(req.params.uid, req.user));
+const brandSeries        = async (req, res) => send(res, await catalog.listBrandSeries(req.query, req.user));
+const variants           = async (req, res) => send(res, await catalog.listVariants(req.query, req.user));
+const variantDetail      = async (req, res) => send(res, await catalog.getVariantDetail(req.params.uid, req.user));
 const faqCategories      = async (req, res) => send(res, await catalog.listFaqCategories());
 const faqs               = async (req, res) => send(res, await catalog.listFaqs(req.query));
 const testimonials       = async (req, res) => send(res, await catalog.listTestimonials());
@@ -22,6 +22,6 @@ const specialEvents      = async (req, res) => {
 const plans              = async (req, res) => send(res, await catalog.listPlans(req.query));
 
 module.exports = {
-  businessCategories, templateCategories, assetCategories, tags, templateSizes, themeGroups,
-  themes, themeDetail, faqCategories, faqs, testimonials, banners, specialEvents, plans,
+  businessCategories, templateCategories, assetCategories, tags, templateSizes, brandSeries,
+  variants, variantDetail, faqCategories, faqs, testimonials, banners, specialEvents, plans,
 };

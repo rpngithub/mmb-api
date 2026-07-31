@@ -32,7 +32,23 @@ module.exports = {
     });
 
     // ---- data: 15-day trial on Pro, and the All-Access Pass plan (all features unlimited) ----
+    //
+    // This step upgrades an EXISTING installation. On a fresh database the baseline
+    // seeder already creates both plans (with explicit ids 1-3) and the pass's unlimited
+    // plan_features, so running this first would insert an unexpected plan at id 1 and
+    // make that seeder collide on its primary key. Skip when there is nothing to upgrade.
+    const [[{ n: planCount }]] = await queryInterface.sequelize.query('SELECT COUNT(*) AS n FROM plans');
+    if (Number(planCount) === 0) return;
+
     await queryInterface.sequelize.query("UPDATE plans SET trial_days = 15 WHERE name = 'Pro'");
+
+    // Idempotent: a database that already has the pass (e.g. seeded, then migrated)
+    // must not get a second copy.
+    const [[{ n: passCount }]] = await queryInterface.sequelize.query(
+      "SELECT COUNT(*) AS n FROM plans WHERE name = 'All-Access Pass'",
+    );
+    if (Number(passCount) > 0) return;
+
     await queryInterface.sequelize.query(
       "INSERT INTO plans (uid, name, description, plan_type, pass_price, pass_days, is_popular, status, display_order, created_at, updated_at) " +
       "VALUES (:uid, 'All-Access Pass', 'Try all features for 10 days', 'access_pass', 10.00, 10, 0, 'active', 99, NOW(), NOW())",

@@ -3,6 +3,7 @@ const router       = express.Router();
 const controller   = require('../controllers/catalog.controller');
 const optionalAuth = require('../middlewares/optionalAuth');
 const rateLimiter  = require('../middlewares/rateLimiter');
+const deprecated   = require('../middlewares/deprecated');
 
 /**
  * @swagger
@@ -164,53 +165,77 @@ router.get('/template-sizes', controller.templateSizes);
 
 /**
  * @swagger
- * /theme-groups:
+ * /brand-series:
  *   get:
- *     summary: List active theme groups with their themes
- *     tags: [Catalog]
- *     security: []
- *     responses:
- *       200:
- *         description: Array of theme groups (themes nested)
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ThemeGroupListResponse' } } }
- */
-router.get('/theme-groups', controller.themeGroups);
-
-/**
- * @swagger
- * /themes:
- *   get:
- *     summary: List active themes
+ *     summary: List active brand series with a preview of their variants
+ *     description: >-
+ *       Each series carries its style personalities, tags and colour palette, the counts the
+ *       card renders (`variants_count`, `templates_count`), and a preview slice of its variants.
+ *       `is_locked` is a ROLLUP of its variants, not a gate of its own: gating lives on the
+ *       variant, so a series reads as locked only when every one of its variants is locked.
+ *       `unlocked_variants_count` distinguishes "Unlock" from a partially-owned series.
  *     tags: [Catalog]
  *     security: []
  *     parameters:
  *       - in: query
+ *         name: preview_variants
+ *         description: "How many variants to nest per series (default 4; 0 returns none)."
+ *         schema: { type: integer, default: 4 }
+ *     responses:
+ *       200:
+ *         description: Array of brand series (preview variants nested)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/BrandSeriesListResponse' } } }
+ */
+router.get('/brand-series', controller.brandSeries);
+
+/**
+ * @swagger
+ * /variants:
+ *   get:
+ *     summary: List active variants
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters:
+ *       - in: query
+ *         name: series
+ *         description: "Filter by brand series - accepts a slug, a uid, or a numeric id."
+ *         schema: { type: string }
+ *       - in: query
+ *         name: series_id
+ *         deprecated: true
+ *         description: "Legacy numeric-id form of `series` (still accepted; prefer `series`)."
+ *         schema: { type: integer }
+ *       - in: query
  *         name: group
- *         description: "Filter by theme group — accepts a slug, a uid, or a numeric id."
+ *         deprecated: true
+ *         description: "Pre-rename name for `series` (still accepted)."
  *         schema: { type: string }
  *       - in: query
  *         name: group_id
  *         deprecated: true
- *         description: "Legacy numeric-id form of `group` (still accepted; prefer `group`)."
+ *         description: "Pre-rename name for `series_id` (still accepted)."
  *         schema: { type: integer }
  *     responses:
  *       200:
- *         description: Array of themes
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ThemeListResponse' } } }
+ *         description: Array of variants, each with `templates_count` and `is_locked`
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantListResponse' } } }
  */
-router.get('/themes', controller.themes);
+router.get('/variants', controller.variants);
 
 /**
  * @swagger
- * /themes/{uid}:
+ * /variants/{uid}:
  *   get:
- *     summary: Get a theme with its (plan-gated) templates
+ *     summary: Get a variant with its templates (locked ones included as upsell teasers)
  *     description: >-
- *       The theme card (name, description, thumbnail, business categories, likes_count) is public.
- *       Its templates are premium and plan-gated: they are included ONLY when the caller's ACTIVE
- *       subscription plan is entitled to the theme. Otherwise the response has `is_locked=true` and
- *       no `Templates` (an upsell teaser). A theme with no plan restrictions is locked to everyone.
- *       A bearer token is required to be entitled (guests are always locked).
+ *       The variant card (name, description, thumbnail, badge, industries, likes_count) is public,
+ *       and so is the TEMPLATE LIST: templates are always returned so a visitor can see what they
+ *       would be buying. When the caller is not entitled the response carries `is_locked=true` and
+ *       every template is returned WITHOUT its `content` (the design payload) - thumbnails only.
+ *       Access requires the caller's ACTIVE subscription plan to entitle the variant, or one of
+ *       their businesses to have adopted it. A variant with no plan restrictions is locked to
+ *       everyone, and guests are always locked. Opening a template or starting a project from one
+ *       is still refused outright while locked.
  *     tags: [Catalog]
  *     security: []
  *     parameters:
@@ -220,13 +245,21 @@ router.get('/themes', controller.themes);
  *         schema: { type: string, format: uuid }
  *     responses:
  *       200:
- *         description: Theme object (with `is_locked`; `Templates` present only when entitled)
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ThemeResponse' } } }
+ *         description: Variant object (with `is_locked`; `Templates` always present, stripped when locked)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantResponse' } } }
  *       404:
- *         description: Theme not found
+ *         description: Variant not found
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
-router.get('/themes/:uid', controller.themeDetail);
+router.get('/variants/:uid', controller.variantDetail);
+
+// ---- Deprecated aliases (Theme -> Brand Series / Variant rename) ----
+// Same handlers, annotated with RFC 8594 Deprecation/Link headers. Kept so the app and
+// admin panel can migrate on their own schedule; excluded from Swagger deliberately so
+// new integrations do not discover them.
+router.get('/theme-groups', deprecated('/api/v1/brand-series'), controller.brandSeries);
+router.get('/themes',       deprecated('/api/v1/variants'),     controller.variants);
+router.get('/themes/:uid',  deprecated('/api/v1/variants'),     controller.variantDetail);
 
 /**
  * @swagger
