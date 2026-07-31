@@ -10,7 +10,7 @@ const { hashOtp } = require('../src/utils/otpHelper');
 
 const P = '/api/v1';
 let startLogId = 0;
-const track = { users: [], templates: [], themes: [], themeGroups: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [] };
+const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -22,8 +22,11 @@ after(async () => {
   if (track.faqs.length)          await models.Faq.destroy({ where: { id: track.faqs } });
   if (track.faqCategories.length) await models.FaqCategory.destroy({ where: { id: track.faqCategories } });
   if (track.testimonials.length)  await models.Testimonial.destroy({ where: { id: track.testimonials } });
-  if (track.themes.length)      await models.Theme.destroy({ where: { id: track.themes } });           // cascades joins
-  if (track.themeGroups.length) await models.ThemeGroup.destroy({ where: { id: track.themeGroups } });
+  if (track.variants.length)     await models.Variant.destroy({ where: { id: track.variants } });        // cascades joins
+  if (track.brandSeries.length)  await models.BrandSeries.destroy({ where: { id: track.brandSeries } });  // cascades its taxonomy joins
+  if (track.variantBadges.length)      await models.VariantBadge.destroy({ where: { id: track.variantBadges } });
+  if (track.stylePersonalities.length) await models.StylePersonality.destroy({ where: { id: track.stylePersonalities } });
+  if (track.colors.length)             await models.Color.destroy({ where: { id: track.colors } });
   if (track.templates.length) await Template.destroy({ where: { id: track.templates } }); // cascades template_tags / _sizes / _business_categories
   if (track.tags.length)              await models.Tag.destroy({ where: { id: track.tags } });
   if (track.templateSizes.length)     await models.TemplateSize.destroy({ where: { id: track.templateSizes } });
@@ -150,7 +153,7 @@ test('premium template: locked for guest, unlocked for paid', async () => {
   assert.equal(typeof paid.body.data.content, 'string', 'content served to paid');
 });
 
-// ---------- Theme premium (plan-scoped) gating ----------
+// ---------- Variant premium (plan-scoped) gating ----------
 
 // Create a user holding an ACTIVE subscription on the given plan; returns the user id.
 async function userWithActivePlan(planId, salt) {
@@ -163,95 +166,211 @@ async function userWithActivePlan(planId, salt) {
   return user.id;
 }
 
-test('theme detail: card is public but templates are plan-gated by subscription', async () => {
-  const group = await models.ThemeGroup.create({ uid: uuid(), name: 'TST Group', is_active: 1 });
-  track.themeGroups.push(group.id);
-  const theme = await models.Theme.create({
-    uid: uuid(), group_id: group.id, name: 'TST Pro Theme', description: 'Premium theme', likes_count: 42, is_active: 1,
+// A brand series + one variant inside it, both tracked for cleanup.
+async function makeSeriesWithVariant(label, variantAttrs = {}) {
+  const series = await models.BrandSeries.create({ uid: uuid(), name: `TST ${label} Series`, is_active: 1 });
+  track.brandSeries.push(series.id);
+  const variant = await models.Variant.create({
+    uid: uuid(), series_id: series.id, name: `TST ${label} Variant`, is_active: 1, ...variantAttrs,
   });
-  track.themes.push(theme.id);
-  const tpl = await Template.create({ uid: uuid(), name: 'TST Theme Tpl', content: '{"a":1}', status: 'active' });
-  track.templates.push(tpl.id);
-  await theme.setTemplates([tpl.id]);
-  await theme.setPlans([2]);                 // entitled: Pro (plan id 2)
-  await theme.setBusinessCategories([1, 5]); // display tags
+  track.variants.push(variant.id);
+  return { series, variant };
+}
 
-  // guest -> card visible, templates locked, entitlement set hidden
-  const guest = await h.request('GET', `${P}/themes/${theme.uid}`);
+test('variant detail: card is public and templates are always listed, but locked ones are stripped', async () => {
+  const { variant } = await makeSeriesWithVariant('Pro', { description: 'Premium variant', likes_count: 42 });
+  const tpl = await Template.create({ uid: uuid(), name: 'TST Variant Tpl', content: '{"a":1}', status: 'active' });
+  track.templates.push(tpl.id);
+  await variant.setTemplates([tpl.id]);
+  await variant.setPlans([2]);                 // entitled: Pro (plan id 2)
+  await variant.setBusinessCategories([1, 5]); // display tags
+
+  // guest -> card visible, templates LISTED but without content, entitlement set hidden
+  const guest = await h.request('GET', `${P}/variants/${variant.uid}`);
   assert.equal(guest.status, 200);
   assert.equal(guest.body.data.is_locked, true);
-  assert.equal(guest.body.data.Templates, undefined, 'templates withheld from guest');
-  assert.equal(guest.body.data.description, 'Premium theme');
+  assert.equal(guest.body.data.Templates.length, 1, 'locked templates are shown as upsell teasers');
+  assert.equal(guest.body.data.Templates[0].is_locked, true);
+  assert.equal(guest.body.data.Templates[0].content, undefined, 'design payload withheld while locked');
+  assert.ok('thumbnail_s3_key' in guest.body.data.Templates[0], 'thumbnail still exposed');
+  assert.equal(guest.body.data.templates_count, 1);
+  assert.equal(guest.body.data.description, 'Premium variant');
   assert.equal(guest.body.data.likes_count, 42);
-  assert.equal(guest.body.data.BusinessCategories.length, 2, 'business tags on the card');
+  assert.equal(guest.body.data.BusinessCategories.length, 2, 'industry tags on the card');
   assert.equal(guest.body.data.Plans, undefined, 'entitlement set never exposed');
 
   // user with an ACTIVE Pro subscription -> entitled, templates (with content) served
   const proUserId = await userWithActivePlan(2, 11);
-  const entitled = await h.request('GET', `${P}/themes/${theme.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
+  const entitled = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
   assert.equal(entitled.body.data.is_locked, false);
-  assert.ok(Array.isArray(entitled.body.data.Templates) && entitled.body.data.Templates.length === 1);
+  assert.equal(entitled.body.data.Templates.length, 1);
+  assert.equal(entitled.body.data.Templates[0].is_locked, false);
   assert.equal(typeof entitled.body.data.Templates[0].content, 'string', 'content served to entitled viewer');
 
   // user on a DIFFERENT plan (Free, id 1) -> locked (proves plan-scoping, not just "any paid")
   const freeUserId = await userWithActivePlan(1, 22);
-  const wrongPlan = await h.request('GET', `${P}/themes/${theme.uid}`, { token: h.userTokenFor(freeUserId, 'paid') });
-  assert.equal(wrongPlan.body.data.is_locked, true, 'plan not in the theme allowlist -> locked');
+  const wrongPlan = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(freeUserId, 'paid') });
+  assert.equal(wrongPlan.body.data.is_locked, true, 'plan not in the variant allowlist -> locked');
+  assert.equal(wrongPlan.body.data.Templates[0].content, undefined);
 });
 
-test('theme with no plan restrictions is locked to everyone (incl. subscribers)', async () => {
-  const group = await models.ThemeGroup.create({ uid: uuid(), name: 'TST Group2', is_active: 1 });
-  track.themeGroups.push(group.id);
-  const theme = await models.Theme.create({ uid: uuid(), group_id: group.id, name: 'TST Unrestricted', is_active: 1 });
-  track.themes.push(theme.id);
+test('variant with no plan restrictions is locked to everyone (incl. subscribers)', async () => {
+  const { variant } = await makeSeriesWithVariant('Unrestricted');
   const tpl = await Template.create({ uid: uuid(), name: 'TST T2', content: '{}', status: 'active' });
   track.templates.push(tpl.id);
-  await theme.setTemplates([tpl.id]); // no setPlans -> no rows -> nobody
+  await variant.setTemplates([tpl.id]); // no setPlans -> no rows -> nobody
 
   const proUserId = await userWithActivePlan(2, 33);
-  const r = await h.request('GET', `${P}/themes/${theme.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
+  const r = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
   assert.equal(r.body.data.is_locked, true);
-  assert.equal(r.body.data.Templates, undefined);
+  assert.equal(r.body.data.Templates[0].content, undefined);
 });
 
-test('public /templates no longer exposes theme templates (theme_id is not an anchor)', async () => {
-  const r = await h.request('GET', `${P}/templates?theme_id=1`);
-  assert.equal(r.status, 400, 'theme_id alone is not a valid anchor');
+test('brand series list: counts, rollup lock state and the variant preview slice', async () => {
+  const { series, variant } = await makeSeriesWithVariant('Counts');
+  const second = await models.Variant.create({ uid: uuid(), series_id: series.id, name: 'TST Counts Variant 2', is_active: 1 });
+  track.variants.push(second.id);
+
+  const shared = await Template.create({ uid: uuid(), name: 'TST Shared Tpl', content: '{}', status: 'active' });
+  const only   = await Template.create({ uid: uuid(), name: 'TST Only Tpl',   content: '{}', status: 'active' });
+  track.templates.push(shared.id, only.id);
+  await variant.setTemplates([shared.id, only.id]);
+  await second.setTemplates([shared.id]);          // shared across both variants of the series
+  await variant.setPlans([2]);
+
+  const guest = await h.request('GET', `${P}/brand-series`);
+  assert.equal(guest.status, 200);
+  const row = guest.body.data.find((x) => x.uid === series.uid);
+  assert.ok(row, 'series present in the public list');
+  assert.equal(row.variants_count, 2);
+  assert.equal(row.templates_count, 2, 'DISTINCT across variants - the shared template counts once');
+  assert.equal(row.unlocked_variants_count, 0);
+  assert.equal(row.is_locked, true, 'no variant unlocked -> series reads as locked');
+  assert.equal(row.Variants.length, 2, 'preview defaults to 4, so both are returned');
+  assert.equal(row.Variants[0].templates_count, 2, 'per-variant tally on the card');
+
+  // an entitled viewer flips the rollup: one of two variants opens
+  const proUserId = await userWithActivePlan(2, 44);
+  const paid = await h.request('GET', `${P}/brand-series`, { token: h.userTokenFor(proUserId, 'paid') });
+  const paidRow = paid.body.data.find((x) => x.uid === series.uid);
+  assert.equal(paidRow.unlocked_variants_count, 1);
+  assert.equal(paidRow.is_locked, false, 'partially unlocked series is not locked');
+
+  // preview_variants=0 returns the counts without the nested cards
+  const none = await h.request('GET', `${P}/brand-series?preview_variants=0`);
+  const noneRow = none.body.data.find((x) => x.uid === series.uid);
+  assert.equal(noneRow.Variants.length, 0);
+  assert.equal(noneRow.variants_count, 2, 'count is independent of the preview slice');
 });
 
-test('admin theme relations: set plan entitlements + business categories, read back', async () => {
-  const token = h.adminToken(['themes.*']);
-  const group = await models.ThemeGroup.create({ uid: uuid(), name: 'TST Group3', is_active: 1 });
-  track.themeGroups.push(group.id);
-  const theme = await models.Theme.create({ uid: uuid(), group_id: group.id, name: 'TST Rel', is_active: 1 });
-  track.themes.push(theme.id);
+test('brand series carry style personalities, tags and colours in display order', async () => {
+  const stamp = Date.now();
+  const series = await models.BrandSeries.create({
+    uid: uuid(), name: `TST Descriptive ${stamp}`, caption: 'Bright ideas deserve bright branding',
+    description: 'Fresh, vibrant, energetic visuals.', is_active: 1,
+  });
+  track.brandSeries.push(series.id);
 
-  const set = await h.request('PUT', `${P}/admin/themes/${theme.uid}/relations`, {
+  const bold  = await models.StylePersonality.create({ uid: uuid(), name: `TST Bold ${stamp}`,  slug: `tst-bold-${stamp}` });
+  const fresh = await models.StylePersonality.create({ uid: uuid(), name: `TST Fresh ${stamp}`, slug: `tst-fresh-${stamp}` });
+  track.stylePersonalities.push(bold.id, fresh.id);
+  const gold  = await models.Color.create({ uid: uuid(), name: `TST Gold ${stamp}`,  slug: `tst-gold-${stamp}`,  hex_code: '#D4AF37' });
+  const black = await models.Color.create({ uid: uuid(), name: `TST Black ${stamp}`, slug: `tst-black-${stamp}`, hex_code: '#000000' });
+  track.colors.push(gold.id, black.id);
+  const tag = await models.Tag.create({ name: `TST Series Tag ${stamp}`, slug: `tst-series-tag-${stamp}` });
+  track.tags.push(tag.id);
+
+  const token = h.adminToken(['brand_series.*']);
+  // deliberately fresh-then-bold and black-then-gold: array order IS the display order
+  const set = await h.request('PUT', `${P}/admin/brand-series/${series.uid}/relations`, {
+    token,
+    body: { style_personality_ids: [fresh.id, bold.id], tag_ids: [tag.id], color_ids: [black.id, gold.id] },
+  });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.body.data.StylePersonalities.map((x) => x.id), [fresh.id, bold.id]);
+  assert.deepEqual(set.body.data.Colors.map((x) => x.id), [black.id, gold.id]);
+  assert.equal(set.body.data.Tags.length, 1);
+
+  // and the public list serves the same order, with the hex code alongside the name
+  const pub = await h.request('GET', `${P}/brand-series`);
+  const row = pub.body.data.find((x) => x.uid === series.uid);
+  assert.equal(row.caption, 'Bright ideas deserve bright branding');
+  assert.deepEqual(row.StylePersonalities.map((x) => x.id), [fresh.id, bold.id]);
+  assert.deepEqual(row.Colors.map((x) => x.hex_code), ['#000000', '#D4AF37']);
+
+  const bad = await h.request('PUT', `${P}/admin/brand-series/${series.uid}/relations`, { token, body: {} });
+  assert.equal(bad.status, 400, 'empty body rejected by the relations validator');
+});
+
+test('a variant carries at most one badge, exposed with its icon', async () => {
+  const stamp = Date.now();
+  const badge = await models.VariantBadge.create({
+    uid: uuid(), name: `TST Popular ${stamp}`, slug: `tst-popular-${stamp}`, icon_s3_key: 'variants/badge-icon/x.png', is_active: 1,
+  });
+  track.variantBadges.push(badge.id);
+  const { variant } = await makeSeriesWithVariant('Badged', { badge_id: badge.id });
+
+  const r = await h.request('GET', `${P}/variants/${variant.uid}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.VariantBadge.name, `TST Popular ${stamp}`);
+  assert.equal(r.body.data.VariantBadge.icon_s3_key, 'variants/badge-icon/x.png');
+});
+
+test('deprecated theme routes still answer, and say so in the headers', async () => {
+  const { variant } = await makeSeriesWithVariant('Deprecated');
+
+  const groups = await h.request('GET', `${P}/theme-groups`);
+  assert.equal(groups.status, 200);
+  assert.equal(groups.headers.deprecation, 'true');
+  assert.match(groups.headers.link, /rel="successor-version"/);
+  assert.match(groups.headers.link, /brand-series/);
+
+  const detail = await h.request('GET', `${P}/themes/${variant.uid}`);
+  assert.equal(detail.status, 200, 'old variant-detail path still serves');
+  assert.equal(detail.body.data.uid, variant.uid);
+  assert.equal(detail.headers.deprecation, 'true');
+});
+
+test('public /templates no longer exposes variant templates (variant_id is not an anchor)', async () => {
+  const r = await h.request('GET', `${P}/templates?variant_id=1`);
+  assert.equal(r.status, 400, 'variant_id alone is not a valid anchor');
+  const legacy = await h.request('GET', `${P}/templates?theme_id=1`);
+  assert.equal(legacy.status, 400, 'the deprecated theme_id alias is not an anchor either');
+});
+
+test('admin variant relations: set plan entitlements + industries, read back', async () => {
+  const token = h.adminToken(['variants.*']);
+  const { variant } = await makeSeriesWithVariant('Rel');
+
+  const set = await h.request('PUT', `${P}/admin/variants/${variant.uid}/relations`, {
     token, body: { plan_ids: [2], business_category_ids: [1, 5] },
   });
   assert.equal(set.status, 200);
   assert.equal(set.body.data.Plans.length, 1);
   assert.equal(set.body.data.BusinessCategories.length, 2);
+  assert.equal(set.body.data.Industries.length, 2, 'industries mirrored under the public name');
 
-  const get = await h.request('GET', `${P}/admin/themes/${theme.uid}/relations`, { token });
+  const get = await h.request('GET', `${P}/admin/variants/${variant.uid}/relations`, { token });
   assert.equal(get.status, 200);
   assert.equal(get.body.data.Plans[0].id, 2);
 
   // empty body is rejected by the relations validator
-  const bad = await h.request('PUT', `${P}/admin/themes/${theme.uid}/relations`, { token, body: {} });
+  const bad = await h.request('PUT', `${P}/admin/variants/${variant.uid}/relations`, { token, body: {} });
   assert.equal(bad.status, 400);
+
+  // the pre-rename admin path still works, for clients that have not migrated
+  const old = await h.request('GET', `${P}/admin/themes/${variant.uid}/relations`, { token });
+  assert.equal(old.status, 200);
+  assert.equal(old.headers.deprecation, 'true');
 });
 
-// ---------- "Add to your Business" (theme adoption) ----------
+// ---------- "Use This Brand Series" (variant adoption) ----------
 test('add to your business: only an entitled owner can adopt; adoption is durable', async () => {
-  const group = await models.ThemeGroup.create({ uid: uuid(), name: 'TST AdoptGrp', is_active: 1 });
-  track.themeGroups.push(group.id);
-  const theme = await models.Theme.create({ uid: uuid(), group_id: group.id, name: 'TST Adopt Theme', is_active: 1 });
-  track.themes.push(theme.id);
+  const { variant } = await makeSeriesWithVariant('Adopt');
   const tpl = await Template.create({ uid: uuid(), name: 'TST Adopt Tpl', content: '{"z":1}', status: 'active', category_id: 1 });
   track.templates.push(tpl.id);
-  await theme.setTemplates([tpl.id]);
-  await theme.setPlans([2]); // Pro-only
+  await variant.setTemplates([tpl.id]);
+  await variant.setPlans([2]); // Pro-only
 
   const ownerId = (await User.create({ uid: uuid(), name: 'TST Owner', phone: `9${(Date.now() + 41) % 1000000000}` })).id;
   track.users.push(ownerId);
@@ -259,7 +378,7 @@ test('add to your business: only an entitled owner can adopt; adoption is durabl
   const ownerTok = h.userTokenFor(ownerId, 'free');
 
   // no entitling plan -> cannot adopt
-  const denied = await h.request('POST', `${P}/businesses/${biz.uid}/themes`, { token: ownerTok, body: { theme_uid: theme.uid } });
+  const denied = await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
   assert.equal(denied.status, 403);
 
   // grant active Pro -> can adopt
@@ -267,53 +386,76 @@ test('add to your business: only an entitled owner can adopt; adoption is durabl
     uid: uuid(), user_id: ownerId, plan_id: 2, sub_type: 'regular', status: 'active',
     starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
   });
-  const adopt = await h.request('POST', `${P}/businesses/${biz.uid}/themes`, { token: ownerTok, body: { theme_uid: theme.uid } });
+  const adopt = await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
   assert.equal(adopt.status, 201);
   assert.equal(adopt.body.data.Templates.length, 1);
 
   // listed in the collection, and idempotent (no duplicate on re-adopt)
-  await h.request('POST', `${P}/businesses/${biz.uid}/themes`, { token: ownerTok, body: { theme_uid: theme.uid } });
-  const listed = await h.request('GET', `${P}/businesses/${biz.uid}/themes`, { token: ownerTok });
+  await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
+  const listed = await h.request('GET', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok });
   assert.equal(listed.body.data.length, 1);
-  assert.equal(listed.body.data[0].uid, theme.uid);
+  assert.equal(listed.body.data[0].uid, variant.uid);
 
-  // DURABLE: the plan lapses, but the adopted theme stays unlocked...
+  // DURABLE: the plan lapses, but the adopted variant stays unlocked...
   await sub.update({ status: 'expired' });
-  const detail = await h.request('GET', `${P}/themes/${theme.uid}`, { token: ownerTok });
-  assert.equal(detail.body.data.is_locked, false, 'adopted theme stays unlocked after lapse');
+  const detail = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
+  assert.equal(detail.body.data.is_locked, false, 'adopted variant stays unlocked after lapse');
+  assert.equal(typeof detail.body.data.Templates[0].content, 'string', 'and its content is served');
   // ...and its template can still be turned into a project
   const proj = await h.request('POST', `${P}/projects`, { token: ownerTok, body: { name: 'From adopted', template_id: tpl.id, content: '{"z":1}' } });
   assert.equal(proj.status, 201);
 
   // remove adoption -> re-locks (no sub, no adoption)
-  const del = await h.request('DELETE', `${P}/businesses/${biz.uid}/themes/${theme.uid}`, { token: ownerTok });
+  const del = await h.request('DELETE', `${P}/businesses/${biz.uid}/variants/${variant.uid}`, { token: ownerTok });
   assert.equal(del.status, 200);
-  const relocked = await h.request('GET', `${P}/themes/${theme.uid}`, { token: ownerTok });
+  const relocked = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
   assert.equal(relocked.body.data.is_locked, true);
 });
 
-test('theme templates never surface in the public catalog (category browse + direct fetch + project)', async () => {
-  const group = await models.ThemeGroup.create({ uid: uuid(), name: 'TST LeakGrp', is_active: 1 });
-  track.themeGroups.push(group.id);
-  const theme = await models.Theme.create({ uid: uuid(), group_id: group.id, name: 'TST Leak Theme', is_active: 1 });
-  track.themes.push(theme.id);
-  // a theme template that ALSO carries a public category and is not is_premium — must still be hidden
+test('adoption is per-variant: it does not unlock siblings in the same brand series', async () => {
+  const { series, variant } = await makeSeriesWithVariant('Sibling');
+  const sibling = await models.Variant.create({ uid: uuid(), series_id: series.id, name: 'TST Sibling Variant 2', is_active: 1 });
+  track.variants.push(sibling.id);
+  await variant.setPlans([2]);
+  await sibling.setPlans([2]);
+
+  const ownerId = (await User.create({ uid: uuid(), name: 'TST Sib Owner', phone: `9${(Date.now() + 63) % 1000000000}` })).id;
+  track.users.push(ownerId);
+  const biz = await Business.create({ uid: uuid(), user_id: ownerId, name: 'TST Sib Biz', is_active: 1 });
+  const ownerTok = h.userTokenFor(ownerId, 'free');
+  const sub = await UserSubscription.create({
+    uid: uuid(), user_id: ownerId, plan_id: 2, sub_type: 'regular', status: 'active',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
+  });
+
+  await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
+  await sub.update({ status: 'expired' });   // entitlement gone; only the adoption remains
+
+  const adopted = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
+  assert.equal(adopted.body.data.is_locked, false, 'the adopted variant is open');
+  const other = await h.request('GET', `${P}/variants/${sibling.uid}`, { token: ownerTok });
+  assert.equal(other.body.data.is_locked, true, 'its sibling in the same series stays locked');
+});
+
+test('variant templates never surface in the public catalog (category browse + direct fetch + project)', async () => {
+  const { variant } = await makeSeriesWithVariant('Leak');
+  // a variant template that ALSO carries a public category and is not is_premium — must still be hidden
   const tpl = await Template.create({ uid: uuid(), name: 'TST Leak Tpl', content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
   track.templates.push(tpl.id);
-  await theme.setTemplates([tpl.id]);
-  await theme.setPlans([2]);
+  await variant.setTemplates([tpl.id]);
+  await variant.setPlans([2]);
 
   const browse = await h.request('GET', `${P}/templates?category_id=2`);
   assert.equal(browse.status, 200);
-  assert.ok(!browse.body.data.some((t) => t.uid === tpl.uid), 'theme template excluded from category browse');
+  assert.ok(!browse.body.data.some((t) => t.uid === tpl.uid), 'variant template excluded from category browse');
 
   const direct = await h.request('GET', `${P}/templates/${tpl.uid}`);
-  assert.equal(direct.status, 404, 'theme template hidden from the public template endpoint');
+  assert.equal(direct.status, 404, 'variant template hidden from the public template endpoint');
 
   const freeId = (await User.create({ uid: uuid(), name: 'TST Free', phone: `9${(Date.now() + 52) % 1000000000}` })).id;
   track.users.push(freeId);
   const proj = await h.request('POST', `${P}/projects`, { token: h.userTokenFor(freeId), body: { name: 'x', template_id: tpl.id, content: '{}' } });
-  assert.equal(proj.status, 403, 'non-entitled/non-adopted user cannot project a theme template');
+  assert.equal(proj.status, 403, 'non-entitled/non-adopted user cannot project a variant template');
 });
 
 // ---------- Friendly slug / uid / id catalog params ----------
@@ -445,7 +587,7 @@ test('admin template-categories reorder: guards permission, unknown ids, and mix
   track.templateCategories.push(child.id, parent.id);
 
   // 403 without the categories permission
-  const forbidden = await h.request('PATCH', `${P}/admin/template-categories/reorder`, { token: h.adminToken(['themes.*']), body: { ids: [parent.uid] } });
+  const forbidden = await h.request('PATCH', `${P}/admin/template-categories/reorder`, { token: h.adminToken(['variants.*']), body: { ids: [parent.uid] } });
   assert.equal(forbidden.status, 403);
 
   // 400 empty ids (schema)
@@ -500,7 +642,7 @@ test('import: template download returns import + reference variants', async () =
   assert.ok(/REFERENCE-ONLY/.test(String(ref.body)), 'reference file carries the sentinel');
 
   // permission gate on the template download
-  const forbidden = await h.request('GET', `${P}/admin/imports/industries/template`, { token: h.adminToken(['themes.*']) });
+  const forbidden = await h.request('GET', `${P}/admin/imports/industries/template`, { token: h.adminToken(['variants.*']) });
   assert.equal(forbidden.status, 403);
 });
 
@@ -584,28 +726,46 @@ test('import: rejects the reference/example file, and enforces permission', asyn
   assert.match(rejected.body.error.message, /reference template/i);
 
   // missing categories.create -> 403
-  const forbidden = await importCsv('industries', 'name\nX', { token: h.adminToken(['themes.*']) });
+  const forbidden = await importCsv('industries', 'name\nX', { token: h.adminToken(['variants.*']) });
   assert.equal(forbidden.status, 403);
 });
 
-test('import themes: upserts themes and auto-creates the theme group', async () => {
+test('import variants: upserts variants and auto-creates the brand series', async () => {
   const stamp = Date.now();
-  const groupName = `IMP Group ${stamp}`;
+  const seriesName = `IMP Series ${stamp}`;
   const csv = [
-    'group,name,description,display_order,is_active',
-    `${groupName},IMP Theme A ${stamp},desc a,1,1`,
-    `${groupName},IMP Theme B ${stamp},,2,1`,
+    'series,name,description,display_order,is_active',
+    `${seriesName},IMP Variant A ${stamp},desc a,1,1`,
+    `${seriesName},IMP Variant B ${stamp},,2,1`,
   ].join('\n');
-  const res = await importCsv('themes', csv, { token: h.adminToken(['themes.*']) });
+  const res = await importCsv('variants', csv, { token: h.adminToken(['variants.*']) });
   assert.equal(res.status, 200);
   assert.equal(res.body.data.summary.created, 2);
 
-  const group = await models.ThemeGroup.findOne({ where: { name: groupName } });
-  assert.ok(group, 'theme group auto-created on the fly');
-  const themes = await models.Theme.findAll({ where: { group_id: group.id } });
-  assert.equal(themes.length, 2, 'both themes linked to the new group');
-  track.themes.push(...themes.map((t) => t.id));
-  track.themeGroups.push(group.id);
+  const series = await models.BrandSeries.findOne({ where: { name: seriesName } });
+  assert.ok(series, 'brand series auto-created on the fly');
+  const variants = await models.Variant.findAll({ where: { series_id: series.id } });
+  assert.equal(variants.length, 2, 'both variants linked to the new series');
+  track.variants.push(...variants.map((v) => v.id));
+  track.brandSeries.push(series.id);
+});
+
+test('import: the pre-rename `themes` entity key still resolves to variants', async () => {
+  const stamp = Date.now();
+  const seriesName = `IMP Legacy Series ${stamp}`;
+  const csv = [
+    'series,name,description,display_order,is_active',
+    `${seriesName},IMP Legacy Variant ${stamp},via the old key,1,1`,
+  ].join('\n');
+  const res = await importCsv('themes', csv, { token: h.adminToken(['variants.*']) });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.summary.created, 1);
+
+  const series = await models.BrandSeries.findOne({ where: { name: seriesName } });
+  assert.ok(series, 'old key writes into the renamed tables');
+  const variants = await models.Variant.findAll({ where: { series_id: series.id } });
+  track.variants.push(...variants.map((v) => v.id));
+  track.brandSeries.push(series.id);
 });
 
 test('admin create auto-generates slug from name', async () => {
