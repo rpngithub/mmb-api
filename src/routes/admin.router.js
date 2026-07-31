@@ -41,9 +41,14 @@ const {
 } = require('../validators/faq.validator');
 const { createTestimonialSchema, updateTestimonialSchema } = require('../validators/testimonial.validator');
 const {
-  createThemeGroupSchema, updateThemeGroupSchema,
-  createThemeSchema, updateThemeSchema, setThemeTemplatesSchema, setThemeRelationsSchema,
-} = require('../validators/theme.validator');
+  createBrandSeriesSchema, updateBrandSeriesSchema,
+  createVariantSchema, updateVariantSchema,
+  createStylePersonalitySchema, updateStylePersonalitySchema,
+  createColorSchema, updateColorSchema,
+  createVariantBadgeSchema, updateVariantBadgeSchema,
+  setVariantTemplatesSchema, setVariantRelationsSchema, setBrandSeriesRelationsSchema,
+} = require('../validators/brandSeries.validator');
+const deprecated = require('../middlewares/deprecated');
 const {
   createAssetSchema, updateAssetSchema,
   createAssetCategorySchema, updateAssetCategorySchema, setAssetTagsSchema,
@@ -71,7 +76,9 @@ const {
  *
  *       `/admin/roles` (roles) · `/admin/templates` (templates) ·
  *       `/admin/template-categories` & `/admin/business-categories` (categories) ·
- *       `/admin/themes` & `/admin/theme-groups` (themes) · `/admin/template-sizes` (sizes) ·
+ *       `/admin/variants` & `/admin/variant-badges` (variants) ·
+ *       `/admin/brand-series`, `/admin/style-personalities` & `/admin/colors` (brand_series) ·
+ *       `/admin/template-sizes` (sizes) ·
  *       `/admin/tags` (tags) · `/admin/assets` & `/admin/asset-categories` (assets) ·
  *       `/admin/special-events` (events) · `/admin/banners` (banners) ·
  *       `/admin/faqs` & `/admin/faq-categories` (faqs) · `/admin/testimonials` (testimonials) ·
@@ -341,7 +348,8 @@ router.use('/roles', adminCrud({
  *       - { in: query, name: category_id,          schema: { type: integer } }
  *       - { in: query, name: industry_id,          schema: { type: integer }, description: "Industry (business category) id" }
  *       - { in: query, name: business_category_id, deprecated: true, schema: { type: integer }, description: "Deprecated alias of industry_id" }
- *       - { in: query, name: theme_id,             schema: { type: integer } }
+ *       - { in: query, name: variant_id,           schema: { type: integer } }
+ *       - { in: query, name: theme_id,             deprecated: true, schema: { type: integer }, description: "Deprecated alias of variant_id" }
  *       - { in: query, name: size_id,              schema: { type: integer } }
  *       - { in: query, name: tags,                 schema: { type: string }, description: Comma-separated tag ids (ANY) }
  *       - { in: query, name: template_type,        schema: { type: string, enum: [image, video, animated] } }
@@ -400,12 +408,12 @@ router.get('/templates', authenticate, authorizeAdmin('templates.read'), control
 router.post('/templates/:uid/bundle/confirm', authenticate, authorizeAdmin('templates.update'), validate(bundleConfirmSchema), controller.confirmTemplateBundle);
 router.post('/templates/:uid/bundle/reset',   authenticate, authorizeAdmin('templates.update'), controller.resetTemplateBundle);
 
-// ---- Template relations (unified M2M assignment: tags / sizes / business-categories / themes) ----
+// ---- Template relations (unified M2M assignment: tags / sizes / industries / variants) ----
 /**
  * @swagger
  * /admin/templates/{uid}/relations:
  *   get:
- *     summary: Read a template's relations (tags, sizes, themes, industries)
+ *     summary: Read a template's relations (tags, sizes, variants, industries)
  *     description: >-
  *       Industries are returned as `Industries` (matching the `industry_ids` key the PUT takes).
  *       `BusinessCategories` is returned as a deprecated duplicate of the same list.
@@ -413,7 +421,7 @@ router.post('/templates/:uid/bundle/reset',   authenticate, authorizeAdmin('temp
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
- *       200: { description: "Template with Tags, TemplateSizes, Themes, Industries (+ deprecated BusinessCategories)" }
+ *       200: { description: "Template with Tags, TemplateSizes, Variants, Industries (+ deprecated BusinessCategories)" }
  *   put:
  *     summary: Set a template's relations (any subset; each provided key is a full replace)
  *     tags: [Admin]
@@ -430,7 +438,8 @@ router.post('/templates/:uid/bundle/reset',   authenticate, authorizeAdmin('temp
  *               size_ids:              { type: array, items: { type: integer } }
  *               industry_ids:          { type: array, items: { type: integer } }
  *               business_category_ids: { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of industry_ids" }
- *               theme_ids:             { type: array, items: { type: integer } }
+ *               variant_ids:           { type: array, items: { type: integer } }
+ *               theme_ids:             { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of variant_ids" }
  *     responses:
  *       200: { description: Updated template with its relations }
  */
@@ -500,7 +509,7 @@ router.post('/uploads/multipart/complete',      authenticate, authorizeAdmin(), 
 router.post('/uploads/multipart/abort',         authenticate, authorizeAdmin(), validate(abortSchema),           uploadController.multipartAbort);
 router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), validate(confirmSchema),         uploadController.confirm);
 
-// ---- CSV bulk import (admin catalog taxonomy: industries, template-categories, themes) ----
+// ---- CSV bulk import (admin catalog taxonomy: industries, template-categories, variants) ----
 // Each entity exposes a template download (import + ?example=1 reference variant) and a
 // multipart CSV upload with a `dry_run` flag. Upload validates per row and skips bad rows,
 // returning a per-row report. Registered from the import.service entity registry so the
@@ -509,11 +518,11 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  * @swagger
  * /admin/imports/{entity}/template:
  *   get:
- *     summary: Download a CSV template for bulk import (entity = industries | template-categories | themes)
+ *     summary: Download a CSV template for bulk import (entity = industries | template-categories | variants)
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: path,  name: entity,  required: true, schema: { type: string, enum: [industries, template-categories, themes] } }
+ *       - { in: path,  name: entity,  required: true, schema: { type: string, enum: [industries, template-categories, variants] } }
  *       - { in: query, name: example, schema: { type: boolean }, description: "When true, returns the REFERENCE-ONLY example file (do not upload it)" }
  *     responses:
  *       200: { description: "CSV file (text/csv). Import template by default; reference/example file when example=1", content: { text/csv: { schema: { type: string } } } }
@@ -527,7 +536,7 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *       Set `dry_run` to validate without writing.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
- *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, themes] } }]
+ *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants] } }]
  *     requestBody:
  *       required: true
  *       content:
@@ -567,19 +576,19 @@ for (const { key, permission } of IMPORT_ENTITIES) {
  */
 router.put('/business-categories/:uid/tags', authenticate, authorizeAdmin('categories.update'), validate(setTagsSchema), controller.setBusinessCategoryTags);
 
-// ---- Theme <-> template assignment (M2M not handled by generic CRUD) ----
+// ---- Variant <-> template assignment (M2M not handled by generic CRUD) ----
 /**
  * @swagger
- * /admin/themes/{uid}/templates:
+ * /admin/variants/{uid}/templates:
  *   get:
- *     summary: List templates assigned to a theme
+ *     summary: List templates assigned to a variant
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
- *       200: { description: "Theme with its Templates (lightweight fields)" }
+ *       200: { description: "Variant with its Templates (lightweight fields)" }
  *   put:
- *     summary: Replace the templates assigned to a theme
+ *     summary: Replace the templates assigned to a variant
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -589,28 +598,29 @@ router.put('/business-categories/:uid/tags', authenticate, authorizeAdmin('categ
  *         application/json:
  *           schema: { type: object, required: [template_ids], properties: { template_ids: { type: array, items: { type: integer } } } }
  *     responses:
- *       200: { description: "Updated theme with its Templates" }
+ *       200: { description: "Updated variant with its Templates" }
  */
-router.get('/themes/:uid/templates', authenticate, authorizeAdmin('themes.read'),   controller.getThemeTemplates);
-router.put('/themes/:uid/templates', authenticate, authorizeAdmin('themes.update'), validate(setThemeTemplatesSchema), controller.setThemeTemplates);
+router.get('/variants/:uid/templates', authenticate, authorizeAdmin('variants.read'),   controller.getVariantTemplates);
+router.put('/variants/:uid/templates', authenticate, authorizeAdmin('variants.update'), validate(setVariantTemplatesSchema), controller.setVariantTemplates);
 
-// ---- Theme relations: plan entitlements (premium gating) + business categories (display/filter) ----
+// ---- Variant relations: plan entitlements (premium gating) + industries (display/filter) ----
 /**
  * @swagger
- * /admin/themes/{uid}/relations:
+ * /admin/variants/{uid}/relations:
  *   get:
- *     summary: Read a theme's relations (entitled plans, business categories)
+ *     summary: Read a variant's relations (entitled plans, industries, badge)
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
- *       200: { description: Theme with its related collections }
+ *       200: { description: Variant with its related collections }
  *   put:
- *     summary: Set a theme's relations (any subset; each provided key is a full replace)
+ *     summary: Set a variant's relations (any subset; each provided key is a full replace)
  *     description: >-
- *       plan_ids define the premium entitlement — a user may open the theme's templates only if
- *       their active subscription plan is listed. An empty array locks the theme to everyone.
- *       industry_ids are the display/filter tags shown on the theme card.
+ *       plan_ids define the premium entitlement - a user may open the variant's templates only if
+ *       their active subscription plan is listed. An empty array locks the variant to everyone.
+ *       Gating is per-VARIANT, not per-brand-series. industry_ids are the display/filter tags
+ *       shown on the variant card.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -626,10 +636,53 @@ router.put('/themes/:uid/templates', authenticate, authorizeAdmin('themes.update
  *               industry_ids:          { type: array, items: { type: integer } }
  *               business_category_ids: { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of industry_ids" }
  *     responses:
- *       200: { description: Updated theme with its relations }
+ *       200: { description: Updated variant with its relations }
  */
-router.get('/themes/:uid/relations', authenticate, authorizeAdmin('themes.read'),   controller.getThemeRelations);
-router.put('/themes/:uid/relations', authenticate, authorizeAdmin('themes.update'), validate(setThemeRelationsSchema), controller.setThemeRelations);
+router.get('/variants/:uid/relations', authenticate, authorizeAdmin('variants.read'),   controller.getVariantRelations);
+router.put('/variants/:uid/relations', authenticate, authorizeAdmin('variants.update'), validate(setVariantRelationsSchema), controller.setVariantRelations);
+
+// ---- Brand series relations: style personalities / tags / colours (descriptive only) ----
+/**
+ * @swagger
+ * /admin/brand-series/{uid}/relations:
+ *   get:
+ *     summary: Read a brand series' relations (style personalities, tags, colours)
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: Brand series with its related collections, each in display order }
+ *   put:
+ *     summary: Set a brand series' relations (any subset; each provided key is a full replace)
+ *     description: >-
+ *       Purely descriptive - none of these affect access. Style personalities and colours are
+ *       ORDERED: the array order is stored as display_order, so dragging to reorder in the admin
+ *       needs no separate endpoint. Tags are unordered and drawn from the shared tag pool.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             minProperties: 1
+ *             properties:
+ *               style_personality_ids: { type: array, items: { type: integer }, description: "Ordered" }
+ *               tag_ids:               { type: array, items: { type: integer } }
+ *               color_ids:             { type: array, items: { type: integer }, description: "Ordered" }
+ *     responses:
+ *       200: { description: Updated brand series with its relations }
+ */
+router.get('/brand-series/:uid/relations', authenticate, authorizeAdmin('brand_series.read'),   controller.getBrandSeriesRelations);
+router.put('/brand-series/:uid/relations', authenticate, authorizeAdmin('brand_series.update'), validate(setBrandSeriesRelationsSchema), controller.setBrandSeriesRelations);
+
+// Deprecated aliases (Theme -> Variant rename); excluded from Swagger on purpose.
+router.get('/themes/:uid/templates', authenticate, authorizeAdmin('variants.read'),   deprecated('/api/v1/admin/variants/{uid}/templates'), controller.getVariantTemplates);
+router.put('/themes/:uid/templates', authenticate, authorizeAdmin('variants.update'), deprecated('/api/v1/admin/variants/{uid}/templates'), validate(setVariantTemplatesSchema), controller.setVariantTemplates);
+router.get('/themes/:uid/relations', authenticate, authorizeAdmin('variants.read'),   deprecated('/api/v1/admin/variants/{uid}/relations'), controller.getVariantRelations);
+router.put('/themes/:uid/relations', authenticate, authorizeAdmin('variants.update'), deprecated('/api/v1/admin/variants/{uid}/relations'), validate(setVariantRelationsSchema), controller.setVariantRelations);
 
 // ---- Asset <-> tag assignment (M2M not handled by generic CRUD) ----
 /**
@@ -754,6 +807,8 @@ router.put('/coupons/:uid/plans', authenticate, authorizeAdmin('coupons.update')
  *       404: { description: "One or more ids not found" }
  */
 const C = (path, opts) => router.use(path, adminCrud(opts));
+// Deprecated path serving the same resource, annotated with RFC 8594 headers.
+const COld = (path, successor, opts) => router.use(path, deprecated(successor), adminCrud(opts));
 
 // `beforeWrite` is the server-side publish gate: status may only become `active`
 // once the template is complete (bundle + thumbnail + anchor + size + tag). Without
@@ -761,8 +816,16 @@ const C = (path, opts) => router.use(path, adminCrud(opts));
 C('/templates',           { model: models.Template,         resource: 'template',          permission: 'templates', unique: ['name'], createSchema: createTemplateSchema, updateSchema: updateTemplateSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => templatePublish.assertPublishable(row, payload) });
 C('/template-categories', { model: models.TemplateCategory, resource: 'template_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, reorderable: true, createSchema: createTemplateCategorySchema, updateSchema: updateTemplateCategorySchema });
 C('/business-categories', { model: models.BusinessCategory, resource: 'business_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, createSchema: createBusinessCategorySchema, updateSchema: updateBusinessCategorySchema, include: [{ model: models.Tag, through: { attributes: [] } }] });
-C('/themes',              { model: models.Theme,            resource: 'theme',            permission: 'themes', unique: ['name'], filterable: ['group_id'], createSchema: createThemeSchema, updateSchema: updateThemeSchema });
-C('/theme-groups',        { model: models.ThemeGroup,       resource: 'theme_group',      permission: 'themes', unique: ['name', 'slug'], autoSlug: true, createSchema: createThemeGroupSchema, updateSchema: updateThemeGroupSchema });
+const VARIANT_CRUD      = { model: models.Variant,     resource: 'variant',      permission: 'variants',     unique: ['name'], filterable: ['series_id', 'badge_id'], filterAlias: { group_id: 'series_id' }, createSchema: createVariantSchema, updateSchema: updateVariantSchema, include: [{ model: models.VariantBadge }] };
+const BRAND_SERIES_CRUD = { model: models.BrandSeries, resource: 'brand_series', permission: 'brand_series', unique: ['name', 'slug'], autoSlug: true, createSchema: createBrandSeriesSchema, updateSchema: updateBrandSeriesSchema };
+C('/variants',            VARIANT_CRUD);
+C('/brand-series',        BRAND_SERIES_CRUD);
+C('/style-personalities', { model: models.StylePersonality, resource: 'style_personality', permission: 'brand_series', unique: ['name', 'slug'], autoSlug: true, createSchema: createStylePersonalitySchema, updateSchema: updateStylePersonalitySchema });
+C('/colors',              { model: models.Color,            resource: 'color',             permission: 'brand_series', unique: ['name', 'slug'], autoSlug: true, createSchema: createColorSchema, updateSchema: updateColorSchema });
+C('/variant-badges',      { model: models.VariantBadge,     resource: 'variant_badge',     permission: 'variants',     unique: ['name', 'slug'], autoSlug: true, createSchema: createVariantBadgeSchema, updateSchema: updateVariantBadgeSchema });
+// Pre-rename paths, still served.
+COld('/themes',           '/api/v1/admin/variants',     VARIANT_CRUD);
+COld('/theme-groups',     '/api/v1/admin/brand-series', BRAND_SERIES_CRUD);
 C('/template-sizes',      { model: models.TemplateSize,     resource: 'template_size',    permission: 'sizes', unique: ['name', 'slug'], autoSlug: true, createSchema: createTemplateSizeSchema, updateSchema: updateTemplateSizeSchema });
 C('/tags',                { model: models.Tag,              resource: 'tag',              permission: 'tags', idField: 'id', hasUid: false, unique: ['name', 'slug'], autoSlug: true, createSchema: createTagSchema, updateSchema: updateTagSchema });
 C('/assets',              { model: models.Asset,            resource: 'asset',            permission: 'assets', filterable: ['category_id', 'asset_type', 'status'], createSchema: createAssetSchema, updateSchema: updateAssetSchema });

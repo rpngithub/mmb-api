@@ -41,23 +41,26 @@ const publicProducts = async (req, res) => {
   res.json({ success: true, data: items });
 };
 
-// ---- Adopted themes ("Add to your Business") ----
-const listThemes = async (req, res) => {
-  const items = await businessService.listAdoptedThemes(req.user.userId, req.params.uid);
+// ---- Adopted variants ("Use This Brand Series") ----
+const listVariants = async (req, res) => {
+  const items = await businessService.listAdoptedVariants(req.user.userId, req.params.uid);
   res.json({ success: true, data: items });
 };
 
-const adoptTheme = async (req, res) => {
-  const theme = await businessService.adoptTheme(req.user.userId, req.params.uid, req.body.theme_uid);
-  res.status(201).json({ success: true, data: theme });
+const adoptVariant = async (req, res) => {
+  // `variant_uid` is the current name; `theme_uid` the deprecated alias.
+  const uid     = req.body.variant_uid ?? req.body.theme_uid;
+  const variant = await businessService.adoptVariant(req.user.userId, req.params.uid, uid);
+  res.status(201).json({ success: true, data: variant });
 };
 
-const removeTheme = async (req, res) => {
-  await businessService.removeAdoptedTheme(req.user.userId, req.params.uid, req.params.themeUid);
+const removeVariant = async (req, res) => {
+  const uid = req.params.variantUid ?? req.params.themeUid;
+  await businessService.removeAdoptedVariant(req.user.userId, req.params.uid, uid);
   res.json({ success: true, data: null });
 };
 
 module.exports = {
   create, list, getOne, update, remove, nearby, publicProfile, publicProducts,
-  listThemes, adoptTheme, removeTheme,
+  listVariants, adoptVariant, removeVariant,
 };

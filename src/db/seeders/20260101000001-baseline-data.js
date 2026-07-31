@@ -13,7 +13,7 @@ module.exports = {
     await queryInterface.bulkInsert('roles', [
       { id: 1, uid: uuid(), name: 'super_admin', description: 'Full access', permissions: JSON.stringify(['*']), is_system: 1 },
       { id: 2, uid: uuid(), name: 'content_admin', description: 'Manages catalog content',
-        permissions: JSON.stringify(['templates.*', 'categories.*', 'themes.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*']), is_system: 1 },
+        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*']), is_system: 1 },
     ]);
 
     // --- admin user ---

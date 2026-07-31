@@ -22,7 +22,13 @@ module.exports = {
   BusinessCategoryTag:  { skip: true },
   TemplateTag:          { skip: true },
   TemplateSizeMap:      { skip: true },
-  ThemeTemplate:        { skip: true },
+  VariantTemplate:      { skip: true },
+  VariantPlanRestriction: { skip: true },
+  VariantIndustry:      { skip: true },
+  BusinessVariant:      { skip: true },
+  BrandSeriesStylePersonality: { skip: true },
+  BrandSeriesTag:       { skip: true },
+  BrandSeriesColor:     { skip: true },
   TemplateBusinessCategory: { skip: true },
   AssetTag:             { skip: true },
   SpecialEventTemplate: { skip: true },
@@ -47,8 +53,25 @@ module.exports = {
     },
   },
 
-  // Theme detail carries a computed lock flag (premium templates are plan-gated).
-  Theme: { add: { is_locked: { type: 'boolean' } } },
+  // Variant detail carries a computed lock flag (premium templates are plan-gated) and
+  // the template tally shown on its card.
+  Variant: {
+    add: {
+      is_locked:       { type: 'boolean' },
+      templates_count: { type: 'integer' },
+    },
+  },
+
+  // A brand series' lock state is a ROLLUP of its variants — gating itself lives on the
+  // variant. `is_locked` is true only when every variant in the series is locked.
+  BrandSeries: {
+    add: {
+      is_locked:               { type: 'boolean' },
+      variants_count:          { type: 'integer' },
+      templates_count:         { type: 'integer', description: 'Distinct active templates across all variants' },
+      unlocked_variants_count: { type: 'integer' },
+    },
+  },
 
   // Coupons: the user-facing shape is deliberately narrow — the redemption rules
   // (usage counters, audience, plan scope) are enforced server-side and must not
