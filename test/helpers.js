@@ -38,7 +38,7 @@ function request(method, path, { token, body, headers = {} } = {}) {
       res.on('end', () => {
         let parsed = null;
         try { parsed = buf ? JSON.parse(buf) : null; } catch { parsed = buf; }
-        resolve({ status: res.statusCode, body: parsed });
+        resolve({ status: res.statusCode, headers: res.headers, body: parsed });
       });
     });
     req.on('error', reject);
