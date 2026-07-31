@@ -28,6 +28,8 @@ const setTemplateRelationsSchema = Joi.object({
   // `industry_ids` is the public name; `business_category_ids` is the deprecated alias.
   industry_ids:          Joi.array().items(Joi.number().integer()).optional(),
   business_category_ids: Joi.array().items(Joi.number().integer()).optional(),
+  // `variant_ids` is the current name; `theme_ids` is the deprecated alias.
+  variant_ids:           Joi.array().items(Joi.number().integer()).optional(),
   theme_ids:             Joi.array().items(Joi.number().integer()).optional(),
 }).min(1);
 

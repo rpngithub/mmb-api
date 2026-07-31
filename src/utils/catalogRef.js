@@ -34,7 +34,7 @@ async function resolveRef(model, ref, { hasUid = true } = {}) {
   return row ? row.id : NOT_FOUND;
 }
 
-// List variant for multi-value filters (e.g. tags). Accepts "a,b,c", ["a","b"],
+// List form for multi-value filters (e.g. tags). Accepts "a,b,c", ["a","b"],
 // or a single value; resolves each ref and returns a de-duped array of positive
 // integer ids. Unresolved refs are dropped (a bad tag just narrows the match set
 // by one — it should not empty the whole result the way a bad anchor does).
@@ -49,8 +49,10 @@ async function resolveRefList(model, refs, opts = {}) {
   return [...ids];
 }
 
-// Picks the caller-facing value: the new friendly param when present, otherwise
-// the legacy `*_id` param. Lets every endpoint accept both while preferring new.
-const pick = (friendly, legacy) => (friendly !== undefined && friendly !== '' ? friendly : legacy);
+// Picks the caller-facing value: the first param that was actually supplied, in
+// preference order. Lets an endpoint accept the friendly name, its legacy `*_id`
+// form, and any renamed-away aliases at once while preferring the newest.
+// e.g. pick(series, series_id, group, group_id)
+const pick = (...values) => values.find((v) => v !== undefined && v !== '');
 
 module.exports = { resolveRef, resolveRefList, pick, NOT_FOUND };

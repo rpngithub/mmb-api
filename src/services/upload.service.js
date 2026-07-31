@@ -11,7 +11,10 @@ const IMAGE_SLOTS = {
   business_category_thumbnail: 'categories/business/thumbnail',
   template_category_icon:      'categories/template/icon',
   template_category_thumbnail: 'categories/template/thumbnail',
-  theme_thumbnail:             'themes/thumbnail',
+  brand_series_icon:           'brand-series/icon',
+  variant_thumbnail:           'variants/thumbnail',
+  variant_badge_icon:          'variants/badge-icon',
+  theme_thumbnail:             'variants/thumbnail',   // deprecated alias of variant_thumbnail
   special_event_thumbnail:     'events/thumbnail',
   special_event_banner:        'events/banner',
   banner:                      'banners',
@@ -20,7 +23,9 @@ const IMAGE_SLOTS = {
 const ASSET_TYPES = ['icon', 'emoji', 'shape', 'font', 'audio', 'video', 'animated', 'bg'];
 
 // Any final key must live under one of these roots (re-validated on multipart complete/abort).
-const ALLOWED_ROOTS = ['categories/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/'];
+// 'themes/' is retained deliberately: thumbnails uploaded before the Brand Series rename
+// still live there, and their stored keys must keep validating on re-save.
+const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/'];
 
 const bad = (field, message) => new ValidationError('Validation failed', [{ field, message }]);
 
