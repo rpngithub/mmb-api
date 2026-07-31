@@ -11,6 +11,7 @@ module.exports = (sequelize) => {
     Tag.belongsToMany(models.BusinessCategory, { through: models.BusinessCategoryTag, foreignKey: 'tag_id' });
     Tag.belongsToMany(models.Template,         { through: models.TemplateTag,         foreignKey: 'tag_id' });
     Tag.belongsToMany(models.Asset,            { through: models.AssetTag,            foreignKey: 'tag_id' });
+    Tag.belongsToMany(models.BrandSeries,      { through: models.BrandSeriesTag,      foreignKey: 'tag_id', otherKey: 'brand_series_id' });
   };
 
   return Tag;

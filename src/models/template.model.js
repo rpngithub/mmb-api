@@ -23,7 +23,7 @@ module.exports = (sequelize) => {
     Template.belongsTo(models.AdminUser,        { foreignKey: 'created_by', as: 'creator' });
     Template.belongsToMany(models.Tag,          { through: models.TemplateTag,              foreignKey: 'template_id' });
     Template.belongsToMany(models.TemplateSize, { through: models.TemplateSizeMap,          foreignKey: 'template_id' });
-    Template.belongsToMany(models.Theme,        { through: models.ThemeTemplate,            foreignKey: 'template_id' });
+    Template.belongsToMany(models.Variant,      { through: models.VariantTemplate,          foreignKey: 'template_id', otherKey: 'variant_id' });
     // otherKey must be explicit: BusinessCategory has no reverse belongsToMany(Template), so
     // Sequelize would otherwise default the join key to `BusinessCategoryId` (the actual column
     // is `business_category_id`) and break the join.
