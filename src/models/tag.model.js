@@ -1,0 +1,17 @@
+const { DataTypes } = require('sequelize');
+
+module.exports = (sequelize) => {
+  const Tag = sequelize.define('Tag', {
+    id:   { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    name: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+    slug: { type: DataTypes.STRING(120), allowNull: true, unique: true },
+  }, { tableName: 'tags', updatedAt: false });
+
+  Tag.associate = (models) => {
+    Tag.belongsToMany(models.BusinessCategory, { through: models.BusinessCategoryTag, foreignKey: 'tag_id' });
+    Tag.belongsToMany(models.Template,         { through: models.TemplateTag,         foreignKey: 'tag_id' });
+    Tag.belongsToMany(models.Asset,            { through: models.AssetTag,            foreignKey: 'tag_id' });
+  };
+
+  return Tag;
+};

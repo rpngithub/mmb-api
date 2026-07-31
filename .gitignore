@@ -1,0 +1,24 @@
+node_modules/
+dist/
+logs/
+*.log
+
+# env files — only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# Local-only folders
+docs/
+postman/
+scripts/
+
+# DB dumps
+*.sql
+
+# Scratch output
+test_out.txt
+
+# OS
+.DS_Store
+Thumbs.db
