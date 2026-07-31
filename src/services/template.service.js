@@ -1,15 +1,17 @@
 const { Op, literal } = require('sequelize');
 const templateRepo = require('../repositories/template.repository');
 const activityRepo = require('../repositories/activityLog.repository');
-const themeAccess  = require('./themeAccess.service');
+const variantAccess = require('./variantAccess.service');
 const { TemplateCategory, BusinessCategory, TemplateSize, Tag } = require('../models');
 const { resolveRef, resolveRefList, pick } = require('../utils/catalogRef');
 const { NotFoundError, ValidationError } = require('../errors');
 
-// Templates that belong to any theme are premium theme content — they must never
-// surface in the public catalog (browse or direct fetch), even via a category anchor.
-const NOT_A_THEME_MEMBER = literal(
-  'NOT EXISTS (SELECT 1 FROM `theme_templates` tt WHERE tt.template_id = `Template`.`id`)',
+// Templates that belong to any variant are premium Brand Series content — they must
+// never surface in the public catalog (browse or direct fetch), even via a category
+// anchor. Locked variant templates ARE now listed, but only on the variant detail
+// endpoint, which shows them as upsell teasers with the design payload stripped.
+const NOT_A_VARIANT_MEMBER = literal(
+  'NOT EXISTS (SELECT 1 FROM `variant_templates` vt WHERE vt.template_id = `Template`.`id`)',
 );
 
 const DEFAULT_LIMIT = 30;
@@ -73,9 +75,9 @@ async function listTemplates(filters = {}, viewer = null) {
 
   // Public browse must be anchored: we never dump the full catalog. At least one
   // of template category / industry must be SUPPLIED (a ref that fails to resolve
-  // is still an anchor — it just yields an empty page, not a 400). theme_id is
-  // intentionally NOT accepted here — a theme's templates are premium and
-  // plan-gated, served only via the entitlement-checked GET /themes/{uid}.
+  // is still an anchor — it just yields an empty page, not a 400). variant_id is
+  // intentionally NOT accepted here — a variant's templates are premium and
+  // plan-gated, served only via the entitlement-checked GET /variants/{uid}.
   if (categoryRef === undefined && industryRef === undefined) {
     throw new ValidationError(
       'At least one of category or industry is required',
@@ -93,8 +95,8 @@ async function listTemplates(filters = {}, viewer = null) {
   if (filters.is_premium !== undefined) where.is_premium = toPosInt(filters.is_premium) ? 1 : 0;
 
   // Cross-table membership filters (business category / post size / tags).
-  // Always exclude theme templates from public browse (premium, plan-gated).
-  const membership = [NOT_A_THEME_MEMBER];
+  // Always exclude variant templates from public browse (premium, plan-gated).
+  const membership = [NOT_A_VARIANT_MEMBER];
   if (businessCategoryId !== undefined) membership.push(existsIn('template_business_categories', 'business_category_id', [businessCategoryId]));
   if (sizeId !== undefined)             membership.push(existsIn('template_size_map',            'size_id',              [sizeId]));
   if (tagIds.length)                    membership.push(existsIn('template_tags',                'tag_id',               tagIds));
@@ -125,11 +127,11 @@ async function getTemplate(uid, viewer = null) {
   const tpl = await templateRepo.findOne({ uid, status: 'active' });
   if (!tpl) throw new NotFoundError('Template not found');
 
-  // A theme template is premium, plan-gated content and is not part of the public
+  // A variant template is premium, plan-gated content and is not part of the public
   // catalog: hide it entirely (404) unless the viewer is entitled or has adopted it.
-  // When they may access it, the theme gate supersedes is_premium → full content.
-  const access = await themeAccess.canAccessTemplate(tpl.id, viewer);
-  if (access.themeGated && !access.allowed) throw new NotFoundError('Template not found');
+  // When they may access it, the variant gate supersedes is_premium → full content.
+  const access = await variantAccess.canAccessTemplate(tpl.id, viewer);
+  if (access.variantGated && !access.allowed) throw new NotFoundError('Template not found');
 
   await templateRepo.incrementCounter(tpl.id, 'views_count');
   if (viewer?.userId) {
@@ -142,7 +144,7 @@ async function getTemplate(uid, viewer = null) {
     });
   }
 
-  const locked = !access.themeGated && Boolean(tpl.is_premium) && !isPaidViewer(viewer);
+  const locked = !access.variantGated && Boolean(tpl.is_premium) && !isPaidViewer(viewer);
   const data   = tpl.toJSON();
   data.is_locked = locked;
   if (locked) delete data.content; // withhold editable content until upgrade
@@ -165,11 +167,12 @@ async function listTemplatesForAdmin(filters = {}) {
   const membership = [];
   // `industry_id` is the public name; `business_category_id` the deprecated alias.
   const businessCategoryId = toPosInt(filters.industry_id ?? filters.business_category_id);
-  const themeId            = toPosInt(filters.theme_id);
+  // `variant_id` is the current name; `theme_id` the deprecated alias.
+  const variantId          = toPosInt(filters.variant_id ?? filters.theme_id);
   const sizeId             = toPosInt(filters.size_id);
   const tagIds             = toPosIntList(filters.tags);
   if (businessCategoryId) membership.push(existsIn('template_business_categories', 'business_category_id', [businessCategoryId]));
-  if (themeId)            membership.push(existsIn('theme_templates',              'theme_id',             [themeId]));
+  if (variantId)          membership.push(existsIn('variant_templates',            'variant_id',           [variantId]));
   if (sizeId)             membership.push(existsIn('template_size_map',            'size_id',              [sizeId]));
   if (tagIds.length)      membership.push(existsIn('template_tags',                'tag_id',               tagIds));
   if (membership.length) where[Op.and] = membership;

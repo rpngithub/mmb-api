@@ -32,9 +32,11 @@ const createBusinessSchema = Joi.object({
 
 const updateBusinessSchema = createBusinessSchema.fork(Object.keys(createBusinessSchema.describe().keys), (s) => s.optional());
 
-// "Add to your Business": adopt a theme (identified by its public uid) into a business.
-const adoptThemeSchema = Joi.object({
-  theme_uid: Joi.string().guid().required(),
-});
+// "Use This Brand Series": adopt a variant (identified by its public uid) into a
+// business. `variant_uid` is the current name; `theme_uid` is the deprecated alias.
+const adoptVariantSchema = Joi.object({
+  variant_uid: Joi.string().guid().optional(),
+  theme_uid:   Joi.string().guid().optional(),
+}).or('variant_uid', 'theme_uid');
 
-module.exports = { createBusinessSchema, updateBusinessSchema, adoptThemeSchema };
+module.exports = { createBusinessSchema, updateBusinessSchema, adoptVariantSchema };

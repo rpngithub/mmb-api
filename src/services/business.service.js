@@ -1,8 +1,8 @@
 const { v4: uuid }    = require('uuid');
 const businessRepo    = require('../repositories/business.repository');
 const productRepo     = require('../repositories/product.repository');
-const themeAccess     = require('./themeAccess.service');
-const { Theme, Plan, Template, BusinessCategory, BusinessTheme } = require('../models');
+const variantAccess   = require('./variantAccess.service');
+const { Variant, VariantBadge, Plan, Template, BusinessCategory, BusinessVariant } = require('../models');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const { NotFoundError, ForbiddenError, ValidationError } = require('../errors');
 
@@ -109,17 +109,20 @@ async function getPublicProducts(uid) {
   return productRepo.findByBusiness(biz.id);
 }
 
-// ---- "Add to your Business" — business-scoped theme adoption ----
+// ---- "Add to your Business" — business-scoped variant adoption ----
+// The button reads "Use This Brand Series", but the grant is per-VARIANT: gating lives
+// on the variant, so adopting one does not unlock its siblings in the same series.
 
 // Lightweight template cards for the adopted collection (never the heavy `content`).
 const ADOPTED_TEMPLATE_ATTRS = ['id', 'uid', 'name', 'thumbnail_s3_key', 'template_type', 'status'];
 
-function loadThemesWithTemplates(where) {
-  return Theme.findAll({
+function loadVariantsWithTemplates(where) {
+  return Variant.findAll({
     where,
     include: [
       { model: Template,         through: { attributes: [] }, attributes: ADOPTED_TEMPLATE_ATTRS, where: { status: 'active' }, required: false },
       { model: BusinessCategory, through: { attributes: [] }, attributes: ['id', 'uid', 'slug', 'name'] },
+      { model: VariantBadge,     attributes: ['id', 'uid', 'slug', 'name', 'icon_s3_key'] },
     ],
     order: [['display_order', 'ASC'], ['name', 'ASC']],
   });
@@ -133,42 +136,42 @@ async function ownedBusiness(uid, userId) {
   return biz;
 }
 
-// Adopt a theme into a business. Requires the owner's ACTIVE plan to entitle the theme
-// (adoption itself never grants adoption). Idempotent: re-adopting is a no-op.
-async function adoptTheme(userId, businessUid, themeUid) {
-  const biz   = await ownedBusiness(businessUid, userId);
-  const theme = await Theme.findOne({
-    where: { uid: themeUid, is_active: 1 },
+// Adopt a variant into a business. Requires the owner's ACTIVE plan to entitle the
+// variant (adoption itself never grants adoption). Idempotent: re-adopting is a no-op.
+async function adoptVariant(userId, businessUid, variantUid) {
+  const biz     = await ownedBusiness(businessUid, userId);
+  const variant = await Variant.findOne({
+    where: { uid: variantUid, is_active: 1 },
     include: [{ model: Plan, attributes: ['id'], through: { attributes: [] } }],
   });
-  if (!theme) throw new NotFoundError('Theme not found');
+  if (!variant) throw new NotFoundError('Variant not found');
 
-  const allowedPlanIds = (theme.Plans || []).map((p) => p.id);
-  if (!(await themeAccess.isPlanEntitled(allowedPlanIds, { userId }))) {
-    throw new ForbiddenError('Your plan does not include this theme');
+  const allowedPlanIds = (variant.Plans || []).map((p) => p.id);
+  if (!(await variantAccess.isPlanEntitled(allowedPlanIds, { userId }))) {
+    throw new ForbiddenError('Your plan does not include this variant');
   }
 
-  await BusinessTheme.findOrCreate({ where: { business_id: biz.id, theme_id: theme.id } });
-  const [shaped] = await loadThemesWithTemplates({ id: theme.id });
+  await BusinessVariant.findOrCreate({ where: { business_id: biz.id, variant_id: variant.id } });
+  const [shaped] = await loadVariantsWithTemplates({ id: variant.id });
   return shaped;
 }
 
-async function listAdoptedThemes(userId, businessUid) {
+async function listAdoptedVariants(userId, businessUid) {
   const biz   = await ownedBusiness(businessUid, userId);
-  const links = await BusinessTheme.findAll({ where: { business_id: biz.id }, attributes: ['theme_id'] });
+  const links = await BusinessVariant.findAll({ where: { business_id: biz.id }, attributes: ['variant_id'] });
   if (!links.length) return [];
-  return loadThemesWithTemplates({ id: links.map((l) => l.theme_id) });
+  return loadVariantsWithTemplates({ id: links.map((l) => l.variant_id) });
 }
 
-async function removeAdoptedTheme(userId, businessUid, themeUid) {
-  const biz   = await ownedBusiness(businessUid, userId);
-  const theme = await Theme.findOne({ where: { uid: themeUid } });
-  if (!theme) throw new NotFoundError('Theme not found');
-  await BusinessTheme.destroy({ where: { business_id: biz.id, theme_id: theme.id } });
+async function removeAdoptedVariant(userId, businessUid, variantUid) {
+  const biz     = await ownedBusiness(businessUid, userId);
+  const variant = await Variant.findOne({ where: { uid: variantUid } });
+  if (!variant) throw new NotFoundError('Variant not found');
+  await BusinessVariant.destroy({ where: { business_id: biz.id, variant_id: variant.id } });
 }
 
 module.exports = {
   createBusiness, getMyBusinesses, getBusiness, updateBusiness, deleteBusiness,
   listNearby, getPublicProfile, getPublicProducts,
-  adoptTheme, listAdoptedThemes, removeAdoptedTheme,
+  adoptVariant, listAdoptedVariants, removeAdoptedVariant,
 };

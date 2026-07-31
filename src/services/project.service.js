@@ -2,7 +2,7 @@ const { v4: uuid }   = require('uuid');
 const projectRepo    = require('../repositories/project.repository');
 const businessRepo   = require('../repositories/business.repository');
 const templateRepo   = require('../repositories/template.repository');
-const themeAccess    = require('./themeAccess.service');
+const variantAccess  = require('./variantAccess.service');
 const { TemplateSize } = require('../models');
 const { NotFoundError, ForbiddenError, ValidationError } = require('../errors');
 
@@ -18,12 +18,12 @@ async function validateProjectRefs(userId, data) {
   if (data.template_id !== undefined) {
     const tpl = await templateRepo.findById(data.template_id);
     if (!tpl || tpl.status !== 'active') throw new ValidationError('Invalid template_id');
-    // A theme template may only be turned into a project by a user who can access it
-    // (entitled or has adopted a theme containing it) — otherwise premium theme
+    // A variant template may only be turned into a project by a user who can access it
+    // (entitled or has adopted a variant containing it) — otherwise premium variant
     // content would leak into a free user's projects.
-    const access = await themeAccess.canAccessTemplate(data.template_id, { userId });
-    if (access.themeGated && !access.allowed) {
-      throw new ForbiddenError('This template requires an active subscription or an adopted theme');
+    const access = await variantAccess.canAccessTemplate(data.template_id, { userId });
+    if (access.variantGated && !access.allowed) {
+      throw new ForbiddenError('This template requires an active subscription or an adopted variant');
     }
   }
   if (data.size_id !== undefined) {

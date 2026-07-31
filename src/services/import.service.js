@@ -8,7 +8,7 @@ const {
   createBusinessCategorySchema, updateBusinessCategorySchema,
   createTemplateCategorySchema, updateTemplateCategorySchema,
 } = require('../validators/category.validator');
-const { createThemeSchema, updateThemeSchema } = require('../validators/theme.validator');
+const { createVariantSchema, updateVariantSchema } = require('../validators/brandSeries.validator');
 
 const { sequelize } = models;
 
@@ -78,38 +78,44 @@ const ENTITIES = {
     ],
   },
 
-  themes: {
-    label: 'Themes',
-    entityType: 'theme',
-    permission: 'themes',
-    model: () => models.Theme,
-    createSchema: createThemeSchema,
-    updateSchema: updateThemeSchema,
+  variants: {
+    label: 'Variants',
+    entityType: 'variant',
+    permission: 'variants',
+    model: () => models.Variant,
+    createSchema: createVariantSchema,
+    updateSchema: updateVariantSchema,
     hasUid: true,
     autoSlug: false,
-    groupColumn: 'group',
-    groupModel: () => models.ThemeGroup,
+    groupColumn: 'series',
+    groupModel: () => models.BrandSeries,
+    groupIdField: 'series_id',
     tags: false,
-    columns: ['group', 'name', 'description', 'display_order', 'is_active'],
+    columns: ['series', 'name', 'description', 'display_order', 'is_active'],
     intColumns: ['display_order'],
     boolColumns: ['is_active'],
     textColumns: ['description'],
     help: [
-      '# Themes import. Lines starting with # are ignored.',
-      '# group (required): theme-group name or slug — created automatically if it does not exist.',
-      '# name (required): unique across all themes. is_active: 1 or 0.',
+      '# Variants import. Lines starting with # are ignored.',
+      '# series (required): brand series name or slug — created automatically if it does not exist.',
+      '# name (required): unique across all variants. is_active: 1 or 0.',
+      '# Industries, plan entitlements and the badge are set from the admin UI, not this file.',
     ],
     example: [
-      ['Minimal', 'Clean Slate', 'A minimal light theme', '1', '1'],
-      ['Minimal', 'Bold Dark', 'High-contrast dark theme', '2', '1'],
+      ['Lemon Buzz', 'Lemon Buzz-01', 'Fresh and energetic', '1', '1'],
+      ['Lemon Buzz', 'Lemon Buzz-02', 'Bright citrus palette', '2', '1'],
     ],
   },
 };
 
+// Deprecated entity key -> current key. Keeps /admin/imports/themes working for
+// clients (and saved CSV workflows) written before the Brand Series rename.
+const ENTITY_ALIASES = { themes: 'variants' };
+
 const REFERENCE_SENTINEL = 'REFERENCE-ONLY';
 
 function getEntity(key) {
-  const cfg = ENTITIES[key];
+  const cfg = ENTITIES[ENTITY_ALIASES[key] || key];
   if (!cfg) throw new ValidationError(`Unknown import entity: ${key}`);
   return cfg;
 }
@@ -141,7 +147,7 @@ function buildTemplate(key, { example = false } = {}) {
 function buildPayload(cfg, values, { parentId, groupId }) {
   const payload = { name: (values.name || '').trim() };
   if (cfg.parentColumn && parentId != null) payload.parent_id = parentId;
-  if (cfg.groupModel) payload.group_id = groupId;
+  if (cfg.groupModel) payload[cfg.groupIdField || 'group_id'] = groupId;
 
   for (const col of cfg.intColumns) {
     const raw = (values[col] || '').trim();
@@ -222,10 +228,10 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
     return undefined;
   };
 
-  // Resolve (upserting if needed) a theme's group; throws if the cell is blank.
+  // Resolve (upserting if needed) a variant's brand series; throws if the cell is blank.
   const resolveGroup = async (values) => {
     const gname = (values[cfg.groupColumn] || '').trim();
-    if (!gname) throw new Error('group is required');
+    if (!gname) throw new Error(`${cfg.groupColumn} is required`);
     const glc = gname.toLowerCase();
     if (groupCache.has(glc)) return groupCache.get(glc);
 
@@ -341,6 +347,9 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
   return { entity: key, dry_run: dryRun, summary, rows: report };
 }
 
-const IMPORT_ENTITIES = Object.entries(ENTITIES).map(([key, cfg]) => ({ key, permission: cfg.permission }));
+const IMPORT_ENTITIES = [
+  ...Object.entries(ENTITIES).map(([key, cfg]) => ({ key, permission: cfg.permission, deprecated: false })),
+  ...Object.entries(ENTITY_ALIASES).map(([key, target]) => ({ key, permission: ENTITIES[target].permission, deprecated: true })),
+];
 
-module.exports = { runImport, buildTemplate, IMPORT_ENTITIES, ENTITY_KEYS: Object.keys(ENTITIES) };
+module.exports = { runImport, buildTemplate, IMPORT_ENTITIES, ENTITY_ALIASES, ENTITY_KEYS: Object.keys(ENTITIES) };
