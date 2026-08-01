@@ -29,7 +29,13 @@ class PlanRepository extends BaseRepository {
       where: { status: 'active', plan_type },
       include: [
         { model: PlanBillingOption, where: billingWhere, required: !!billing_option_type },
-        { model: PlanFeature, where: { show_on_card: 1 }, required: false, include: [{ model: FeatureType }] },
+        // Only what the card line needs — the service reshapes these into
+        // `features` (utils/planFeatures); ids and reset_period are not card data.
+        {
+          model: PlanFeature, where: { show_on_card: 1 }, required: false,
+          attributes: ['id', 'plan_id', 'feature_type_id', 'value', 'display_label', 'display_order'],
+          include: [{ model: FeatureType, attributes: ['id', 'key', 'label', 'data_type'] }],
+        },
         {
           model: Coupon, as: 'coupons', required: false, through: { attributes: [] },
           attributes: PUBLIC_COUPON_ATTRS,

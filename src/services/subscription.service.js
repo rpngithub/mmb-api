@@ -5,6 +5,7 @@ const subRepo           = require('../repositories/userSubscription.repository')
 const couponRepo        = require('../repositories/coupon.repository');
 const paymentRepo       = require('../repositories/payment.repository');
 const quotaRepo         = require('../repositories/userQuotaUsage.repository');
+const catalogService    = require('./catalog.service');
 const {
   createOrder, createSubscription, verifyWebhookSignature, verifyPaymentSignature,
 } = require('../utils/razorpayHelper');
@@ -32,8 +33,10 @@ function withGst(amountBeforeTax) {
   return { gstAmount, totalAmount };
 }
 
+// The deprecated /subscriptions/plans alias. Delegates so it can never drift
+// from the canonical /plans shape (card-ready `features`, merged coupons).
 async function listPlans() {
-  return planRepo.findAllActive();
+  return catalogService.listPlans();
 }
 
 // Every redemption rule the coupon row declares, in one place so the "check"

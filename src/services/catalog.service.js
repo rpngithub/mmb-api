@@ -8,6 +8,7 @@ const planRepo      = require('../repositories/plan.repository');
 const couponRepo    = require('../repositories/coupon.repository');
 const variantAccess = require('./variantAccess.service');
 const { resolveRef, pick } = require('../utils/catalogRef');
+const { toCardFeatures }   = require('../utils/planFeatures');
 const { NotFoundError } = require('../errors');
 
 // Industry "pill" tags shown on a variant card (display/filter attribute).
@@ -74,15 +75,26 @@ async function templateCounts(seriesIds, variantIds) {
 
 // `parent` accepts a slug / uid / legacy int id (or 'null' for top-level); the
 // legacy `parent_id` param is still honoured when `parent` is absent.
-async function listBusinessCategories({ parent, parent_id } = {}) {
+// Two shape switches, both taking any value (`=1` by convention):
+//   tree      — the whole active forest nested parent→child, any depth
+//   hierarchy — only the top-level industries (no parent), flat
+// `tree` wins if both are sent, and either one ignores `parent`/`parent_id`
+// since the shape already decides which rows come back.
+async function listBusinessCategories({ parent, parent_id, tree, hierarchy } = {}) {
   const where = { is_active: 1 };
+  const order = [['display_order', 'ASC'], ['name', 'ASC']];
+
+  if (tree !== undefined)      return buildCategoryTree(await BusinessCategory.findAll({ where, order }));
+  if (hierarchy !== undefined) return BusinessCategory.findAll({ where: { ...where, parent_id: null }, order });
+
   const resolved = await resolveRef(BusinessCategory, pick(parent, parent_id));
   if (resolved !== undefined) where.parent_id = resolved;
-  return BusinessCategory.findAll({ where, order: [['display_order', 'ASC'], ['name', 'ASC']] });
+  return BusinessCategory.findAll({ where, order });
 }
 
 // Assemble a display-order-sorted flat list of self-referential categories into a
-// parent→child forest. Each node gains a `children` array (recursive, any depth).
+// parent→child forest. Shared by industries and template categories. Each node
+// gains a `children` array (recursive, any depth).
 // Rows arrive already sorted by display_order ASC, so both roots and every
 // children[] preserve that order. A node whose parent is absent from the set
 // (e.g. filtered out by `homepage`) is surfaced as a root so nothing is dropped.
@@ -330,7 +342,9 @@ function listBanners(viewer = null) {
 // + billing-options + card-feature shaping. Filters: plan_type (default
 // 'subscription') and billing_option_type (monthly|annual). Each plan carries a
 // `coupons` array — specific-plan coupons come from the join, all-plans coupons
-// are merged in here (they have no restriction rows).
+// are merged in here (they have no restriction rows) — and a `features` array,
+// which replaces the raw `PlanFeatures` join rows with the card-ready shape (see
+// utils/planFeatures): a label that is never null, plus an on/off flag.
 async function listPlans({ plan_type, billing_option_type } = {}) {
   const filters = {
     plan_type:           ['subscription', 'access_pass'].includes(plan_type) ? plan_type : 'subscription',
@@ -347,6 +361,8 @@ async function listPlans({ plan_type, billing_option_type } = {}) {
     const specific = plain.coupons || [];
     const seen     = new Set(specific.map((c) => c.uid));
     plain.coupons  = [...specific, ...globalCoupons.filter((c) => !seen.has(c.uid))];
+    plain.features = toCardFeatures(plain.PlanFeatures);
+    delete plain.PlanFeatures;
     return plain;
   });
 }
