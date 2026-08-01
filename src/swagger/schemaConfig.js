@@ -83,6 +83,33 @@ module.exports = {
     },
   },
 
+  // The public pricing card. `features` is NOT the raw plan_features join — the
+  // service flattens each row into a renderable line (see utils/planFeatures), so
+  // `display_label` is always populated and `enabled` says tick vs greyed-out.
+  Plan: {
+    add: {
+      PlanBillingOptions: { type: 'array', items: { $ref: '#/components/schemas/PlanBillingOption' } },
+      coupons:            { type: 'array', items: { $ref: '#/components/schemas/CouponPublic' } },
+      features: {
+        type: 'array',
+        description: 'Card-visible features (show_on_card=1), ordered by display_order',
+        items: {
+          type: 'object',
+          properties: {
+            key:           { type: 'string', example: 'ai_bg_remover', description: 'Stable FeatureType key — use this for icons/logic, never the label' },
+            label:         { type: 'string', example: 'AI BG remover credits', description: 'Raw feature name, without the quantity' },
+            display_label: { type: 'string', example: '500 AI BG remover credits', description: 'Ready-to-render line, never null. The admin override when set, otherwise derived from value + label' },
+            value:         { type: 'integer', example: 500, description: '-1 = unlimited, 0 = not included in this plan' },
+            data_type:     { type: 'string', enum: ['integer', 'boolean'] },
+            enabled:       { type: 'boolean', description: 'false when the plan does not include the feature (boolean 0 / integer 0) — render the row greyed out' },
+            unlimited:     { type: 'boolean', description: 'true when value is -1' },
+            display_order: { type: 'integer' },
+          },
+        },
+      },
+    },
+  },
+
   // Hide payment gateway internals from the user-facing payment shape.
   Payment: { exclude: ['razorpay_order_id'] },
 

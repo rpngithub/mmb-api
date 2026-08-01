@@ -26,14 +26,30 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *     description: >-
  *       The public "industry" catalogue. Same data and params as the deprecated
  *       `/business-categories` alias — new clients should call `/industries`.
+ *       Flat by default; `tree=1` nests the whole hierarchy and `hierarchy=1`
+ *       returns only the top-level industries.
  *     tags: [Catalog]
  *     security: []
  *     parameters:
+ *       - in: query
+ *         name: tree
+ *         description: >-
+ *           When set (`tree=1`), returns the full active hierarchy nested parent→child —
+ *           each row gains a `children` array (recursive, any depth), every level ordered
+ *           by display_order. Overrides `hierarchy` and ignores `parent`/`parent_id`.
+ *         schema: { type: string }
+ *       - in: query
+ *         name: hierarchy
+ *         description: >-
+ *           When set (`hierarchy=1`), returns only top-level industries (those with no
+ *           parent) as a flat list, without their children. Ignores `parent`/`parent_id`.
+ *         schema: { type: string }
  *       - in: query
  *         name: parent
  *         description: >-
  *           Filter by parent industry — accepts a slug (e.g. `restaurant-food`),
  *           a uid, or a numeric id. Use `null` for top-level industries.
+ *           Ignored when `tree` or `hierarchy` is set.
  *         schema: { type: string }
  *       - in: query
  *         name: parent_id
@@ -42,7 +58,7 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *         schema: { type: string }
  *     responses:
  *       200:
- *         description: Array of industries
+ *         description: Array of industries — nested (each with `children`) when `tree` is set, otherwise flat
  *         content: { application/json: { schema: { $ref: '#/components/schemas/BusinessCategoryListResponse' } } }
  * /business-categories:
  *   get:
@@ -52,6 +68,14 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *     tags: [Catalog]
  *     security: []
  *     parameters:
+ *       - in: query
+ *         name: tree
+ *         description: "As on `/industries` — full hierarchy nested parent→child."
+ *         schema: { type: string }
+ *       - in: query
+ *         name: hierarchy
+ *         description: "As on `/industries` — only top-level rows, flat."
+ *         schema: { type: string }
  *       - in: query
  *         name: parent
  *         description: "Filter by parent — slug, uid, or numeric id ('null' for top-level)."
@@ -365,9 +389,13 @@ router.get('/special-events', controller.specialEvents);
  *   get:
  *     summary: List active plans (public pricing)
  *     description: >-
- *       Active plans ordered by display_order, each with active billing options, card-visible
- *       features, trial_days, and a `coupons` array (active+valid coupons applicable to the plan).
- *       Subject to the public tiered rate limit.
+ *       Active plans ordered by display_order, each with active billing options, trial_days,
+ *       a `coupons` array (active+valid coupons applicable to the plan), and a `features` array
+ *       for the pricing card. Each feature is pre-rendered: `display_label` is never null (the
+ *       admin override when set, otherwise derived — "500 AI BG remover credits",
+ *       "Unlimited downloads", or the plain label for booleans) and `enabled` is false when the
+ *       plan does not include it, which is the greyed-out row on the card. Features are ordered
+ *       by display_order. Subject to the public tiered rate limit.
  *     tags: [Catalog]
  *     security: []
  *     parameters:

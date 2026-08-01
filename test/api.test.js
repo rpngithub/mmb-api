@@ -60,6 +60,77 @@ test('GET /subscriptions/plans lists plans with billing options', async () => {
   assert.ok(r.body.data.find((p) => p.name === 'Pro'));
 });
 
+// The pricing card renders `display_label` verbatim, so it must never be null —
+// most plan_features rows leave the admin override blank and rely on derivation.
+test('GET /plans returns card-ready features: display_label never null, enabled flag set', async () => {
+  const pro = await models.Plan.findOne({ where: { name: 'Pro' } });
+  const mkType = (key, label, data_type) =>
+    models.FeatureType.create({ key: `tst_${key}_${Date.now()}`, label, data_type, reset_period: 'never' });
+
+  // Four rows with NO display_label, one per derivation branch.
+  const [bOn, bOff, iCount, iZero, hidden] = await Promise.all([
+    mkType('bon',    'WhatsApp Stickers',     'boolean'),
+    mkType('boff',   'Monthly SM Calender',   'boolean'),
+    mkType('icnt',   'AI BG remover credits', 'integer'),
+    mkType('izero',  'SM Themes',             'integer'),
+    mkType('hidden', 'Internal Only',         'integer'),
+  ]);
+  const rows = await models.PlanFeature.bulkCreate([
+    { plan_id: pro.id, feature_type_id: bOn.id,    value: 1,   display_order: 11, show_on_card: 1 },
+    { plan_id: pro.id, feature_type_id: bOff.id,   value: 0,   display_order: 12, show_on_card: 1 },
+    { plan_id: pro.id, feature_type_id: iCount.id, value: 500, display_order: 13, show_on_card: 1 },
+    { plan_id: pro.id, feature_type_id: iZero.id,  value: 0,   display_order: 14, show_on_card: 1 },
+    // show_on_card=0 stays off the card entirely
+    { plan_id: pro.id, feature_type_id: hidden.id, value: 99,  display_order: 15, show_on_card: 0 },
+  ]);
+
+  try {
+    const r = await h.request('GET', `${P}/plans`);
+    assert.equal(r.status, 200);
+    const plan = r.body.data.find((p) => p.name === 'Pro');
+
+    assert.equal(plan.PlanFeatures, undefined, 'raw join rows are not exposed');
+    assert.ok(Array.isArray(plan.features));
+    assert.ok(plan.features.every((f) => typeof f.display_label === 'string' && f.display_label.length),
+      'every feature carries a renderable label');
+    assert.deepEqual(
+      plan.features.map((f) => f.display_order),
+      [...plan.features.map((f) => f.display_order)].sort((a, b) => a - b),
+      'ordered by display_order',
+    );
+
+    const by = (label) => plan.features.find((f) => f.label === label);
+    // the seeded row keeps its explicit override
+    assert.equal(by('Downloads').display_label, 'Unlimited downloads');
+    assert.equal(by('Downloads').unlimited, true);
+
+    assert.deepEqual(
+      { display_label: by('WhatsApp Stickers').display_label, enabled: by('WhatsApp Stickers').enabled },
+      { display_label: 'WhatsApp Stickers', enabled: true },
+    );
+    assert.deepEqual(
+      { display_label: by('Monthly SM Calender').display_label, enabled: by('Monthly SM Calender').enabled },
+      { display_label: 'Monthly SM Calender', enabled: false },
+    );
+    assert.deepEqual(
+      { display_label: by('AI BG remover credits').display_label, enabled: by('AI BG remover credits').enabled },
+      { display_label: '500 AI BG remover credits', enabled: true },
+    );
+    assert.deepEqual(
+      { display_label: by('SM Themes').display_label, enabled: by('SM Themes').enabled },
+      { display_label: 'SM Themes', enabled: false },
+    );
+
+    assert.equal(by('Internal Only'), undefined, 'show_on_card=0 is excluded');
+    // internal join columns stay server-side
+    assert.deepEqual(Object.keys(by('SM Themes')).sort(),
+      ['data_type', 'display_label', 'display_order', 'enabled', 'key', 'label', 'unlimited', 'value']);
+  } finally {
+    await models.PlanFeature.destroy({ where: { id: rows.map((x) => x.id) } });
+    await models.FeatureType.destroy({ where: { id: [bOn.id, bOff.id, iCount.id, iZero.id, hidden.id] } });
+  }
+});
+
 // ---------- Auth ----------
 test('OTP login: send-otp then verify-otp issues tokens with free tier', async () => {
   const phone = `9${Date.now() % 1000000000}`;
@@ -510,6 +581,40 @@ test('business-categories expose slug and filter by parent slug/uid/id', async (
   const byId   = await h.request('GET', `${P}/business-categories?parent_id=${restaurant.id}`);
   assert.ok(bySlug.body.data.some((c) => c.uid === child.uid), 'child found via parent slug');
   assert.ok(byId.body.data.some((c) => c.uid === child.uid),   'child found via legacy parent_id');
+});
+
+test('industries?tree nests parent→child; ?hierarchy returns top-level only', async () => {
+  const stamp = Date.now();
+  // root → mid → two leaves (display_order 2 created before 1, to prove sorting)
+  const root  = await models.BusinessCategory.create({ uid: uuid(), parent_id: null,   name: `TST IRoot ${stamp}`,  slug: `tst-iroot-${stamp}`,  display_order: 0, is_active: 1 });
+  const mid   = await models.BusinessCategory.create({ uid: uuid(), parent_id: root.id, name: `TST IMid ${stamp}`,   slug: `tst-imid-${stamp}`,   display_order: 0, is_active: 1 });
+  const leafB = await models.BusinessCategory.create({ uid: uuid(), parent_id: mid.id,  name: `TST ILeafB ${stamp}`, slug: `tst-ileafb-${stamp}`, display_order: 2, is_active: 1 });
+  const leafA = await models.BusinessCategory.create({ uid: uuid(), parent_id: mid.id,  name: `TST ILeafA ${stamp}`, slug: `tst-ileafa-${stamp}`, display_order: 1, is_active: 1 });
+  track.businessCategories.push(leafA.id, leafB.id, mid.id, root.id); // children before parents for FK-safe teardown
+
+  const tree = await h.request('GET', `${P}/industries?tree=1`);
+  assert.equal(tree.status, 200);
+  const rootNode = tree.body.data.find((c) => c.uid === root.uid);
+  assert.ok(rootNode, 'root present at top level');
+  const midNode = rootNode.children[0];
+  assert.equal(midNode.uid, mid.uid, 'mid nested under root');
+  assert.deepEqual(midNode.children.map((c) => c.uid), [leafA.uid, leafB.uid], 'leaves ordered by display_order ASC');
+  assert.ok(!tree.body.data.some((c) => c.uid === mid.uid || c.uid === leafA.uid), 'nested nodes not surfaced as roots');
+
+  const top = await h.request('GET', `${P}/industries?hierarchy=1`);
+  assert.equal(top.status, 200);
+  assert.ok(top.body.data.some((c) => c.uid === root.uid), 'top-level industry present');
+  assert.ok(!top.body.data.some((c) => c.uid === mid.uid || c.uid === leafA.uid), 'children excluded');
+  assert.ok(top.body.data.every((c) => c.parent_id === null), 'every row is a root');
+  assert.ok(top.body.data.every((c) => c.children === undefined), 'flat — no children arrays');
+
+  // the shape switches win over the flat parent filter, and tree wins over hierarchy
+  const both = await h.request('GET', `${P}/industries?tree=1&hierarchy=1&parent=${mid.uid}`);
+  assert.ok(both.body.data.find((c) => c.uid === root.uid)?.children.length, 'tree takes precedence');
+
+  // the deprecated alias behaves identically
+  const alias = await h.request('GET', `${P}/business-categories?hierarchy=1`);
+  assert.ok(alias.body.data.every((c) => c.parent_id === null), 'alias honours hierarchy');
 });
 
 test('template-categories expose slug and filter by parent slug/uid/id (+ homepage)', async () => {
