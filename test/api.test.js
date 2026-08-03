@@ -740,6 +740,8 @@ test('import: template download returns import + reference variants', async () =
   const imp = await h.request('GET', `${P}/admin/imports/industries/template`, { token });
   assert.equal(imp.status, 200);
   assert.ok(String(imp.body).includes('name,parent,slug'), 'import template has the header row');
+  assert.ok(String(imp.body).includes('icon_s3_key,thumbnail_s3_key'), 'image columns are in the header');
+  assert.match(String(imp.body), /icon_s3_key -> categories\/business\/icon\//, 'help spells out the expected S3 prefix');
   assert.ok(!/REFERENCE-ONLY/.test(String(imp.body)), 'import template is not the reference file');
 
   const ref = await h.request('GET', `${P}/admin/imports/industries/template?example=1`, { token });
@@ -835,6 +837,122 @@ test('import: rejects the reference/example file, and enforces permission', asyn
   assert.equal(forbidden.status, 403);
 });
 
+// Image (S3 key) columns. `objectExists`/`putObjectTagging` are stubbed so the
+// suite never talks to S3: the fake bucket holds exactly the keys in `present`,
+// and every tag write is recorded on `tagged` for assertions.
+async function withS3Objects(present, fn) {
+  const s3 = require('../src/utils/s3Helper');
+  const original = { objectExists: s3.objectExists, putObjectTagging: s3.putObjectTagging };
+  const tagged = [];
+  s3.objectExists = async (key) => (
+    Object.prototype.hasOwnProperty.call(present, key)
+      ? { exists: true, content_type: 'image/png', size: 1024, ...present[key] }
+      : { exists: false }
+  );
+  s3.putObjectTagging = async (key, status) => { tagged.push([key, status]); };
+  try { return { result: await fn(), tagged }; } finally { Object.assign(s3, original); }
+}
+
+test('import industries: stores image keys, and reports bad ones as warnings without skipping', async () => {
+  const stamp = Date.now();
+  const good = `IMP Img ${stamp}`;
+  const bad  = `IMP BadImg ${stamp}`;
+  const dup  = `IMP DupImg ${stamp}`;
+  const iconKey  = `categories/business/icon/imp-${stamp}.png`;
+  const thumbKey = `categories/business/thumbnail/imp-${stamp}.png`;
+  const csv = [
+    'name,parent,slug,icon_s3_key,thumbnail_s3_key,display_order,is_active,tags',
+    // a full console URL must be trimmed down to the bare key
+    `${good},,,https://test-bucket.s3.ap-south-1.amazonaws.com/${iconKey},${thumbKey},1,1,`,
+    // wrong prefix + not an image extension + missing from the bucket -> 3 warnings, still imported
+    `${bad},,,categories/template/icon/wrong-${stamp}.pdf,,2,1,`,
+    // same icon as the first row -> reuse warning
+    `${dup},,,${iconKey},,3,1,`,
+  ].join('\n');
+
+  const { result: res, tagged } = await withS3Objects(
+    { [iconKey]: {}, [thumbKey]: {} },
+    () => importCsv('industries', csv, { token: h.adminToken(['categories.*']) }),
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.summary.created, 3, 'image problems never skip a row');
+  assert.equal(res.body.data.summary.skipped, 0);
+
+  const rows = res.body.data.rows;
+  assert.deepEqual(rows.find((r) => r.name === good).warnings, [], 'clean row carries no warnings');
+  const badWarnings = rows.find((r) => r.name === bad).warnings.join(' | ');
+  assert.match(badWarnings, /expected a key under 'categories\/business\/icon\/'/);
+  assert.match(badWarnings, /not an image type/);
+  assert.match(badWarnings, /no such object in S3/);
+  assert.match(rows.find((r) => r.name === dup).warnings.join(' | '), /also used on line/);
+  assert.equal(res.body.data.summary.warnings, 2);
+
+  const saved = await models.BusinessCategory.findOne({ where: { name: good } });
+  assert.equal(saved.icon_s3_key, iconKey, 'pasted URL normalized to the bare key');
+  assert.equal(saved.thumbnail_s3_key, thumbKey);
+
+  // every image now referenced by a record is flipped to status=active; the key
+  // that does not exist in the bucket is not tagged (it would only 404)
+  assert.deepEqual(
+    tagged.map(([k]) => k).sort(),
+    [iconKey, thumbKey].sort(),
+    'live images tagged active, missing one skipped',
+  );
+  assert.ok(tagged.every(([, status]) => status === 'active'));
+
+  const created = await models.BusinessCategory.findAll({ where: { name: [good, bad, dup] } });
+  track.businessCategories.push(...created.map((c) => c.id));
+
+  // blank leaves the stored image alone; NONE clears it
+  const again = [
+    'name,parent,slug,icon_s3_key,thumbnail_s3_key,display_order,is_active,tags',
+    `${good},,,,NONE,1,1,`,
+  ].join('\n');
+  const { result: res2 } = await withS3Objects({ [iconKey]: {} }, () => importCsv('industries', again, { token: h.adminToken(['categories.*']) }));
+  assert.equal(res2.body.data.summary.updated, 1);
+  await saved.reload();
+  assert.equal(saved.icon_s3_key, iconKey, 'blank cell keeps the existing image');
+  assert.equal(saved.thumbnail_s3_key, null, 'NONE clears the image');
+});
+
+test('import: an unverifiable bucket degrades to shape checks with a note', async () => {
+  const s3 = require('../src/utils/s3Helper');
+  const original = { objectExists: s3.objectExists, putObjectTagging: s3.putObjectTagging };
+  s3.objectExists = async () => null;               // "could not check"
+  s3.putObjectTagging = async () => { throw new Error('no bucket'); };
+  const stamp = Date.now();
+  const name = `IMP NoBucket ${stamp}`;
+  const csv = [
+    'name,parent,slug,icon_s3_key,thumbnail_s3_key,display_order,is_active,tags',
+    `${name},,,categories/business/icon/nb-${stamp}.png,,1,1,`,
+  ].join('\n');
+  try {
+    const res = await importCsv('industries', csv, { token: h.adminToken(['categories.*']) });
+    assert.equal(res.body.data.summary.created, 1, 'row still imports');
+    assert.deepEqual(res.body.data.rows[0].warnings, [], 'no missing-object warning when the check is inconclusive');
+    const notes = res.body.data.notes.join(' ');
+    assert.match(notes, /could not be verified/);
+    assert.match(notes, /could not be tagged status=active/, 'a failing tag write is a note, not an error');
+  } finally { Object.assign(s3, original); }
+  const row = await models.BusinessCategory.findOne({ where: { name } });
+  if (row) track.businessCategories.push(row.id);
+});
+
+test('import: a dry run writes no S3 tags', async () => {
+  const stamp = Date.now();
+  const iconKey = `categories/business/icon/dry-${stamp}.png`;
+  const csv = [
+    'name,parent,slug,icon_s3_key,thumbnail_s3_key,display_order,is_active,tags',
+    `IMP DryImg ${stamp},,,${iconKey},,1,1,`,
+  ].join('\n');
+  const { result: res, tagged } = await withS3Objects(
+    { [iconKey]: {} },
+    () => importCsv('industries', csv, { token: h.adminToken(['categories.*']), dryRun: true }),
+  );
+  assert.equal(res.body.data.summary.created, 1);
+  assert.deepEqual(tagged, [], 'dry run touches nothing in S3');
+});
+
 test('import variants: upserts variants and auto-creates the brand series', async () => {
   const stamp = Date.now();
   const seriesName = `IMP Series ${stamp}`;
@@ -853,6 +971,39 @@ test('import variants: upserts variants and auto-creates the brand series', asyn
   assert.equal(variants.length, 2, 'both variants linked to the new series');
   track.variants.push(...variants.map((v) => v.id));
   track.brandSeries.push(series.id);
+});
+
+test('import variants: series_icon_s3_key sets the new series icon but never overwrites one', async () => {
+  const token = h.adminToken(['variants.*']);
+  const stamp = Date.now();
+  const seriesName = `IMP IconSeries ${stamp}`;
+  const iconA = `brand-series/icon/a-${stamp}.svg`;
+  const iconB = `brand-series/icon/b-${stamp}.svg`;
+  const thumb = `variants/thumbnail/v-${stamp}.png`;
+  const present = { [iconA]: {}, [iconB]: {}, [thumb]: {} };
+
+  const csv = (icon) => [
+    'series,series_icon_s3_key,name,description,thumbnail_s3_key,display_order,is_active',
+    `${seriesName},${icon},IMP IconVariant ${stamp},,${thumb},1,1`,
+  ].join('\n');
+
+  const { result: res, tagged } = await withS3Objects(present, () => importCsv('variants', csv(iconA), { token }));
+  assert.equal(res.body.data.summary.created, 1);
+  assert.deepEqual(tagged.map(([k]) => k).sort(), [iconA, thumb].sort(), 'series icon and variant thumbnail both tagged active');
+  const series = await models.BrandSeries.findOne({ where: { name: seriesName } });
+  assert.equal(series.icon_s3_key, iconA, 'icon applied when the series is created');
+  const variant = await models.Variant.findOne({ where: { series_id: series.id } });
+  assert.equal(variant.thumbnail_s3_key, thumb);
+  track.variants.push(variant.id);
+  track.brandSeries.push(series.id);
+
+  // a later file pointing the same series at a different icon warns and changes nothing
+  const { result: res2, tagged: tagged2 } = await withS3Objects(present, () => importCsv('variants', csv(iconB), { token }));
+  assert.equal(res2.body.data.summary.updated, 1);
+  assert.match(res2.body.data.rows[0].warnings.join(' | '), /already has an icon/);
+  assert.ok(!tagged2.some(([k]) => k === iconB), 'an icon that was not applied is not tagged');
+  await series.reload();
+  assert.equal(series.icon_s3_key, iconA, 'existing series icon left alone');
 });
 
 test('import: the pre-rename `themes` entity key still resolves to variants', async () => {
@@ -905,6 +1056,123 @@ test('industry is the public alias for business_category (templates filter, /ind
   // unknown industry -> clean 400
   const bad = await h.request('POST', `${P}/businesses`, { token: h.userTokenFor(uId), body: { name: 'TST Ind Bad', industry: 'no-such-industry' } });
   assert.equal(bad.status, 400);
+});
+
+// ---------- Related industries (SEO cross-links) ----------
+// Builds a small fixture: `anchor` is the landing page being curated, and it links
+// out to two active industries plus one that has been deactivated.
+const makeIndustry = async (label, stamp, { is_active = 1 } = {}) => {
+  const row = await models.BusinessCategory.create({
+    uid: uuid(), parent_id: null, name: `TST ${label} ${stamp}`, slug: `tst-${label.toLowerCase()}-${stamp}`, display_order: 0, is_active,
+  });
+  track.businessCategories.push(row.id);
+  return row;
+};
+
+test('admin related industries: ordered full replace, self-link and unknown id rejected', async () => {
+  const stamp  = Date.now();
+  const token  = h.adminToken(['categories.*']);
+  const anchor = await makeIndustry('RelAnchor', stamp);
+  const relA   = await makeIndustry('RelA', stamp);
+  const relB   = await makeIndustry('RelB', stamp);
+
+  const url = `${P}/admin/business-categories/${anchor.uid}/related`;
+
+  // empty to start
+  const before = await h.request('GET', url, { token });
+  assert.equal(before.status, 200);
+  assert.deepEqual(before.body.data.RelatedIndustries, [], 'no cross-links curated yet');
+
+  // array order becomes display_order
+  const set = await h.request('PUT', url, { token, body: { related_industry_ids: [relB.id, relA.id] } });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.body.data.RelatedIndustries.map((r) => r.uid), [relB.uid, relA.uid], 'curated order round-trips');
+  assert.ok(set.body.data.RelatedIndustries.every((r) => r.BusinessCategoryRelated === undefined), 'join payload stripped');
+
+  // re-sending the same ids in a new order is how a drag-and-drop reorder lands
+  const reordered = await h.request('PUT', url, { token, body: { related_industry_ids: [relA.id, relB.id] } });
+  assert.deepEqual(reordered.body.data.RelatedIndustries.map((r) => r.uid), [relA.uid, relB.uid], 'reorder applied');
+
+  // ONE-WAY: relA did not gain a link back to the anchor
+  const reverse = await h.request('GET', `${P}/admin/business-categories/${relA.uid}/related`, { token });
+  assert.deepEqual(reverse.body.data.RelatedIndustries, [], 'relation is not reciprocal');
+
+  // guard rails
+  const self = await h.request('PUT', url, { token, body: { related_industry_ids: [anchor.id] } });
+  assert.equal(self.status, 400, 'an industry cannot be related to itself');
+  const unknown = await h.request('PUT', url, { token, body: { related_industry_ids: [relA.id, 999999] } });
+  assert.equal(unknown.status, 404, 'unknown id rejects the whole batch');
+  const dupes = await h.request('PUT', url, { token, body: { related_industry_ids: [relA.id, relA.id] } });
+  assert.equal(dupes.status, 400, 'duplicate ids rejected');
+
+  // the batch that failed changed nothing
+  const after = await h.request('GET', url, { token });
+  assert.deepEqual(after.body.data.RelatedIndustries.map((r) => r.uid), [relA.uid, relB.uid], 'rejected writes left the block intact');
+
+  // deprecated alias key, and empty array clears the block
+  const alias = await h.request('PUT', url, { token, body: { related_category_ids: [relB.id] } });
+  assert.deepEqual(alias.body.data.RelatedIndustries.map((r) => r.uid), [relB.uid], 'related_category_ids alias accepted');
+  const cleared = await h.request('PUT', url, { token, body: { related_industry_ids: [] } });
+  assert.deepEqual(cleared.body.data.RelatedIndustries, [], 'empty array clears the block');
+
+  // permissions: categories.read cannot write
+  const forbidden = await h.request('PUT', url, { token: h.adminToken(['categories.read']), body: { related_industry_ids: [relA.id] } });
+  assert.equal(forbidden.status, 403);
+
+  await models.BusinessCategoryRelated.destroy({ where: { category_id: anchor.id } });
+});
+
+test('catalogue exposes related industries via /industries/{ref} and ?with_related', async () => {
+  const stamp  = Date.now() + 1;
+  const token  = h.adminToken(['categories.*']);
+  const anchor = await makeIndustry('SeoAnchor', stamp);
+  const relA   = await makeIndustry('SeoA', stamp);
+  const relB   = await makeIndustry('SeoB', stamp);
+  const dark   = await makeIndustry('SeoDark', stamp, { is_active: 0 });
+
+  await h.request('PUT', `${P}/admin/business-categories/${anchor.uid}/related`, {
+    token, body: { related_industry_ids: [relB.id, dark.id, relA.id] },
+  });
+
+  // detail endpoint — public, resolves by slug, always carries the block
+  const bySlug = await h.request('GET', `${P}/industries/${anchor.slug}`);
+  assert.equal(bySlug.status, 200);
+  assert.equal(bySlug.body.data.uid, anchor.uid);
+  assert.deepEqual(bySlug.body.data.RelatedIndustries.map((r) => r.uid), [relB.uid, relA.uid], 'curated order kept, inactive link dropped');
+
+  // uid and legacy numeric id resolve to the same industry
+  for (const ref of [anchor.uid, anchor.id]) {
+    const r = await h.request('GET', `${P}/industries/${ref}`);
+    assert.equal(r.body.data.uid, anchor.uid, `resolved by ${ref === anchor.id ? 'id' : 'uid'}`);
+  }
+
+  assert.equal((await h.request('GET', `${P}/industries/no-such-industry`)).status, 404);
+  assert.equal((await h.request('GET', `${P}/industries/${dark.slug}`)).status, 404, 'inactive industry is not addressable');
+
+  // list endpoint — opt-in, and absent by default
+  const plain = await h.request('GET', `${P}/industries`);
+  assert.ok(plain.body.data.every((c) => c.RelatedIndustries === undefined), 'lean by default');
+
+  const withRelated = await h.request('GET', `${P}/industries?with_related=1`);
+  assert.equal(withRelated.status, 200);
+  const row = withRelated.body.data.find((c) => c.uid === anchor.uid);
+  assert.deepEqual(row.RelatedIndustries.map((r) => r.uid), [relB.uid, relA.uid], 'block attached to the list row');
+  assert.ok(withRelated.body.data.some((c) => c.uid === relA.uid && c.RelatedIndustries.length === 0), 'industries with no links still returned');
+
+  // combines with the shape switches
+  const tree = await h.request('GET', `${P}/industries?tree=1&with_related=1`);
+  const treeNode = tree.body.data.find((c) => c.uid === anchor.uid);
+  assert.deepEqual(treeNode.RelatedIndustries.map((r) => r.uid), [relB.uid, relA.uid], 'tree nodes carry the block');
+  assert.ok(Array.isArray(treeNode.children), 'tree shape preserved');
+
+  const top = await h.request('GET', `${P}/industries?hierarchy=1&with_related=1`);
+  assert.ok(top.body.data.find((c) => c.uid === anchor.uid).RelatedIndustries.length === 2, 'hierarchy rows carry the block');
+
+  // the deprecated list alias honours it too
+  const alias = await h.request('GET', `${P}/business-categories?with_related=1`);
+  assert.ok(alias.body.data.find((c) => c.uid === anchor.uid).RelatedIndustries.length === 2, 'alias honours with_related');
+
+  await models.BusinessCategoryRelated.destroy({ where: { category_id: anchor.id } });
 });
 
 test('public /assets filters by category slug/uid/id and tag slug (anchor required)', async () => {

@@ -14,6 +14,7 @@ const modelFiles = [
   'businessCategory.model',
   'tag.model',
   'businessCategoryTag.model',
+  'businessCategoryRelated.model',
   'product.model',
   'productImage.model',
   'templateCategory.model',

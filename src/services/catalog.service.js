@@ -73,6 +73,28 @@ async function templateCounts(seriesIds, variantIds) {
 
 // All reads are public-facing: only active/published rows, ordered for display.
 
+// SEO cross-links for an industry landing page. LEFT JOIN (`required: false`) so an
+// industry with no curated links still comes back, and `is_active: 1` so a
+// deactivated industry can never be linked to from a public page.
+const relatedIndustryInclude = {
+  model: BusinessCategory,
+  as: 'RelatedIndustries',
+  attributes: ['id', 'uid', 'slug', 'name', 'icon_s3_key', 'thumbnail_s3_key'],
+  through: { attributes: ['display_order'] },
+  where: { is_active: 1 },
+  required: false,
+};
+
+// Apply the editor's curated order and drop the join payload. Same reason as the
+// brand-series collections: Sequelize can't ORDER BY a through column on an include.
+function sortRelatedIndustries(plain) {
+  if (!Array.isArray(plain.RelatedIndustries)) return plain;
+  plain.RelatedIndustries = plain.RelatedIndustries
+    .sort((a, b) => (a.BusinessCategoryRelated?.display_order ?? 0) - (b.BusinessCategoryRelated?.display_order ?? 0))
+    .map(({ BusinessCategoryRelated: _drop, ...rest }) => rest);
+  return plain;
+}
+
 // `parent` accepts a slug / uid / legacy int id (or 'null' for top-level); the
 // legacy `parent_id` param is still honoured when `parent` is absent.
 // Two shape switches, both taking any value (`=1` by convention):
@@ -80,16 +102,41 @@ async function templateCounts(seriesIds, variantIds) {
 //   hierarchy — only the top-level industries (no parent), flat
 // `tree` wins if both are sent, and either one ignores `parent`/`parent_id`
 // since the shape already decides which rows come back.
-async function listBusinessCategories({ parent, parent_id, tree, hierarchy } = {}) {
+// `with_related` (any value) additionally attaches each row's curated
+// `RelatedIndustries` block. Opt-in because it's dead weight for the pickers and
+// menus that make up most calls — only SEO landing pages need it.
+async function listBusinessCategories({ parent, parent_id, tree, hierarchy, with_related } = {}) {
   const where = { is_active: 1 };
   const order = [['display_order', 'ASC'], ['name', 'ASC']];
+  const withRelated = with_related !== undefined;
+  const opts = { where, order, ...(withRelated ? { include: [relatedIndustryInclude] } : {}) };
 
-  if (tree !== undefined)      return buildCategoryTree(await BusinessCategory.findAll({ where, order }));
-  if (hierarchy !== undefined) return BusinessCategory.findAll({ where: { ...where, parent_id: null }, order });
+  // With the include the rows must become plain objects anyway (to sort/strip the
+  // join payload), so `shape` handles both the flat and the nested case.
+  const shape = (rows) => (withRelated ? rows.map((r) => sortRelatedIndustries(r.toJSON())) : rows);
+
+  if (tree !== undefined)      return buildCategoryTree(await BusinessCategory.findAll(opts), withRelated ? sortRelatedIndustries : undefined);
+  if (hierarchy !== undefined) return shape(await BusinessCategory.findAll({ ...opts, where: { ...where, parent_id: null } }));
 
   const resolved = await resolveRef(BusinessCategory, pick(parent, parent_id));
   if (resolved !== undefined) where.parent_id = resolved;
-  return BusinessCategory.findAll({ where, order });
+  return shape(await BusinessCategory.findAll(opts));
+}
+
+// One industry by slug / uid / legacy int id, with its curated SEO cross-links —
+// the single fetch behind an industry landing page. Always carries
+// `RelatedIndustries` (that's the point of the endpoint); inactive industries are
+// invisible here exactly as they are in the list.
+async function getIndustryDetail(ref) {
+  const id = await resolveRef(BusinessCategory, ref);
+  if (!id) throw new NotFoundError('industry not found');   // undefined / 'null' / unresolved
+
+  const row = await BusinessCategory.findOne({
+    where: { id, is_active: 1 },
+    include: [relatedIndustryInclude],
+  });
+  if (!row) throw new NotFoundError('industry not found');
+  return sortRelatedIndustries(row.toJSON());
 }
 
 // Assemble a display-order-sorted flat list of self-referential categories into a
@@ -98,8 +145,10 @@ async function listBusinessCategories({ parent, parent_id, tree, hierarchy } = {
 // Rows arrive already sorted by display_order ASC, so both roots and every
 // children[] preserve that order. A node whose parent is absent from the set
 // (e.g. filtered out by `homepage`) is surfaced as a root so nothing is dropped.
-function buildCategoryTree(rows) {
-  const nodes = new Map(rows.map((r) => [r.id, { ...r.toJSON(), children: [] }]));
+// `transform` post-processes each node after toJSON (industries use it to order
+// and clean up an included RelatedIndustries block).
+function buildCategoryTree(rows, transform = (o) => o) {
+  const nodes = new Map(rows.map((r) => [r.id, { ...transform(r.toJSON()), children: [] }]));
   const roots = [];
   for (const row of rows) {
     const parent = row.parent_id != null ? nodes.get(row.parent_id) : null;
@@ -368,7 +417,7 @@ async function listPlans({ plan_type, billing_option_type } = {}) {
 }
 
 module.exports = {
-  listBusinessCategories, listTemplateCategories, listAssetCategories, listTags, listTemplateSizes,
+  listBusinessCategories, getIndustryDetail, listTemplateCategories, listAssetCategories, listTags, listTemplateSizes,
   listBrandSeries, listVariants, getVariantDetail, listFaqCategories, listFaqs, listTestimonials,
   listBanners, listPlans,
 };

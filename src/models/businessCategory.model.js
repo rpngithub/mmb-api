@@ -18,6 +18,15 @@ module.exports = (sequelize) => {
     BusinessCategory.hasMany(BusinessCategory,     { as: 'children', foreignKey: 'parent_id' });
     BusinessCategory.hasMany(models.Business,      { foreignKey: 'category_id' });
     BusinessCategory.belongsToMany(models.Tag,     { through: models.BusinessCategoryTag, foreignKey: 'category_id' });
+    // SEO cross-links, curated per industry and ORDERED by the join row's
+    // display_order. Directional: this is "industries THIS page links to", which
+    // is not the same set as the industries that link back here.
+    BusinessCategory.belongsToMany(BusinessCategory, {
+      as: 'RelatedIndustries',
+      through: models.BusinessCategoryRelated,
+      foreignKey: 'category_id',
+      otherKey: 'related_category_id',
+    });
   };
 
   return BusinessCategory;

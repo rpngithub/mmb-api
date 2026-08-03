@@ -25,7 +25,7 @@ const {
 const {
   createTemplateCategorySchema, updateTemplateCategorySchema,
   createBusinessCategorySchema, updateBusinessCategorySchema,
-  createTagSchema, updateTagSchema, setTagsSchema,
+  createTagSchema, updateTagSchema, setTagsSchema, setRelatedIndustriesSchema,
 } = require('../validators/category.validator');
 const {
   presignSchema, multipartInitiateSchema, presignPartsSchema,
@@ -534,6 +534,11 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *       Rows are upserted by `name` (case-insensitive). Parent categories are resolved from a
  *       name/slug column across the file. Uploading the reference/example file is rejected.
  *       Set `dry_run` to validate without writing.
+ *       Image columns (`icon_s3_key`, `thumbnail_s3_key`, `series_icon_s3_key`) take an S3 key
+ *       for a file the editor has already uploaded — a full URL is accepted and trimmed to the
+ *       key. Blank keeps the current image, `NONE` clears it. Key checks (prefix, extension,
+ *       reuse, and an S3 existence probe) are ADVISORY: the row still imports and every problem
+ *       is listed in `rows[].warnings`.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants] } }]
@@ -548,7 +553,7 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *               file:    { type: string, format: binary, description: "The CSV file" }
  *               dry_run: { type: string, description: "1/true to validate only (no writes)" }
  *     responses:
- *       200: { description: "{ entity, dry_run, summary: { total, created, updated, skipped }, rows: [{ line, name, status, message }] }" }
+ *       200: { description: "{ entity, dry_run, summary: { total, created, updated, skipped, warnings }, notes: [string], rows: [{ line, name, status, message, warnings }] }" }
  *       400: { description: "Empty file, missing required column, or the reference template was uploaded" }
  *       403: { description: Missing <permission>.create }
  */
@@ -575,6 +580,50 @@ for (const { key, permission } of IMPORT_ENTITIES) {
  *       200: { description: Updated business category with its tags }
  */
 router.put('/business-categories/:uid/tags', authenticate, authorizeAdmin('categories.update'), validate(setTagsSchema), controller.setBusinessCategoryTags);
+
+// ---- Related industries: the SEO cross-link block (ordered M2M; full replace) ----
+/**
+ * @swagger
+ * /admin/business-categories/{uid}/related:
+ *   get:
+ *     summary: Read an industry's related industries (SEO cross-link block)
+ *     description: >-
+ *       Returns the curated block in the editor's order. Unlike the public catalogue
+ *       this includes INACTIVE industries (with `is_active`), so a link that has gone
+ *       dark is visible in the admin form instead of silently vanishing.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: "The industry with its ordered `RelatedIndustries`" }
+ *       404: { description: Unknown industry }
+ *   put:
+ *     summary: Replace an industry's related industries (ordered; one-way)
+ *     description: >-
+ *       Full replace — send the complete list every time; an empty array clears the block.
+ *       ARRAY ORDER is the display order, so a drag-and-drop reorder is just another PUT.
+ *       The relation is ONE-WAY: setting A → [B, C] does not add A to B's or C's block.
+ *       An industry cannot be related to itself (400), and an unknown id rejects the
+ *       whole batch (404) rather than curating a shorter block than was sent.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               related_industry_ids: { type: array, items: { type: integer }, description: "Ordered, unique industry ids" }
+ *               related_category_ids: { type: array, items: { type: integer }, deprecated: true, description: "Alias of `related_industry_ids`" }
+ *     responses:
+ *       200: { description: "Updated industry with its ordered `RelatedIndustries`" }
+ *       400: { description: "Validation error, or the industry was related to itself" }
+ *       404: { description: "Unknown industry, or one or more related ids not found" }
+ */
+router.get('/business-categories/:uid/related', authenticate, authorizeAdmin('categories.read'),   controller.getRelatedIndustries);
+router.put('/business-categories/:uid/related', authenticate, authorizeAdmin('categories.update'), validate(setRelatedIndustriesSchema), controller.setRelatedIndustries);
 
 // ---- Variant <-> template assignment (M2M not handled by generic CRUD) ----
 /**

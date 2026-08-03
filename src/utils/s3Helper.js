@@ -1,6 +1,6 @@
 const {
   PutObjectCommand, DeleteObjectCommand, GetObjectCommand, CopyObjectCommand,
-  PutObjectTaggingCommand, CreateMultipartUploadCommand, UploadPartCommand,
+  HeadObjectCommand, PutObjectTaggingCommand, CreateMultipartUploadCommand, UploadPartCommand,
   CompleteMultipartUploadCommand, AbortMultipartUploadCommand,
   ListObjectsV2Command, DeleteObjectsCommand,
 } = require('@aws-sdk/client-s3');
@@ -33,6 +33,25 @@ const putObjectTagging = (key, status = 'active') =>
   s3.send(new PutObjectTaggingCommand({
     Bucket: BUCKET, Key: key, Tagging: { TagSet: [{ Key: 'status', Value: status }] },
   }));
+
+// Cheap existence probe for an admin-supplied key (CSV import). Returns
+// { exists, content_type, size } — or NULL meaning "could not check", which
+// callers must treat as inconclusive rather than as a missing object:
+//   - no bucket configured (local/test env with no S3 wired up)
+//   - 403, which is what S3 returns for a missing key when the caller lacks
+//     s3:ListBucket, and is indistinguishable from a real permission problem
+//   - network/credential failures
+const objectExists = async (key) => {
+  if (!BUCKET) return null;
+  try {
+    const r = await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+    return { exists: true, content_type: r.ContentType || null, size: r.ContentLength ?? null };
+  } catch (err) {
+    const status = err && err.$metadata ? err.$metadata.httpStatusCode : undefined;
+    if (status === 404 || err.name === 'NotFound' || err.name === 'NoSuchKey') return { exists: false };
+    return null;
+  }
+};
 
 // ---- Multipart (large files) ----
 const createMultipartUpload = (key, contentType, { tagging = PENDING_TAG } = {}) =>
@@ -86,7 +105,7 @@ const copyObject = (srcKey, destKey) =>
   s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `${BUCKET}/${srcKey}`, Key: destKey }));
 
 module.exports = {
-  uploadFile, getPresignedUrl, getPresignedPutUrl, putObjectTagging,
+  uploadFile, getPresignedUrl, getPresignedPutUrl, putObjectTagging, objectExists,
   createMultipartUpload, presignUploadPart, completeMultipartUpload, abortMultipartUpload,
   listKeys, deleteObjects, deleteByPrefix, copyObject, deleteFile,
 };

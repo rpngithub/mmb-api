@@ -56,9 +56,19 @@ const setTagsSchema = Joi.object({
   tag_ids: Joi.array().items(Joi.number().integer()).required(),
 });
 
+// ---- Related industries, the SEO cross-link block (full replace, ordered) ----
+// Array ORDER is the editor's drag order and becomes display_order, so ids must be
+// unique. `related_category_ids` is the deprecated alias, mirroring the
+// industry_ids / business_category_ids pairing used on variant + template relations.
+const relatedIds = Joi.array().items(Joi.number().integer().positive()).unique();
+const setRelatedIndustriesSchema = Joi.object({
+  related_industry_ids: relatedIds,
+  related_category_ids: relatedIds,
+}).or('related_industry_ids', 'related_category_ids');
+
 module.exports = {
   createTemplateCategorySchema, updateTemplateCategorySchema,
   createBusinessCategorySchema, updateBusinessCategorySchema,
   createTagSchema, updateTagSchema,
-  setTagsSchema,
+  setTagsSchema, setRelatedIndustriesSchema,
 };

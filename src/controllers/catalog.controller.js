@@ -4,6 +4,7 @@ const specialEventService = require('../services/specialEvent.service');
 const send = (res, data) => res.json({ success: true, data });
 
 const businessCategories = async (req, res) => send(res, await catalog.listBusinessCategories(req.query));
+const industryDetail     = async (req, res) => send(res, await catalog.getIndustryDetail(req.params.ref));
 const templateCategories = async (req, res) => send(res, await catalog.listTemplateCategories(req.query));
 const assetCategories    = async (req, res) => send(res, await catalog.listAssetCategories(req.query));
 const tags               = async (req, res) => send(res, await catalog.listTags());
@@ -22,6 +23,6 @@ const specialEvents      = async (req, res) => {
 const plans              = async (req, res) => send(res, await catalog.listPlans(req.query));
 
 module.exports = {
-  businessCategories, templateCategories, assetCategories, tags, templateSizes, brandSeries,
+  businessCategories, industryDetail, templateCategories, assetCategories, tags, templateSizes, brandSeries,
   variants, variantDetail, faqCategories, faqs, testimonials, banners, specialEvents, plans,
 };
