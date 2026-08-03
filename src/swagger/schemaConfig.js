@@ -20,6 +20,7 @@ module.exports = {
   OtpCode:              { skip: true },
   FailedLoginAttempt:   { skip: true },
   BusinessCategoryTag:  { skip: true },
+  BusinessCategoryRelated: { skip: true },
   TemplateTag:          { skip: true },
   TemplateSizeMap:      { skip: true },
   VariantTemplate:      { skip: true },

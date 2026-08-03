@@ -56,10 +56,33 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *         deprecated: true
  *         description: "Legacy numeric-id form of `parent` (still accepted; prefer `parent`)."
  *         schema: { type: string }
+ *       - in: query
+ *         name: with_related
+ *         description: >-
+ *           When set (`with_related=1`), every row gains a `RelatedIndustries` array —
+ *           the curated SEO cross-links for that industry, in the editor's order.
+ *           Combinable with `tree` / `hierarchy` / `parent`. Only ACTIVE industries
+ *           appear in the block. Omitted by default to keep the list lean.
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Array of industries — nested (each with `children`) when `tree` is set, otherwise flat
  *         content: { application/json: { schema: { $ref: '#/components/schemas/BusinessCategoryListResponse' } } }
+ * /industries/{ref}:
+ *   get:
+ *     summary: Get one industry with its related industries (SEO landing page)
+ *     description: >-
+ *       Single-industry fetch for an SEO landing page. `ref` accepts the slug
+ *       (e.g. `restaurant-food`), a uid, or a legacy numeric id. Always carries
+ *       `RelatedIndustries` — the curated, editor-ordered cross-link block — which
+ *       lists only ACTIVE industries. Inactive industries are not addressable here.
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters:
+ *       - { in: path, name: ref, required: true, schema: { type: string }, description: "Industry slug, uid, or legacy numeric id" }
+ *     responses:
+ *       200: { description: "The industry, with a `RelatedIndustries` array (empty when none are curated)" }
+ *       404: { description: Unknown or inactive industry }
  * /business-categories:
  *   get:
  *     deprecated: true
@@ -85,6 +108,10 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *         deprecated: true
  *         description: "Legacy numeric-id form of `parent`."
  *         schema: { type: string }
+ *       - in: query
+ *         name: with_related
+ *         description: "As on `/industries` — attaches each row's `RelatedIndustries` block."
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Array of business categories
@@ -92,6 +119,9 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  */
 router.get('/industries', controller.businessCategories);
 router.get('/business-categories', controller.businessCategories);
+// Detail is a new endpoint, so it exists only under the current `/industries` name —
+// there are no pre-rename clients to keep a `/business-categories/:ref` alias for.
+router.get('/industries/:ref', controller.industryDetail);
 
 /**
  * @swagger

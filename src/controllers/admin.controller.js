@@ -139,6 +139,65 @@ const setBusinessCategoryTags = async (req, res) => {
   res.json({ success: true, data: updated });
 };
 
+// ---- Related industries: the SEO cross-link block on an industry landing page ----
+// Directional and curated: setting A -> [B, C] does NOT add A to B's block, so each
+// page's links are exactly what the editor arranged there. Array position becomes
+// display_order, matching the ordered-M2M handling on brand-series relations.
+const findIndustryWithRelated = (uid) => BusinessCategory.findOne({
+  where: { uid },
+  attributes: ['id', 'uid', 'slug', 'name'],
+  include: [{
+    model: BusinessCategory,
+    as: 'RelatedIndustries',
+    // is_active is exposed here (unlike the public catalogue, which hides inactive
+    // rows entirely) so the editor can see that a link they curated has gone dark.
+    attributes: ['id', 'uid', 'slug', 'name', 'is_active'],
+    through: { attributes: ['display_order'] },
+  }],
+});
+
+const sortRelatedIndustries = (row) => {
+  const data = row.toJSON();
+  data.RelatedIndustries = (data.RelatedIndustries || [])
+    .sort((a, b) => (a.BusinessCategoryRelated?.display_order ?? 0) - (b.BusinessCategoryRelated?.display_order ?? 0))
+    .map(({ BusinessCategoryRelated: drop, ...rest }) => rest);
+  return data;
+};
+
+const getRelatedIndustries = async (req, res) => {
+  const row = await findIndustryWithRelated(req.params.uid);
+  if (!row) throw new NotFoundError('business_category not found');
+  res.json({ success: true, data: sortRelatedIndustries(row) });
+};
+
+const setRelatedIndustries = async (req, res) => {
+  const cat = await BusinessCategory.findOne({ where: { uid: req.params.uid } });
+  if (!cat) throw new NotFoundError('business_category not found');
+
+  // `related_industry_ids` is the public name; `related_category_ids` the deprecated alias.
+  const ids = req.body.related_industry_ids ?? req.body.related_category_ids;
+
+  if (ids.includes(cat.id)) {
+    throw new ValidationError('An industry cannot be related to itself', [{
+      field:   'related_industry_ids',
+      message: `${cat.name} is the industry being edited — a page linking to itself is not an internal link`,
+    }]);
+  }
+
+  // Reject the whole batch on an unknown id rather than silently curating a
+  // shorter block than the editor arranged.
+  const found = await BusinessCategory.count({ where: { id: ids } });
+  if (found !== ids.length) throw new NotFoundError('One or more related industry ids were not found');
+
+  await cat.setRelatedIndustries(ids);
+  // Write the array position into each join row so the drag order round-trips.
+  const rows = await cat.getRelatedIndustries();
+  await Promise.all(rows.map((r) => r.BusinessCategoryRelated.update({ display_order: ids.indexOf(r.id) })));
+
+  await activity.log(req, { action: 'business_category.related_updated', entityType: 'business_category', entityId: cat.id, metadata: { related_industry_ids: ids } });
+  res.json({ success: true, data: sortRelatedIndustries(await findIndustryWithRelated(req.params.uid)) });
+};
+
 const listTemplates = async (req, res) => {
   const result = await templateService.listTemplatesForAdmin(req.query);
   res.json({ success: true, data: result.rows, meta: { total: result.count } });
@@ -361,4 +420,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, confirmTemplateBundle, resetTemplateBundle };
+module.exports = { listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, confirmTemplateBundle, resetTemplateBundle };
