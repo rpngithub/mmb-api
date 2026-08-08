@@ -5,6 +5,7 @@ const subRepo           = require('../repositories/userSubscription.repository')
 const couponRepo        = require('../repositories/coupon.repository');
 const paymentRepo       = require('../repositories/payment.repository');
 const quotaRepo         = require('../repositories/userQuotaUsage.repository');
+const quota             = require('./quota.service');
 const catalogService    = require('./catalog.service');
 const {
   createOrder, createSubscription, verifyWebhookSignature, verifyPaymentSignature,
@@ -91,32 +92,36 @@ async function verifyCoupon(code, planId, userId) {
   };
 }
 
-// Maps a feature key to its counter column on user_quota_usage (mirrors
-// quota.service). Unlisted keys fall back to `<key>_count`.
-const USAGE_FIELD = {
-  downloads:      'downloads_count',
-  shares:         'shares_count',
-  template_views: 'template_views_count',
-  ai_credits:     'ai_credits_used',
-  storage:        'storage_used_bytes',
-};
-
 // Turns one plan_feature row into an FE-friendly entitlement. Booleans expose
 // `enabled`; counters expose limit/used/remaining (value -1 = unlimited).
+//
+// limit/used/remaining are all reported in the FEATURE's own unit — MB for
+// storage, a plain count for everything else — so they can be compared and
+// rendered against the label directly. That conversion is the fix for a real bug:
+// the plan limit is stored in MB while the counter is in bytes, and the two used
+// to be subtracted from each other, which made `remaining` on a 100 MB plan go to
+// zero after the first 100 bytes. `used_bytes` carries the exact figure for
+// storage, since MB is rounded for display.
+const round2 = (n) => Math.round(n * 100) / 100;
+
 function buildFeature(pf, usage) {
   const ft   = pf.FeatureType;
   const base = { key: ft.key, label: ft.label, reset_period: ft.reset_period, data_type: ft.data_type };
   if (ft.data_type === 'boolean') return { ...base, enabled: pf.value === 1 };
 
   const unlimited = pf.value === -1;
-  const field     = USAGE_FIELD[ft.key] || `${ft.key}_count`;
-  const used      = usage ? Number(usage[field] ?? 0) : 0;
+  const scale     = quota.scaleFor(ft.key);                      // bytes per unit (1 for counts)
+  const rawUsed   = usage ? Number(usage[quota.fieldFor(ft.key)] ?? 0) : 0;
+  const used      = scale === 1 ? rawUsed : round2(rawUsed / scale);
+
   return {
     ...base,
+    unit:      scale === 1 ? 'count' : 'MB',
     limit:     unlimited ? null : pf.value,
     unlimited,
     used,
-    remaining: unlimited ? null : Math.max(pf.value - used, 0),
+    remaining: unlimited ? null : round2(Math.max(pf.value - used, 0)),
+    ...(scale === 1 ? {} : { used_bytes: rawUsed }),
   };
 }
 

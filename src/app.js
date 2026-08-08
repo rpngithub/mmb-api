@@ -16,6 +16,9 @@ const catalogRouter      = require('./routes/catalog.router');
 const productRouter      = require('./routes/product.router');
 const frameRouter        = require('./routes/frame.router');
 const assetRouter        = require('./routes/asset.router');
+const uploadRouter       = require('./routes/upload.router');
+const feedbackRouter     = require('./routes/feedback.router');
+const fontRouter         = require('./routes/font.router');
 const adminRouter        = require('./routes/admin.router');
 
 const app = express();
@@ -60,6 +63,9 @@ app.use(`${API_PREFIX}/config`,        configRouter);
 app.use(`${API_PREFIX}/products`,      productRouter);
 app.use(`${API_PREFIX}/frames`,        frameRouter);
 app.use(`${API_PREFIX}/assets`,        assetRouter);
+app.use(`${API_PREFIX}/uploads`,       uploadRouter);
+app.use(`${API_PREFIX}/feedback`,      feedbackRouter);
+app.use(`${API_PREFIX}/fonts`,         fontRouter);
 app.use(`${API_PREFIX}/admin`,         adminRouter);
 app.use(`${API_PREFIX}`,               catalogRouter);
 

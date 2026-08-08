@@ -1,6 +1,6 @@
 const Joi = require('joi');
 
-const ASSET_TYPES = ['icon', 'emoji', 'shape', 'font', 'audio', 'video', 'animated', 'bg'];
+const { ASSET_TYPES } = require('../utils/assetTypes');
 
 // ---- Assets ----
 const createAssetSchema = Joi.object({

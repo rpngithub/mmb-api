@@ -1,20 +1,33 @@
 const { Op, literal } = require('sequelize');
 const BaseRepository = require('./base.repository');
-const { Business, BusinessCategory } = require('../models');
+const { Business, BusinessCategory, User } = require('../models');
 
 const EARTH_KM = 6371;
 const KM_PER_DEG_LAT = 111.045;
 
+// Category attributes on the PUBLIC reads. The moderation columns are fetched but
+// never emitted — business.service#toPublic reads them to decide whether the
+// industry chip is shown at all, then builds the chip by hand.
+const PUBLIC_CATEGORY_ATTRS = ['id', 'uid', 'slug', 'name', 'status', 'is_active'];
+
+// A deactivated owner's business must vanish from the public directory. Enforced
+// as a required join rather than by switching the business off, so reactivating
+// the account restores the listing exactly as it was — and so a business the
+// owner had already deleted stays deleted.
+const ACTIVE_OWNER = { model: User, attributes: [], where: { is_active: 1 }, required: true };
+
 class BusinessRepository extends BaseRepository {
   constructor() { super(Business); }
 
-  findAllByUser(userId) { return this.findMany({ user_id: userId, is_active: 1 }); }
+  findAllByUser(userId, options = {}) { return this.findMany({ user_id: userId, is_active: 1 }, options); }
 
   // Public profile: active businesses only, with their category for the label chip.
+  // `status`/`is_active` come along so the caller can suppress the chip while a
+  // user-suggested sub-industry is still awaiting approval (see toPublic).
   findPublicByUid(uid) {
     return this.findOne(
       { uid, is_active: 1 },
-      { include: [{ model: BusinessCategory, attributes: ['id', 'uid', 'slug', 'name'] }] },
+      { include: [{ model: BusinessCategory, attributes: PUBLIC_CATEGORY_ATTRS }, ACTIVE_OWNER] },
     );
   }
 
@@ -52,7 +65,7 @@ class BusinessRepository extends BaseRepository {
       attributes: { include: [[distance, 'distance_km']] },
       where,
       having: literal(`distance_km <= ${radiusKm}`),
-      include: [{ model: BusinessCategory, attributes: ['id', 'uid', 'slug', 'name'] }],
+      include: [{ model: BusinessCategory, attributes: PUBLIC_CATEGORY_ATTRS }, ACTIVE_OWNER],
       order,
       limit,
       offset,

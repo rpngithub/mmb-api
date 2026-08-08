@@ -109,7 +109,7 @@ router.delete('/:uid', authenticate, controller.remove);
  *             type: object
  *             required: [s3_key]
  *             properties:
- *               s3_key:        { type: string }
+ *               s3_key:        { type: string, description: "Key from POST /uploads/presign with slot `product_image`. A key outside your own namespace is rejected." }
  *               display_order: { type: integer }
  *     responses:
  *       201:

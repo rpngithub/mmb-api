@@ -2,6 +2,7 @@ const bcrypt       = require('bcryptjs');
 const { v4: uuid } = require('uuid');
 const { Op }       = require('sequelize');
 const { AdminUser, Role, User, ActivityLog } = require('../models');
+const sessionService = require('./session.service');
 const { NotFoundError, ConflictError } = require('../errors');
 
 // ---- Admin users ----
@@ -92,7 +93,15 @@ async function setUserActive(userUid, isActive) {
   const user = await User.findOne({ where: { uid: userUid } });
   if (!user) throw new NotFoundError('User not found');
   await user.update({ is_active: isActive });
-  return user;
+
+  // Deactivating from the admin panel is a moderation action, so it must take
+  // effect now — not whenever the user's access token happens to expire. This
+  // mirrors self-deactivation (user.service#deactivate); without it an admin ban
+  // left the account working for up to the access-token lifetime.
+  // Reactivating deliberately does NOT revoke: there is nothing to cut off.
+  if (!isActive) await sessionService.revokeAll('user', user.id, 'revoked');
+
+  return getUser(userUid);   // re-read without password_hash, as the other user reads do
 }
 
 // ---- Audit trail ----

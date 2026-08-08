@@ -21,6 +21,10 @@ module.exports = {
   FailedLoginAttempt:   { skip: true },
   BusinessCategoryTag:  { skip: true },
   BusinessCategoryRelated: { skip: true },
+  BusinessTag:          { skip: true },
+  UserPreference:       { skip: true },   // exposed through the shaped /users/me/preferences response
+  UserLanguage:         { skip: true },   // join table behind Preferred Languages
+  FontLanguage:         { skip: true },   // join table behind a font's script coverage
   TemplateTag:          { skip: true },
   TemplateSizeMap:      { skip: true },
   VariantTemplate:      { skip: true },
@@ -34,6 +38,49 @@ module.exports = {
   AssetTag:             { skip: true },
   SpecialEventTemplate: { skip: true },
   CouponPlanRestriction:{ skip: true },
+
+  // The storage ledger doubles as the "My Uploads" media library, so the row IS a
+  // response shape — but only these columns: `id` and `user_id` stay internal, and
+  // `s3_key` is what the client prepends cdn_base_url to.
+  UserUpload: {
+    include: ['uid', 's3_key', 'slot', 'bytes', 'content_type', 'width', 'height', 'original_filename', 'created_at'],
+    add: {
+      slot: {
+        type: 'string',
+        enum: ['media_library', 'profile_photo', 'business_logo', 'business_cover', 'product_image', 'user_frame', 'brand_font'],
+      },
+      bytes: { type: 'integer', description: 'Charged against the plan storage quota; refunded on delete' },
+    },
+  },
+
+  // A font as the API returns it: the family row plus its files and script
+  // coverage. `user_id` is internal — `is_own` is the client-facing form of it.
+  Font: {
+    exclude: ['user_id'],
+    add: {
+      is_own:    { type: 'boolean', description: 'true when the caller uploaded this font; false for the curated library' },
+      is_locked: {
+        type: 'boolean',
+        description: 'A premium library font the caller\'s plan does not include. It is still listed so the user can see what they would get, but `FontFiles` is withheld until they upgrade.',
+      },
+      FontFiles: {
+        type: 'array',
+        description: 'One entry per (weight, style, format). Absent when `is_locked`.',
+        items: { $ref: '#/components/schemas/FontFile' },
+      },
+      Languages: {
+        type: 'array',
+        description: 'Scripts this font can render. EMPTY means unspecified, and an unspecified font is offered everywhere rather than nowhere.',
+        items: { $ref: '#/components/schemas/Language' },
+      },
+    },
+  },
+
+  // Feedback is read-only for admins and always carries its submitter — there is
+  // nobody to follow up with otherwise.
+  Feedback: {
+    add: { User: { $ref: '#/components/schemas/User' } },
+  },
 
   // Example of field-level control + computed fields + multiple views.
   Template: {
@@ -115,5 +162,23 @@ module.exports = {
   Payment: { exclude: ['razorpay_order_id'] },
 
   // Users: hide the gateway customer id.
-  User: { exclude: ['razorpay_customer_id'] },
+  User: {
+    exclude: ['razorpay_customer_id'],
+    // Derived fields (see user.service#getProfile), not columns.
+    add: {
+      has_password: {
+        type: 'boolean',
+        description: 'False for OTP-only accounts — show "Set password" rather than "Change password".',
+      },
+      onboarding: {
+        type: 'object',
+        description: 'Where the signup flow stands, so the app knows which screen to resume on.',
+        properties: {
+          account_type: { type: 'string', enum: ['business', 'personal'], nullable: true },
+          has_business: { type: 'boolean' },
+          completed:    { type: 'boolean' },
+        },
+      },
+    },
+  },
 };

@@ -15,6 +15,12 @@ const modelFiles = [
   'tag.model',
   'businessCategoryTag.model',
   'businessCategoryRelated.model',
+  'businessTag.model',
+  'language.model',
+  'userLanguage.model',
+  'font.model',
+  'fontFile.model',
+  'fontLanguage.model',
   'product.model',
   'productImage.model',
   'templateCategory.model',
@@ -52,12 +58,15 @@ const modelFiles = [
   'userSubscription.model',
   'payment.model',
   'userQuotaUsage.model',
+  'userUpload.model',
+  'userPreference.model',
   'userBillingDetail.model',
   'faqCategory.model',
   'faq.model',
   'testimonial.model',
   'appBanner.model',
   'appSetting.model',
+  'feedback.model',
 ];
 
 const db = { sequelize };

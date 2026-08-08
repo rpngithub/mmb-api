@@ -8,6 +8,13 @@ module.exports = (sequelize) => {
     email:                { type: DataTypes.STRING(255), unique: true, allowNull: true },
     phone:                { type: DataTypes.STRING(20), unique: true, allowNull: true },
     password_hash:        { type: DataTypes.STRING(255), allowNull: true },
+    // "What brings you here?" — a BUSINESS account continues into the industry
+    // picker and owns a business; a PERSONAL account skips all of that and has no
+    // business row. NULL = not answered yet, i.e. onboarding hasn't started.
+    account_type:         { type: DataTypes.ENUM('business', 'personal'), allowNull: true, defaultValue: null },
+    // Stamped when the flow finishes (immediately for PERSONAL, on business
+    // creation for BUSINESS). Freezes `account_type` — see user.service.
+    onboarding_completed_at: { type: DataTypes.DATE, allowNull: true },
     profile_photo_s3_key: { type: DataTypes.STRING(500), allowNull: true },
     razorpay_customer_id: { type: DataTypes.STRING(100), allowNull: true },
     is_active:            { type: DataTypes.TINYINT, defaultValue: 1 },
@@ -22,6 +29,9 @@ module.exports = (sequelize) => {
     User.hasOne(models.UserBillingDetail, { foreignKey: 'user_id' });
     User.hasMany(models.UserSubscription, { foreignKey: 'user_id' });
     User.hasMany(models.Project,          { foreignKey: 'user_id' });
+    User.hasOne(models.UserPreference,    { foreignKey: 'user_id' });
+    // "Preferred Languages" — which templates this user is shown.
+    User.belongsToMany(models.Language,   { through: models.UserLanguage, foreignKey: 'user_id' });
   };
 
   return User;

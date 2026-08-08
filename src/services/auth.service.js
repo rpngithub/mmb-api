@@ -6,6 +6,8 @@ const sessionRepo   = require('../repositories/userSession.repository');
 const blacklistRepo = require('../repositories/tokenBlacklist.repository');
 const otpRepo       = require('../repositories/otpCode.repository');
 const subRepo       = require('../repositories/userSubscription.repository');
+const userService   = require('./user.service');
+const sessionService = require('./session.service');
 const { signAccessToken, signRefreshToken, verifyToken } = require('../utils/jwtHelper');
 const { generateOtp, hashOtp, verifyOtp, sendOtp }       = require('../utils/otpHelper');
 const { AuthError, NotFoundError, RateLimitError }       = require('../errors');
@@ -50,9 +52,21 @@ async function verifyOtpService({ phone, otp, purpose, client_mnemonic }) {
     user = await userRepo.create({ name: phone, phone, uid: uuid() });
   }
 
+  // A deactivated account must not be able to sign straight back in — otherwise
+  // deactivation revokes every session and the very next OTP undoes it. Admin
+  // login already refuses inactive accounts; this is the user-side equivalent.
+  if (!user.is_active) throw new AuthError('This account has been deactivated');
+
   const tier   = await _resolveTier(user.id);
   const tokens = await _issueTokens(user, 'user', client_mnemonic, null, { tier });
-  return { ...tokens, is_new_user: !user.name || user.name === phone };
+
+  // `is_new_user` drives whether the app shows the personalization flow after OTP.
+  // It now means "onboarding is not finished" rather than the old name-is-still-the-
+  // phone-number guess, which never went false for accounts that legitimately have
+  // no name (every PERSONAL account) and so reported every login as a first login.
+  // `onboarding` carries the detail needed to resume on the right screen.
+  const onboarding = await userService.onboardingState(user);
+  return { ...tokens, is_new_user: !onboarding.completed, onboarding };
 }
 
 async function loginAdmin({ email, password }) {
@@ -85,7 +99,9 @@ async function refreshTokens({ refresh_token }) {
     : await userRepo.findById(session.actor_id);
 
   if (!actor) throw new AuthError('Account not found');
-  if (actorType === 'admin' && !actor.is_active) throw new AuthError('Account is deactivated');
+  // Applies to users as well as admins: a deactivated account holding a valid
+  // refresh token must not be able to keep renewing its access.
+  if (!actor.is_active) throw new AuthError('Account is deactivated');
 
   await sessionRepo.revokeByJti(payload.jti);
   const permissions = actorType === 'admin' ? (actor.Role?.permissions || []) : null;
@@ -101,9 +117,20 @@ async function _resolveTier(userId) {
   return sub ? 'paid' : 'free';
 }
 
-async function logout({ jti, userId, actorType, expiresAt }) {
-  await blacklistRepo.addToBlacklist({ jti, actor_type: actorType, actor_id: userId, reason: 'logout', expires_at: expiresAt });
-  await sessionRepo.revokeByJti(jti);
+// Ends the caller's own session: blacklists the access token they are holding and
+// revokes the session so its refresh token can no longer mint new ones.
+//
+// `sid` identifies the session. Tokens issued before `sid` existed still get their
+// access token blacklisted — they just cannot have their session revoked, so the
+// refresh token lives until it expires. That resolves itself as old access tokens
+// age out (15 minutes).
+async function logout({ jti, sid, userId, actorType, expiresAt }) {
+  await blacklistRepo.addToBlacklist({
+    jti, actor_type: actorType, actor_id: userId, reason: 'logout', expires_at: expiresAt,
+  });
+
+  const session = await sessionService.findByUid(sid);
+  if (session) await sessionRepo.revokeByJti(session.jti);
 }
 
 // Single source of truth for the access-token claim set. Both login and the
@@ -122,21 +149,34 @@ function buildAccessPayload(actor, actorType, clientType, permissions, extraClai
   };
 }
 
+// The session is created BEFORE the access token is signed, because the token
+// carries the session's uid as its `sid` claim. Without that link, logout has no
+// way to tell which session the caller is on: it only ever saw the ACCESS token's
+// jti, while sessions are keyed by the REFRESH token's — two independently random
+// uuids. The old code passed one where the other was expected, so the revoke
+// silently matched no row and the refresh token survived logout entirely.
 async function _issueTokens(actor, actorType, clientType, permissions, extraClaims = {}) {
-  const accessPayload = buildAccessPayload(actor, actorType, clientType, permissions, extraClaims);
-
-  const accessToken  = signAccessToken(accessPayload);
   const refreshToken = signRefreshToken({ sub: actor.uid, userId: actor.id, actor_type: actorType });
   const jtiRefresh   = verifyToken(refreshToken).jti;
+  const sessionUid   = uuid();
   const expiresAt    = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
+  const accessToken   = signAccessToken(
+    buildAccessPayload(actor, actorType, clientType, permissions, { ...extraClaims, sid: sessionUid }),
+  );
+  // Read the signed token's own jti/exp rather than recomputing them, so the
+  // session records exactly the token that was handed out.
+  const accessClaims = verifyToken(accessToken);
+
   await sessionRepo.create({
-    uid:                uuid(),
+    uid:                sessionUid,
     actor_type:         actorType,
     actor_id:           actor.id,
     jti:                jtiRefresh,
     refresh_token_hash: await bcrypt.hash(refreshToken, 10),
     client_type:        clientType,
+    access_jti:         accessClaims.jti,
+    access_expires_at:  new Date(accessClaims.exp * 1000),
     expires_at:         expiresAt,
   });
 

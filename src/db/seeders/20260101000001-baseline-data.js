@@ -13,7 +13,10 @@ module.exports = {
     await queryInterface.bulkInsert('roles', [
       { id: 1, uid: uuid(), name: 'super_admin', description: 'Full access', permissions: JSON.stringify(['*']), is_system: 1 },
       { id: 2, uid: uuid(), name: 'content_admin', description: 'Manages catalog content',
-        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*']), is_system: 1 },
+        // NOTE: no `feedback.*` — feedback carries the submitter's name, phone and
+        // email, and curating the catalogue needs none of that. It stays with
+        // super_admin until there is a role that actually handles support.
+        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*']), is_system: 1 },
     ]);
 
     // --- admin user ---

@@ -1,23 +1,17 @@
-const userQuotaUsageRepo = require('../repositories/userQuotaUsage.repository');
-const planFeatureRepo    = require('../repositories/planFeature.repository');
-const userSubRepo        = require('../repositories/userSubscription.repository');
-const { QuotaError }     = require('../errors');
+const quota = require('../services/quota.service');
 
+// Route-level guard: rejects the request when the caller is already at their plan
+// limit for `featureKey`. Currently mounted on nothing — services call
+// quota.service directly (see projectExport.service) — but kept because it is the
+// natural way to gate a route.
+//
+// It delegates rather than reimplementing the lookup. It previously carried its
+// own copy, with the same field-mapping bug quota.service had (`storage` -> the
+// non-existent `storage_count` column, so the limit could never be reached), and
+// two copies of one rule is how they drift apart in the first place.
 const quotaCheck = (featureKey) => async (req, res, next) => {
   try {
-    const userId = req.user.userId;
-    const sub    = await userSubRepo.findActiveByUser(userId);
-    if (!sub) return next();
-
-    const limit = await planFeatureRepo.getFeatureValue(sub.plan_id, featureKey);
-    if (limit === null || limit === -1) return next();
-
-    const usage = await userQuotaUsageRepo.findByUserId(userId);
-    const used  = usage ? (usage[`${featureKey}_count`] ?? usage[featureKey] ?? 0) : 0;
-
-    if (used >= limit) {
-      return next(new QuotaError(`${featureKey} limit reached. Upgrade your plan.`));
-    }
+    await quota.assertWithinQuota(req.user.userId, featureKey);
     next();
   } catch (err) {
     next(err);

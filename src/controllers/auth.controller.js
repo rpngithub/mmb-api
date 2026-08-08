@@ -21,8 +21,8 @@ const refresh = async (req, res) => {
 };
 
 const logout = async (req, res) => {
-  const { jti, userId, actor_type, exp } = req.user;
-  await authService.logout({ jti, userId, actorType: actor_type, expiresAt: new Date(exp * 1000) });
+  const { jti, sid, userId, actor_type, exp } = req.user;
+  await authService.logout({ jti, sid, userId, actorType: actor_type, expiresAt: new Date(exp * 1000) });
   res.json({ success: true, data: { message: 'Logged out' } });
 };
 

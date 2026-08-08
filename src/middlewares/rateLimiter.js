@@ -36,6 +36,15 @@ module.exports = {
   global:  createLimiter({ windowMs: 60_000,      max: 200 }),
   guest:   createLimiter({ windowMs: 60_000,       max: 30 }),
   auth:    createLimiter({ windowMs: 15 * 60_000,  max: 10 }),
+  // Feedback is a write anyone signed in can make, with no natural cost to them —
+  // keyed per user rather than per IP so one account cannot flood the queue from
+  // several devices, and so shared networks don't throttle each other.
+  feedback: createLimiter({
+    windowMs:     60 * 60_000,
+    max:          5,
+    message:      'Too many feedback submissions. Try again later.',
+    keyGenerator: (req) => `feedback:${req.user?.userId || req.ip}`,
+  }),
   otpSend: createLimiter({
     windowMs:     10 * 60_000,
     max:          3,

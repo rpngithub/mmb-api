@@ -2,7 +2,8 @@ const { Op, literal } = require('sequelize');
 const templateRepo = require('../repositories/template.repository');
 const activityRepo = require('../repositories/activityLog.repository');
 const variantAccess = require('./variantAccess.service');
-const { TemplateCategory, BusinessCategory, TemplateSize, Tag } = require('../models');
+const userService  = require('./user.service');
+const { TemplateCategory, BusinessCategory, TemplateSize, Tag, Language } = require('../models');
 const { resolveRef, resolveRefList, pick } = require('../utils/catalogRef');
 const { NotFoundError, ValidationError } = require('../errors');
 
@@ -65,6 +66,28 @@ const COMPLETENESS_ATTRS = [
   [literal("(`Template`.`thumbnail_s3_key` IS NOT NULL AND `Template`.`thumbnail_s3_key` <> '')"), 'has_thumbnail'],
 ];
 
+// Which language ids the browse feed is narrowed to, or null for "no narrowing".
+//
+// Precedence, most explicit first:
+//   ?all_languages=1  — an explicit opt-out, for SEO/landing pages that must show
+//                       the whole catalogue regardless of who is looking
+//   ?language=ta,ml   — browsing a specific language, overriding the saved picks
+//   the viewer's saved Preferred Languages
+//   English (the default for anyone who has never chosen, signed in or not)
+//
+// A supplied-but-unresolved `language` narrows to nothing rather than silently
+// widening to everything — same rule the other catalogue filters follow.
+async function resolveLanguageFilter(filters, viewer) {
+  if (filters.all_languages !== undefined) return null;
+
+  if (filters.language !== undefined && filters.language !== '') {
+    return resolveRefList(Language, filters.language, { hasUid: false, field: 'code' });
+  }
+
+  const { languages } = await userService.effectiveLanguages(viewer?.userId ?? null);
+  return languages.map((l) => l.id);
+}
+
 async function listTemplates(filters = {}, viewer = null) {
   // Anchor / narrowing filters accept a friendly slug, a uid, or a legacy int id.
   // `category` ↔ legacy `category_id`; `industry` (the public name for a business
@@ -93,6 +116,15 @@ async function listTemplates(filters = {}, viewer = null) {
   if (categoryId !== undefined) where.category_id = categoryId;
   if (TEMPLATE_TYPES.includes(filters.template_type)) where.template_type = filters.template_type;
   if (filters.is_premium !== undefined) where.is_premium = toPosInt(filters.is_premium) ? 1 : 0;
+
+  // Narrow to the viewer's "Preferred Languages". Language-neutral designs
+  // (language_id IS NULL — no text, or symbols only) always come through, which
+  // is also why turning this on cannot empty anyone's feed: untagged content
+  // stays visible until an admin gives it a language.
+  const languageIds = await resolveLanguageFilter(filters, viewer);
+  if (languageIds) {
+    where[Op.or] = [{ language_id: null }, { language_id: { [Op.in]: languageIds } }];
+  }
 
   // Cross-table membership filters (business category / post size / tags).
   // Always exclude variant templates from public browse (premium, plan-gated).

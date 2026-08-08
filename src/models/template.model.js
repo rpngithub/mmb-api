@@ -5,6 +5,9 @@ module.exports = (sequelize) => {
     id:               { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     uid:              { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, allowNull: false, unique: true },
     category_id:      { type: DataTypes.INTEGER, allowNull: true },
+    // The language the design's text is in. NULL = language-neutral (no text, or
+    // symbols only) and shown to everyone regardless of their preferred languages.
+    language_id:      { type: DataTypes.INTEGER, allowNull: true },
     name:             { type: DataTypes.STRING(200), allowNull: false },
     thumbnail_s3_key: { type: DataTypes.STRING(500), allowNull: true },
     content:          { type: DataTypes.TEXT('long'), allowNull: true },
@@ -20,6 +23,7 @@ module.exports = (sequelize) => {
 
   Template.associate = (models) => {
     Template.belongsTo(models.TemplateCategory, { foreignKey: 'category_id' });
+    Template.belongsTo(models.Language,         { foreignKey: 'language_id' });
     Template.belongsTo(models.AdminUser,        { foreignKey: 'created_by', as: 'creator' });
     Template.belongsToMany(models.Tag,          { through: models.TemplateTag,              foreignKey: 'template_id' });
     Template.belongsToMany(models.TemplateSize, { through: models.TemplateSizeMap,          foreignKey: 'template_id' });
