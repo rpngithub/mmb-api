@@ -2,11 +2,11 @@ const { Op, literal } = require('sequelize');
 const assetRepo = require('../repositories/asset.repository');
 const { AssetCategory, Tag } = require('../models');
 const { resolveRef, resolveRefList, pick } = require('../utils/catalogRef');
+const { ASSET_TYPES } = require('../utils/assetTypes');
 const { ValidationError } = require('../errors');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT     = 100;
-const ASSET_TYPES   = ['icon', 'emoji', 'shape', 'font', 'audio', 'video', 'animated', 'bg'];
 
 // Paid viewers get the asset file (s3_key); guests/free see premium assets locked.
 const isPaidViewer = (viewer) => viewer?.tier === 'paid';

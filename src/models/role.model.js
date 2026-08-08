@@ -1,4 +1,5 @@
 const { DataTypes } = require('sequelize');
+const { jsonColumn } = require('../utils/jsonColumn');
 
 module.exports = (sequelize) => {
   const Role = sequelize.define('Role', {
@@ -6,7 +7,9 @@ module.exports = (sequelize) => {
     uid:         { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, allowNull: false, unique: true },
     name:        { type: DataTypes.STRING(100), allowNull: false, unique: true },
     description: { type: DataTypes.TEXT, allowNull: true },
-    permissions: { type: DataTypes.JSON, allowNull: false, defaultValue: [] },
+    // MUST be parsed, not a raw JSON string: authorizeAdmin does array membership
+    // (`perms.includes('*')`) and on a string that degrades to a substring test.
+    permissions: jsonColumn('permissions', { allowNull: false, defaultValue: [] }),
     is_system:   { type: DataTypes.TINYINT, defaultValue: 0 },
   }, { tableName: 'roles' });
 

@@ -37,7 +37,14 @@
  *           properties:
  *             access_token:  { type: string }
  *             refresh_token: { type: string }
- *             is_new_user:   { type: boolean, description: "true when account was auto-created on first OTP login" }
+ *             is_new_user:   { type: boolean, description: "true while onboarding is unfinished — i.e. show the personalization flow. Shorthand for !onboarding.completed." }
+ *             onboarding:
+ *               type: object
+ *               description: "Where the signup flow stands, so the app resumes on the right screen."
+ *               properties:
+ *                 account_type: { type: string, enum: [business, personal], nullable: true, description: "null = step 2 not answered yet" }
+ *                 has_business: { type: boolean, description: "BUSINESS accounts only — false while still in the industry picker" }
+ *                 completed:    { type: boolean }
  *
  *   responses:
  *     ValidationError:

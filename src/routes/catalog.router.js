@@ -64,6 +64,14 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *           Combinable with `tree` / `hierarchy` / `parent`. Only ACTIVE industries
  *           appear in the block. Omitted by default to keep the list lean.
  *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         description: >-
+ *           Substring match on the industry name — what the signup picker's search box
+ *           sends. Combinable with `parent` to search within one industry's
+ *           specializations. Ignored by `tree` / `hierarchy`, where filtering out parents
+ *           would strip the matches of their context, so a search always returns a flat list.
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Array of industries — nested (each with `children`) when `tree` is set, otherwise flat
@@ -112,16 +120,46 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *         name: with_related
  *         description: "As on `/industries` — attaches each row's `RelatedIndustries` block."
  *         schema: { type: string }
+ *       - in: query
+ *         name: q
+ *         description: "As on `/industries` — substring match on the name."
+ *         schema: { type: string }
  *     responses:
  *       200:
  *         description: Array of business categories
  *         content: { application/json: { schema: { $ref: '#/components/schemas/BusinessCategoryListResponse' } } }
  */
+// `q` (name search) is documented as a query param on /industries above — a path key
+// carrying a query string renders as a phantom second endpoint in Swagger UI.
 router.get('/industries', controller.businessCategories);
 router.get('/business-categories', controller.businessCategories);
 // Detail is a new endpoint, so it exists only under the current `/industries` name —
 // there are no pre-rename clients to keep a `/business-categories/:ref` alias for.
 router.get('/industries/:ref', controller.industryDetail);
+
+/**
+ * @swagger
+ * /industries/{ref}/keywords:
+ *   get:
+ *     summary: Keyword suggestions for an industry (the signup "My Keywords" picker)
+ *     description: >-
+ *       The curated keywords for this industry. A sub-industry ALSO inherits its parent's
+ *       keywords — merged and de-duped, the sub-industry's own first — so a bakery's picker
+ *       offers the bakery keywords ahead of the generic food ones. `ref` is a slug, a uid,
+ *       or a numeric id. These are the values `POST /businesses` and
+ *       `PUT /businesses/{uid}/keywords` accept.
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters: [{ in: path, name: ref, required: true, schema: { type: string } }]
+ *     responses:
+ *       200:
+ *         description: Array of keywords ({ id, name, slug })
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/TagListResponse' } } }
+ *       404:
+ *         description: Industry not found
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.get('/industries/:ref/keywords', controller.industryKeywords);
 
 /**
  * @swagger
@@ -202,6 +240,25 @@ router.get('/asset-categories', controller.assetCategories);
  *         content: { application/json: { schema: { $ref: '#/components/schemas/TagListResponse' } } }
  */
 router.get('/tags', controller.tags);
+
+/**
+ * @swagger
+ * /languages:
+ *   get:
+ *     summary: Available content languages (the "Preferred Languages" picker)
+ *     description: >-
+ *       Active languages, in display order. These select which TEMPLATES a user is shown —
+ *       they are not the app's UI language. Render `native_name` ("தமிழ்"), which is what a
+ *       speaker scans for; `name` is the English label for admin screens. Save a user's
+ *       picks with `PATCH /users/me/preferences`.
+ *     tags: [Catalog]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Array of languages ({ id, uid, code, name, native_name, display_order })
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/LanguageListResponse' } } }
+ */
+router.get('/languages', controller.languages);
 
 /**
  * @swagger
@@ -309,8 +366,66 @@ router.get('/variants/:uid', controller.variantDetail);
 
 // ---- Deprecated aliases (Theme -> Brand Series / Variant rename) ----
 // Same handlers, annotated with RFC 8594 Deprecation/Link headers. Kept so the app and
-// admin panel can migrate on their own schedule; excluded from Swagger deliberately so
-// new integrations do not discover them.
+// admin panel can migrate on their own schedule. Documented as `deprecated: true` so
+// Swagger UI strikes them through and names the successor — nobody should start here.
+/**
+ * @swagger
+ * /theme-groups:
+ *   get:
+ *     summary: "[Deprecated] Pre-rename alias of /brand-series"
+ *     deprecated: true
+ *     description: >-
+ *       Identical to `GET /brand-series` — same handler, same response. Kept only so
+ *       clients written before the Theme → Brand Series rename keep working. Responses
+ *       carry `Deprecation: true` and `Link: </api/v1/brand-series>; rel="successor-version"`.
+ *       **Use `/brand-series`**; this path will be withdrawn once the app and admin panel
+ *       have migrated.
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters:
+ *       - { in: query, name: preview_variants, schema: { type: integer }, description: "As on /brand-series" }
+ *     responses:
+ *       200:
+ *         description: Array of brand series (preview variants nested)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/BrandSeriesListResponse' } } }
+ * /themes:
+ *   get:
+ *     summary: "[Deprecated] Pre-rename alias of /variants"
+ *     deprecated: true
+ *     description: >-
+ *       Identical to `GET /variants`. The pre-rename `group` / `group_id` filters are still
+ *       accepted here (and on `/variants`). Responses carry `Deprecation: true` and a
+ *       `Link` header naming `/api/v1/variants` as the successor. **Use `/variants`.**
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters:
+ *       - { in: query, name: series,    schema: { type: string },  description: "Brand series — slug, uid, or numeric id" }
+ *       - { in: query, name: series_id, schema: { type: integer }, deprecated: true }
+ *       - { in: query, name: group,     schema: { type: string },  deprecated: true, description: "Pre-rename name for `series`" }
+ *       - { in: query, name: group_id,  schema: { type: integer }, deprecated: true, description: "Pre-rename name for `series_id`" }
+ *     responses:
+ *       200:
+ *         description: Array of variants, each with `templates_count` and `is_locked`
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantListResponse' } } }
+ * /themes/{uid}:
+ *   get:
+ *     summary: "[Deprecated] Pre-rename alias of /variants/{uid}"
+ *     deprecated: true
+ *     description: >-
+ *       Identical to `GET /variants/{uid}`, including the gating: the card and template list
+ *       are public, but a caller who is not entitled gets `is_locked=true` and templates
+ *       stripped of their `content`. **Use `/variants/{uid}`.**
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Variant object (with `is_locked`; `Templates` always present, stripped when locked)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantResponse' } } }
+ *       404:
+ *         description: Variant not found
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
 router.get('/theme-groups', deprecated('/api/v1/brand-series'), controller.brandSeries);
 router.get('/themes',       deprecated('/api/v1/variants'),     controller.variants);
 router.get('/themes/:uid',  deprecated('/api/v1/variants'),     controller.variantDetail);

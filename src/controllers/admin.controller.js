@@ -2,8 +2,9 @@ const adminService    = require('../services/admin.service');
 const templateService = require('../services/template.service');
 const activity        = require('../services/activity.service');
 const uploadService   = require('../services/upload.service');
+const feedbackService = require('../services/feedback.service');
 const s3              = require('../utils/s3Helper');
-const { BusinessCategory, Tag, Template, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, sequelize } = require('../models');
+const { BusinessCategory, Tag, Template, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
 const { NotFoundError, ValidationError } = require('../errors');
 
 // A template's relations, as compact id-bearing lists (for the editor to load/preselect).
@@ -118,6 +119,55 @@ const setUserStatus = async (req, res) => {
   const user = await adminService.setUserActive(req.params.uid, req.body.is_active);
   await activity.log(req, { action: 'user.status_changed', entityType: 'user', entityId: user.id, metadata: { is_active: req.body.is_active } });
   res.json({ success: true, data: user });
+};
+
+// Read-only: feedback is written by users and is a record of what they said, so
+// there is deliberately no admin create/edit — only listing and removing spam.
+const listFeedback = async (req, res) => {
+  const result = await feedbackService.listForAdmin(req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+const deleteFeedback = async (req, res) => {
+  const row = await Feedback.findOne({ where: { uid: req.params.uid } });
+  if (!row) throw new NotFoundError('Feedback not found');
+  await row.destroy();
+  await activity.log(req, { action: 'feedback.deleted', entityType: 'feedback', entityId: row.id });
+  res.json({ success: true, data: null });
+};
+
+// ---- Library fonts: files and script coverage (full replace, like tags) ----
+const findFont = (uid) => Font.findOne({
+  where: { uid },
+  include: [{ model: FontFile }, { model: Language, through: { attributes: [] } }],
+});
+
+const setFontFiles = async (req, res) => {
+  const font = await Font.findOne({ where: { uid: req.params.uid } });
+  if (!font) throw new NotFoundError('font not found');
+  // Library font files must sit under an upload root this server issued —
+  // otherwise any string could be saved as a font source.
+  for (const f of req.body.files) uploadService.assertAllowedKey(f.s3_key);
+  await sequelize.transaction(async (t) => {
+    await FontFile.destroy({ where: { font_id: font.id }, transaction: t });
+    await FontFile.bulkCreate(req.body.files.map((f) => ({
+      font_id: font.id,
+      weight:  f.weight || 400,
+      style:   f.style || 'normal',
+      format:  f.format,
+      s3_key:  f.s3_key,
+    })), { transaction: t });
+  });
+  await activity.log(req, { action: 'font.files_updated', entityType: 'font', entityId: font.id });
+  res.json({ success: true, data: await findFont(req.params.uid) });
+};
+
+const setFontLanguages = async (req, res) => {
+  const font = await Font.findOne({ where: { uid: req.params.uid } });
+  if (!font) throw new NotFoundError('font not found');
+  await font.setLanguages(req.body.language_ids);
+  await activity.log(req, { action: 'font.languages_updated', entityType: 'font', entityId: font.id, metadata: { language_ids: req.body.language_ids } });
+  res.json({ success: true, data: await findFont(req.params.uid) });
 };
 
 const listActivity = async (req, res) => {
@@ -420,4 +470,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, confirmTemplateBundle, resetTemplateBundle };
+module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, confirmTemplateBundle, resetTemplateBundle };

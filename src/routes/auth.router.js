@@ -53,7 +53,9 @@ router.post('/send-otp', validate(sendOtpSchema), rateLimiter.otpSend, controlle
  *             $ref: '#/components/schemas/VerifyOtpRequest'
  *     responses:
  *       200:
- *         description: Authenticated. `is_new_user` is true when account was just created.
+ *         description: >-
+ *           Authenticated. `is_new_user` is true while onboarding is unfinished (show the
+ *           personalization flow); `onboarding` says which screen to resume on.
  *         content:
  *           application/json:
  *             schema:

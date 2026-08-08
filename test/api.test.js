@@ -10,7 +10,7 @@ const { hashOtp } = require('../src/utils/otpHelper');
 
 const P = '/api/v1';
 let startLogId = 0;
-const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [] };
+const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -35,6 +35,7 @@ after(async () => {
   if (track.assets.length)             await models.Asset.destroy({ where: { id: track.assets } });
   if (track.assetCategories.length)    await models.AssetCategory.destroy({ where: { id: track.assetCategories } });
   if (track.users.length)     await User.destroy({ where: { id: track.users } }); // cascades (incl. subscriptions)
+  if (track.fonts.length)     await models.Font.destroy({ where: { id: track.fonts } }); // cascades files + languages
   if (track.coupons.length)   await models.Coupon.destroy({ where: { id: track.coupons } }); // cascades plan restrictions
   await ActivityLog.destroy({ where: { id: { [require('sequelize').Op.gt]: startLogId } } });
   await h.stop();
@@ -133,7 +134,7 @@ test('GET /plans returns card-ready features: display_label never null, enabled 
 
 // ---------- Auth ----------
 test('OTP login: send-otp then verify-otp issues tokens with free tier', async () => {
-  const phone = `9${Date.now() % 1000000000}`;
+  const phone = `9${String(Date.now() % 1000000000).padStart(9, '0')}`;
   const send = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
   assert.equal(send.status, 200);
   assert.match(String(send.body.data.otp), /^\d{6}$/, 'otp exposed in test env');
@@ -153,7 +154,7 @@ test('OTP login: send-otp then verify-otp issues tokens with free tier', async (
 });
 
 test('verify-otp rejects a wrong OTP', async () => {
-  const phone = `9${(Date.now() + 7) % 1000000000}`;
+  const phone = `9${String((Date.now() + 7) % 1000000000).padStart(9, '0')}`;
   await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
   const verify = await h.request('POST', `${P}/auth/verify-otp`, {
     body: { phone, otp: '000000', purpose: 'login', client_mnemonic: 'test' },
@@ -204,8 +205,10 @@ test('refresh issues an access token with identical claims to login', async () =
   assert.equal(refreshClaims.name,  loginClaims.name);
   assert.equal(refreshClaims.email, loginClaims.email);
 
-  // Same claim set (ignoring per-token jti/iat/exp which are expected to differ).
-  const stable = (c) => { const { jti, iat, exp, ...rest } = c; return rest; };
+  // Same claim set, ignoring the claims that are expected to differ per token:
+  // jti/iat/exp, plus `sid` — refreshing revokes the old session and opens a new
+  // one, so the session id it names is a different session by design.
+  const stable = (c) => { const { jti, iat, exp, sid, ...rest } = c; return rest; };
   assert.deepEqual(stable(refreshClaims), stable(loginClaims), 'login and refresh claim sets match');
 });
 
@@ -228,7 +231,7 @@ test('premium template: locked for guest, unlocked for paid', async () => {
 
 // Create a user holding an ACTIVE subscription on the given plan; returns the user id.
 async function userWithActivePlan(planId, salt) {
-  const user = await User.create({ uid: uuid(), name: 'TST Sub User', phone: `9${(Date.now() + salt) % 1000000000}` });
+  const user = await User.create({ uid: uuid(), name: 'TST Sub User', phone: `9${String((Date.now() + salt) % 1000000000).padStart(9, '0')}` });
   track.users.push(user.id);
   await UserSubscription.create({
     uid: uuid(), user_id: user.id, plan_id: planId, sub_type: 'regular', status: 'active',
@@ -443,7 +446,7 @@ test('add to your business: only an entitled owner can adopt; adoption is durabl
   await variant.setTemplates([tpl.id]);
   await variant.setPlans([2]); // Pro-only
 
-  const ownerId = (await User.create({ uid: uuid(), name: 'TST Owner', phone: `9${(Date.now() + 41) % 1000000000}` })).id;
+  const ownerId = (await User.create({ uid: uuid(), name: 'TST Owner', phone: `9${String((Date.now() + 41) % 1000000000).padStart(9, '0')}` })).id;
   track.users.push(ownerId);
   const biz = await Business.create({ uid: uuid(), user_id: ownerId, name: 'TST Biz', is_active: 1 });
   const ownerTok = h.userTokenFor(ownerId, 'free');
@@ -490,7 +493,7 @@ test('adoption is per-variant: it does not unlock siblings in the same brand ser
   await variant.setPlans([2]);
   await sibling.setPlans([2]);
 
-  const ownerId = (await User.create({ uid: uuid(), name: 'TST Sib Owner', phone: `9${(Date.now() + 63) % 1000000000}` })).id;
+  const ownerId = (await User.create({ uid: uuid(), name: 'TST Sib Owner', phone: `9${String((Date.now() + 63) % 1000000000).padStart(9, '0')}` })).id;
   track.users.push(ownerId);
   const biz = await Business.create({ uid: uuid(), user_id: ownerId, name: 'TST Sib Biz', is_active: 1 });
   const ownerTok = h.userTokenFor(ownerId, 'free');
@@ -523,7 +526,7 @@ test('variant templates never surface in the public catalog (category browse + d
   const direct = await h.request('GET', `${P}/templates/${tpl.uid}`);
   assert.equal(direct.status, 404, 'variant template hidden from the public template endpoint');
 
-  const freeId = (await User.create({ uid: uuid(), name: 'TST Free', phone: `9${(Date.now() + 52) % 1000000000}` })).id;
+  const freeId = (await User.create({ uid: uuid(), name: 'TST Free', phone: `9${String((Date.now() + 52) % 1000000000).padStart(9, '0')}` })).id;
   track.users.push(freeId);
   const proj = await h.request('POST', `${P}/projects`, { token: h.userTokenFor(freeId), body: { name: 'x', template_id: tpl.id, content: '{}' } });
   assert.equal(proj.status, 403, 'non-entitled/non-adopted user cannot project a variant template');
@@ -1047,14 +1050,17 @@ test('industry is the public alias for business_category (templates filter, /ind
   assert.ok(byIndustry.body.data.some((t) => t.uid === tpl.uid), 'templates?industry=<slug> finds it');
 
   // create business with industry (slug) -> resolved to category_id
-  const uId = (await User.create({ uid: uuid(), name: 'TST Ind User', phone: `9${(Date.now() + 71) % 1000000000}` })).id;
+  const uId = (await User.create({ uid: uuid(), name: 'TST Ind User', phone: `9${String((Date.now() + 71) % 1000000000).padStart(9, '0')}` })).id;
   track.users.push(uId);
   const created = await h.request('POST', `${P}/businesses`, { token: h.userTokenFor(uId), body: { name: 'TST Ind Biz', industry: 'restaurant-food' } });
   assert.equal(created.status, 201);
   assert.equal(created.body.data.category_id, 1, 'industry slug resolved to category_id on create');
 
-  // unknown industry -> clean 400
-  const bad = await h.request('POST', `${P}/businesses`, { token: h.userTokenFor(uId), body: { name: 'TST Ind Bad', industry: 'no-such-industry' } });
+  // unknown industry -> clean 400. Needs a fresh owner: the account above already
+  // holds its one permitted business, which would 409 before the industry is read.
+  const uId2 = (await User.create({ uid: uuid(), name: 'TST Ind User2', phone: `9${String((Date.now() + 72) % 1000000000).padStart(9, '0')}` })).id;
+  track.users.push(uId2);
+  const bad = await h.request('POST', `${P}/businesses`, { token: h.userTokenFor(uId2), body: { name: 'TST Ind Bad', industry: 'no-such-industry' } });
   assert.equal(bad.status, 400);
 });
 
@@ -1203,8 +1209,8 @@ test('public /assets filters by category slug/uid/id and tag slug (anchor requir
 
 // ---------- Ownership ----------
 test('product ownership is enforced across users', async () => {
-  const a = await User.create({ uid: uuid(), name: 'TST A', phone: `7${Date.now() % 1000000000}` });
-  const b = await User.create({ uid: uuid(), name: 'TST B', phone: `6${(Date.now() + 3) % 1000000000}` });
+  const a = await User.create({ uid: uuid(), name: 'TST A', phone: `7${String(Date.now() % 1000000000).padStart(9, '0')}` });
+  const b = await User.create({ uid: uuid(), name: 'TST B', phone: `6${String((Date.now() + 3) % 1000000000).padStart(9, '0')}` });
   track.users.push(a.id, b.id);
   const biz = await Business.create({ uid: uuid(), user_id: a.id, name: 'TST Biz' });
 
@@ -1232,7 +1238,7 @@ test('webhook rejects an invalid signature', async () => {
 });
 
 test('one-time webhook activates the subscription (and is idempotent)', async () => {
-  const u = await User.create({ uid: uuid(), name: 'TST Pay', phone: `5${Date.now() % 1000000000}` });
+  const u = await User.create({ uid: uuid(), name: 'TST Pay', phone: `5${String(Date.now() % 1000000000).padStart(9, '0')}` });
   track.users.push(u.id);
   const sub = await UserSubscription.create({
     uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1,
@@ -1268,7 +1274,7 @@ const mkCoupon = async (over = {}) => {
 };
 
 const mkUser = async (prefix) => {
-  const u = await User.create({ uid: uuid(), name: `TST ${prefix}`, phone: `6${Date.now() % 1000000000}${couponSeq++}`.slice(0, 10) });
+  const u = await User.create({ uid: uuid(), name: `TST ${prefix}`, phone: `6${String(Date.now() % 1000000000).padStart(9, '0')}${couponSeq++}`.slice(0, 10) });
   track.users.push(u.id);
   return u;
 };
@@ -1728,4 +1734,1694 @@ test('bundle/confirm accepts thumbnail_filename alone (no content) and rejects a
   } finally {
     Object.assign(s3, original);
   }
+});
+
+// ---------- Signup: industry + sub-industry + keywords ----------
+// Fixture: a parent industry with one child sub-industry, keywords curated on both
+// (two on the child, one on the parent only) so inheritance is observable.
+const mkKeywordFixture = async (stamp) => {
+  const parent = await models.BusinessCategory.create({
+    uid: uuid(), parent_id: null, name: `TST KwParent ${stamp}`, slug: `tst-kwparent-${stamp}`, is_active: 1,
+  });
+  track.businessCategories.push(parent.id);
+  const child = await models.BusinessCategory.create({
+    uid: uuid(), parent_id: parent.id, name: `TST KwChild ${stamp}`, slug: `tst-kwchild-${stamp}`, is_active: 1,
+  });
+  track.businessCategories.push(child.id);
+
+  const tags = [];
+  for (const label of ['Cakes', 'Brownies', 'Generic']) {
+    const t = await models.Tag.create({ name: `TST ${label} ${stamp}`, slug: `tst-${label.toLowerCase()}-${stamp}` });
+    track.tags.push(t.id);
+    tags.push(t);
+  }
+  await child.setTags([tags[0].id, tags[1].id]);
+  await parent.setTags([tags[2].id]);
+  return { parent, child, tags };
+};
+
+test('industry keywords: a sub-industry inherits its parent keywords, own ones first', async () => {
+  const stamp = Date.now();
+  const { parent, child, tags } = await mkKeywordFixture(stamp);
+
+  const r = await h.request('GET', `${P}/industries/${child.slug}/keywords`);
+  assert.equal(r.status, 200);
+  const names = r.body.data.map((t) => t.name);
+  assert.equal(names.length, 3, 'own 2 + inherited 1');
+  assert.ok(names.slice(0, 2).includes(tags[0].name) && names.slice(0, 2).includes(tags[1].name), 'own keywords lead');
+  assert.equal(names[2], tags[2].name, 'the parent-only keyword trails');
+
+  // A top-level industry has nothing to inherit.
+  const top = await h.request('GET', `${P}/industries/${parent.slug}/keywords`);
+  assert.deepEqual(top.body.data.map((t) => t.name), [tags[2].name]);
+
+  assert.equal((await h.request('GET', `${P}/industries/no-such-industry/keywords`)).status, 404);
+});
+
+test('create business with sub_industry + keywords (id / slug / name all resolve)', async () => {
+  const stamp = Date.now() + 1;
+  const { parent, child, tags } = await mkKeywordFixture(stamp);
+  const u     = await mkUser('KwOwner');
+  const token = h.userTokenFor(u.id);
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token,
+    body: {
+      name: `TST Kw Biz ${stamp}`,
+      industry: parent.slug,
+      sub_industry: child.slug,
+      keywords: [tags[0].id, tags[1].slug, tags[2].name],   // all three ref forms
+    },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.data.category_id, child.id, 'sub_industry wins over the parent industry');
+  assert.deepEqual(created.body.data.Tags.map((t) => t.id).sort(), tags.map((t) => t.id).sort());
+
+  // One business per user.
+  const second = await h.request('POST', `${P}/businesses`, { token, body: { name: `TST Kw Biz2 ${stamp}`, industry: parent.slug } });
+  assert.equal(second.status, 409, 'a second business is refused');
+
+  // An unrecognised keyword is named in the 400, never silently dropped.
+  const other = await mkUser('KwOwner2');
+  const bad = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(other.id),
+    body:  { name: `TST Kw Bad ${stamp}`, industry: parent.slug, keywords: [tags[0].slug, 'no-such-keyword'] },
+  });
+  assert.equal(bad.status, 400);
+  assert.ok(bad.body.error.details.some((d) => d.message.includes('no-such-keyword')));
+  assert.equal(await Business.count({ where: { user_id: other.id } }), 0, 'the whole create rolled back');
+
+  // A sub-industry from a different parent is rejected.
+  const mismatch = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(other.id),
+    body:  { name: `TST Kw Mismatch ${stamp}`, industry: 'restaurant-food', sub_industry: child.slug },
+  });
+  assert.equal(mismatch.status, 400);
+
+  // sub_industry and custom_sub_industry are mutually exclusive.
+  const both = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(other.id),
+    body:  { name: `TST Kw Both ${stamp}`, industry: parent.slug, sub_industry: child.slug, custom_sub_industry: 'Whatever' },
+  });
+  assert.equal(both.status, 400);
+});
+
+test('PUT /businesses/{uid}/keywords replaces the set and is owner-only', async () => {
+  const stamp = Date.now() + 2;
+  const { parent, tags } = await mkKeywordFixture(stamp);
+  const owner = await mkUser('KwMgr');
+  const token = h.userTokenFor(owner.id);
+
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Kw Mgr ${stamp}`, industry: parent.slug, keywords: [tags[0].id, tags[1].id] },
+  })).body.data;
+
+  const replaced = await h.request('PUT', `${P}/businesses/${biz.uid}/keywords`, { token, body: { keywords: [tags[2].id] } });
+  assert.equal(replaced.status, 200);
+  assert.deepEqual(replaced.body.data.map((t) => t.id), [tags[2].id], 'full replace, not a merge');
+
+  const cleared = await h.request('PUT', `${P}/businesses/${biz.uid}/keywords`, { token, body: { keywords: [] } });
+  assert.deepEqual(cleared.body.data, [], 'an empty array clears the set');
+
+  const stranger = await mkUser('KwStranger');
+  const denied = await h.request('PUT', `${P}/businesses/${biz.uid}/keywords`, {
+    token: h.userTokenFor(stranger.id), body: { keywords: [tags[0].id] },
+  });
+  assert.equal(denied.status, 403);
+});
+
+test('custom sub-industry: files a pending suggestion, hidden publicly until an admin approves', async () => {
+  const stamp    = Date.now() + 3;
+  const { parent } = await mkKeywordFixture(stamp);
+  const owner    = await mkUser('SugOwner');
+  const token    = h.userTokenFor(owner.id);
+  const customName = `TST Cloud Kitchen ${stamp}`;
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token,
+    body: { name: `TST Sug Biz ${stamp}`, industry: parent.slug, custom_sub_industry: customName, latitude: 12.9, longitude: 77.6 },
+  });
+  assert.equal(created.status, 201);
+
+  const suggested = await models.BusinessCategory.findOne({ where: { name: customName } });
+  track.businessCategories.push(suggested.id);
+  assert.equal(suggested.status, 'pending');
+  assert.equal(suggested.is_active, 0);
+  assert.equal(suggested.parent_id, parent.id, 'parented to the industry the owner did find');
+  assert.equal(suggested.suggested_by_user_id, owner.id);
+  assert.equal(created.body.data.category_id, suggested.id, 'the business links to it right away');
+
+  // Invisible in the public catalogue...
+  const cat = await h.request('GET', `${P}/industries`);
+  assert.ok(!cat.body.data.some((c) => c.name === customName), 'a pending suggestion is not offered');
+  assert.equal((await h.request('GET', `${P}/industries/${suggested.slug}`)).status, 404);
+
+  // ...and the storefront shows no industry chip while it waits.
+  const pub = await h.request('GET', `${P}/businesses/${created.body.data.uid}/public`);
+  assert.equal(pub.status, 200);
+  assert.equal(pub.body.data.category, undefined, 'no chip for an unapproved industry');
+  assert.equal(pub.body.data.category_id, null, 'and the id does not leak either');
+
+  // The owner still sees it, with its moderation state.
+  const mine = await h.request('GET', `${P}/businesses/${created.body.data.uid}`, { token });
+  assert.equal(mine.body.data.BusinessCategory.status, 'pending', 'the owner can render "pending approval"');
+
+  // A second owner suggesting the same name joins the queue instead of duplicating it.
+  const other = await mkUser('SugOwner2');
+  const again = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(other.id),
+    body:  { name: `TST Sug Biz2 ${stamp}`, industry: parent.slug, custom_sub_industry: customName.toLowerCase() },
+  });
+  assert.equal(again.status, 201);
+  assert.equal(again.body.data.category_id, suggested.id, 'converges on the existing suggestion (case-insensitive)');
+  assert.equal(await models.BusinessCategory.count({ where: { parent_id: parent.id, status: 'pending' } }), 1);
+
+  // Admin moderation queue, then approval.
+  const adminTok = h.adminToken(['categories.*']);
+  const queue = await h.request('GET', `${P}/admin/business-categories?status=pending`, { token: adminTok });
+  assert.equal(queue.status, 200);
+  const queued = queue.body.data.find((c) => c.uid === suggested.uid);
+  assert.ok(queued, 'the suggestion is in the queue');
+  assert.equal(queued.suggestedBy.id, owner.id, 'the admin can see who asked for it');
+
+  const approved = await h.request('PATCH', `${P}/admin/business-categories/${suggested.uid}`, {
+    token: adminTok, body: { status: 'approved' },
+  });
+  assert.equal(approved.status, 200);
+  await suggested.reload();
+  assert.equal(suggested.is_active, 1, 'approving publishes it');
+
+  // It now behaves as an ordinary industry, with no write to the businesses.
+  const after = await h.request('GET', `${P}/businesses/${created.body.data.uid}/public`);
+  assert.equal(after.body.data.category.name, customName, 'the chip appears on approval');
+  assert.ok((await h.request('GET', `${P}/industries`)).body.data.some((c) => c.name === customName));
+});
+
+test('custom sub-industry requires an industry, and a rejected name is refused', async () => {
+  const stamp = Date.now() + 4;
+  const u1 = await mkUser('SugNoParent');
+
+  const orphan = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(u1.id), body: { name: `TST Sug Orphan ${stamp}`, custom_sub_industry: `TST Orphan ${stamp}` },
+  });
+  assert.equal(orphan.status, 400, 'a suggestion needs a parent industry for the admin to review it');
+
+  const rejectedName = `TST Rejected ${stamp}`;
+  const rejected = await models.BusinessCategory.create({
+    uid: uuid(), parent_id: 1, name: rejectedName, slug: `tst-rejected-${stamp}`, status: 'rejected', is_active: 0,
+  });
+  track.businessCategories.push(rejected.id);
+
+  const u2 = await mkUser('SugRejected');
+  const retry = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(u2.id), body: { name: `TST Sug Retry ${stamp}`, industry: 'restaurant-food', custom_sub_industry: rejectedName },
+  });
+  assert.equal(retry.status, 400, 'a previously rejected industry cannot be re-suggested');
+});
+
+// ---------- Signup step 2: BUSINESS vs PERSONAL ----------
+test('PATCH /users/me is an allow-list: server-owned columns are not writable', async () => {
+  const u     = await mkUser('MassAssign');
+  const token = h.userTokenFor(u.id);
+
+  for (const body of [
+    { password_hash: 'pwned' },
+    { is_active: 0 },
+    { razorpay_customer_id: 'cust_evil' },
+    { phone: '9000000001' },
+    { uid: uuid() },
+  ]) {
+    const r = await h.request('PATCH', `${P}/users/me`, { token, body });
+    assert.equal(r.status, 400, `${Object.keys(body)[0]} must be rejected`);
+  }
+
+  await u.reload();
+  assert.equal(u.is_active, 1, 'nothing slipped through');
+  assert.equal(u.password_hash, null);
+
+  const ok = await h.request('PATCH', `${P}/users/me`, { token, body: { name: 'TST Renamed' } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.data.name, 'TST Renamed');
+  assert.equal(ok.body.data.password_hash, undefined, 'the hash never goes back to the client');
+  assert.equal((await h.request('GET', `${P}/users/me`, { token })).body.data.password_hash, undefined);
+});
+
+test('personal account: choosing it completes onboarding and blocks business creation', async () => {
+  const u     = await mkUser('Personal');
+  const token = h.userTokenFor(u.id);
+
+  const before = await h.request('GET', `${P}/users/me`, { token });
+  assert.deepEqual(before.body.data.onboarding, { account_type: null, has_business: false, completed: false });
+
+  const chosen = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } });
+  assert.equal(chosen.status, 200);
+  assert.deepEqual(chosen.body.data.onboarding, { account_type: 'personal', has_business: false, completed: true },
+    'a personal account has nothing left to answer');
+
+  // No business row, and no way to make one.
+  const biz = await h.request('POST', `${P}/businesses`, { token, body: { name: 'TST Personal Biz', industry: 'restaurant-food' } });
+  assert.equal(biz.status, 409);
+  assert.equal(await Business.count({ where: { user_id: u.id } }), 0);
+
+  // The answer is frozen once onboarding is stamped.
+  const flip = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'business' } });
+  assert.equal(flip.status, 409, 'account type cannot be changed after signup');
+
+  // Re-sending the same value is a harmless no-op, not a 409.
+  assert.equal((await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } })).status, 200);
+});
+
+test('business account: onboarding completes on business creation, then freezes', async () => {
+  const u     = await mkUser('BizFlow');
+  const token = h.userTokenFor(u.id);
+
+  // Step 2 picks BUSINESS but the flow is not finished â€” industry and business
+  // details still to come, so the app must resume here on next login.
+  await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'business' } });
+  const mid = await h.request('GET', `${P}/users/me`, { token });
+  assert.deepEqual(mid.body.data.onboarding, { account_type: 'business', has_business: false, completed: false });
+
+  // Mid-flow the user may still switch (the "SWITCH TO PERSONAL" button), and back.
+  assert.equal((await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } })).status, 200);
+  const back = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'business' } });
+  assert.equal(back.status, 409, 'switching to personal completed onboarding, which freezes the answer');
+});
+
+test('business creation completes onboarding for an account that never answered step 2', async () => {
+  const u     = await mkUser('BizDirect');
+  const token = h.userTokenFor(u.id);
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Direct Biz ${Date.now()}`, industry: 'restaurant-food' },
+  });
+  assert.equal(created.status, 201);
+
+  await u.reload();
+  assert.equal(u.account_type, 'business', 'creating a business IS the business path');
+  assert.ok(u.onboarding_completed_at, 'and it is the last step, so the flow is finished');
+
+  const me = await h.request('GET', `${P}/users/me`, { token });
+  assert.deepEqual(me.body.data.onboarding, { account_type: 'business', has_business: true, completed: true });
+});
+
+test('a failed business create leaves onboarding unfinished', async () => {
+  const u     = await mkUser('BizRollback');
+  const token = h.userTokenFor(u.id);
+
+  const bad = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: 'TST Rollback Biz', industry: 'restaurant-food', keywords: ['no-such-keyword'] },
+  });
+  assert.equal(bad.status, 400);
+
+  await u.reload();
+  assert.equal(u.onboarding_completed_at, null, 'the stamp rolled back with the business');
+  assert.equal(u.account_type, null);
+});
+
+test('changePassword tells an OTP-only account it has no password, rather than throwing', async () => {
+  const u = await mkUser('NoPassword');
+  const r = await h.request('PATCH', `${P}/users/me/password`, {
+    token: h.userTokenFor(u.id), body: { current_password: 'whatever', new_password: 'newpassword1' },
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error.message, /OTP/);
+});
+
+test('GET /industries?q= searches by name, and narrows within a parent', async () => {
+  const stamp = Date.now() + 5;
+  const { parent, child } = await mkKeywordFixture(stamp);
+
+  const hit = await h.request('GET', `${P}/industries?q=${encodeURIComponent(`KwChild ${stamp}`)}`);
+  assert.equal(hit.status, 200);
+  assert.deepEqual(hit.body.data.map((c) => c.id), [child.id]);
+
+  // Combined with `parent`, this is the specialization search.
+  const scoped = await h.request('GET', `${P}/industries?parent=${parent.slug}&q=KwChild`);
+  assert.ok(scoped.body.data.every((c) => c.parent_id === parent.id));
+  assert.ok(scoped.body.data.some((c) => c.id === child.id));
+
+  const miss = await h.request('GET', `${P}/industries?q=zzz-no-such-industry-zzz`);
+  assert.deepEqual(miss.body.data, []);
+});
+
+// ---------- User uploads (presign -> PUT -> confirm, then save the key) ----------
+// S3 is stubbed: presigning needs credentials and confirm does a HEAD, neither of
+// which exists in the test env. The stub records what would have been called.
+const withStubbedS3 = async (fn, { size = 1024, exists = true } = {}) => {
+  const s3 = require('../src/utils/s3Helper');
+  const original = {
+    getPresignedPutUrl: s3.getPresignedPutUrl,
+    objectExists:       s3.objectExists,
+    putObjectTagging:   s3.putObjectTagging,
+    deleteFile:         s3.deleteFile,
+  };
+  const calls = { tagged: [], deleted: [] };
+  s3.getPresignedPutUrl = async (key) => `https://s3.test/${key}?signed=1`;
+  s3.objectExists       = async () => (exists ? { exists: true, content_type: 'image/png', size } : { exists: false });
+  s3.putObjectTagging   = async (key, status) => { calls.tagged.push([key, status]); };
+  s3.deleteFile         = async (key) => { calls.deleted.push(key); };
+  try { return await fn(calls); } finally { Object.assign(s3, original); }
+};
+
+test('presign issues a key under the callers own namespace and rejects bad slots/types', async () => {
+  const u     = await mkUser('Upload');
+  const token = h.userTokenFor(u.id);
+
+  await withStubbedS3(async () => {
+    const r = await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'business_logo' }, filename: 'my logo.PNG', content_type: 'image/png' },
+    });
+    assert.equal(r.status, 200);
+    assert.ok(r.body.data.key.startsWith(`users/${u.uid}/logo/`), 'namespaced to the caller');
+    assert.ok(r.body.data.key.endsWith('.png'), 'extension preserved, name dropped');
+    assert.equal(r.body.data.required_headers['x-amz-tagging'], 'status=pending');
+    assert.ok(r.body.data.upload_url);
+
+    // The client cannot choose a prefix â€” only a known slot.
+    assert.equal((await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'templates' }, filename: 'x.png' },
+    })).status, 400);
+
+    // Non-image uploads are refused outright.
+    assert.equal((await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'business_logo' }, filename: 'x.svg', content_type: 'image/svg+xml' },
+    })).status, 400);
+  });
+});
+
+test('confirm promotes only your own keys, and deletes anything over the size limit', async () => {
+  const mine     = await mkUser('ConfirmMine');
+  const stranger = await mkUser('ConfirmOther');
+  const token    = h.userTokenFor(mine.id);
+
+  await withStubbedS3(async (calls) => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'profile_photo' }, filename: 'me.jpg' },
+    })).body.data.key;
+
+    const ok = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(calls.tagged, [[key, 'active']]);
+
+    // Another user's key, and an admin asset key, are both outside the namespace.
+    for (const foreign of [`users/${stranger.uid}/profile/abc.jpg`, 'assets/icon/premium.png']) {
+      const r = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [foreign] } });
+      assert.equal(r.status, 400, `${foreign} must be refused`);
+    }
+    assert.equal(calls.tagged.length, 1, 'nothing foreign was promoted');
+  });
+
+  // Oversized objects are deleted instead of promoted, so the key can never be saved.
+  await withStubbedS3(async (calls) => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'profile_photo' }, filename: 'huge.jpg' },
+    })).body.data.key;
+    const r = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(calls.deleted, [key]);
+    assert.deepEqual(calls.tagged, []);
+  }, { size: 11 * 1024 * 1024 });
+});
+
+test('a user cannot save an s3_key that was not issued to them (logo, product image, frame, photo)', async () => {
+  const owner    = await mkUser('KeyOwner');
+  const stranger = await mkUser('KeyThief');
+  const token    = h.userTokenFor(owner.id);
+  const thiefTok = h.userTokenFor(stranger.id);
+
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Key Biz ${Date.now()}`, industry: 'restaurant-food' },
+  })).body.data;
+
+  const foreign = `users/${stranger.uid}/logo/stolen.png`;
+  const admin   = 'assets/icon/premium.png';
+
+  // Business logo / cover.
+  for (const body of [{ logo_s3_key: foreign }, { logo_s3_key: admin }, { cover_s3_key: foreign }]) {
+    const r = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body });
+    assert.equal(r.status, 400, `${JSON.stringify(body)} must be refused`);
+  }
+
+  // Wrong slot: a real key of the owner's, but issued for a different purpose.
+  const wrongSlot = `users/${owner.uid}/products/x.png`;
+  assert.equal((await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { logo_s3_key: wrongSlot } })).status, 400,
+    'a product-image key cannot be saved as a logo');
+
+  // Product image.
+  const product = (await h.request('POST', `${P}/products`, {
+    token, body: { business_uid: biz.uid, name: 'TST Key Product' },
+  })).body.data;
+  assert.equal((await h.request('POST', `${P}/products/${product.uid}/images`, {
+    token, body: { s3_key: `users/${stranger.uid}/products/stolen.png` },
+  })).status, 400);
+
+  // Frame.
+  assert.equal((await h.request('POST', `${P}/frames`, {
+    token, body: { name: 'TST Key Frame', s3_key: `users/${stranger.uid}/frames/stolen.png` },
+  })).status, 400);
+
+  // Profile photo.
+  assert.equal((await h.request('PATCH', `${P}/users/me`, {
+    token: thiefTok, body: { profile_photo_s3_key: `users/${owner.uid}/profile/stolen.jpg` },
+  })).status, 400);
+});
+
+test('own keys save normally across every slot, and null clears', async () => {
+  const owner = await mkUser('KeyHappy');
+  const token = h.userTokenFor(owner.id);
+
+  const logo = `users/${owner.uid}/logo/${uuid()}.png`;
+  const biz  = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Logo Biz ${Date.now()}`, industry: 'restaurant-food', logo_s3_key: logo },
+  })).body.data;
+  assert.equal(biz.logo_s3_key, logo, 'the logo can now be set at signup, in the same call');
+
+  const cover = `users/${owner.uid}/cover/${uuid()}.png`;
+  const patched = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { cover_s3_key: cover } });
+  assert.equal(patched.body.data.cover_s3_key, cover);
+
+  const cleared = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { logo_s3_key: null } });
+  assert.equal(cleared.body.data.logo_s3_key, null, 'null clears the image');
+
+  const photo = `users/${owner.uid}/profile/${uuid()}.jpg`;
+  assert.equal((await h.request('PATCH', `${P}/users/me`, { token, body: { profile_photo_s3_key: photo } }))
+    .body.data.profile_photo_s3_key, photo);
+
+  const frame = await h.request('POST', `${P}/frames`, {
+    token, body: { name: 'TST Own Frame', s3_key: `users/${owner.uid}/frames/${uuid()}.png` },
+  });
+  assert.equal(frame.status, 201);
+
+  const product = (await h.request('POST', `${P}/products`, {
+    token, body: { business_uid: biz.uid, name: 'TST Own Product' },
+  })).body.data;
+  const img = await h.request('POST', `${P}/products/${product.uid}/images`, {
+    token, body: { s3_key: `users/${owner.uid}/products/${uuid()}.png` },
+  });
+  assert.equal(img.status, 201);
+});
+
+test('uploads require authentication', async () => {
+  assert.equal((await h.request('POST', `${P}/uploads/presign`, { body: { target: { slot: 'business_logo' }, filename: 'x.png' } })).status, 401);
+  assert.equal((await h.request('POST', `${P}/uploads/confirm`, { body: { keys: ['users/x/logo/y.png'] } })).status, 401);
+});
+
+// ---------- Storage quota ----------
+const MB = 1024 * 1024;
+
+const storageUsed = async (userId) => {
+  const row = await models.UserQuotaUsage.findOne({ where: { user_id: userId } });
+  return row ? Number(row.storage_used_bytes) : 0;
+};
+
+// Temporarily narrow the Free plan's storage allowance (feature_type 5) so the
+// limit can be crossed with a file under the 10 MB per-upload cap.
+const withStorageLimitMb = async (mb, fn) => {
+  const pf = await models.PlanFeature.findOne({ where: { plan_id: 1, feature_type_id: 5 } });
+  const original = pf.value;
+  await pf.update({ value: mb });
+  try { return await fn(); } finally { await pf.update({ value: original }); }
+};
+
+// Presign + confirm one file of `size` bytes, returning its key.
+const uploadOf = async (token, slot, size) => withStubbedS3(async () => {
+  const key = (await h.request('POST', `${P}/uploads/presign`, {
+    token, body: { target: { slot }, filename: 'f.png' },
+  })).body.data.key;
+  const r = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+  return { key, status: r.status, body: r.body };
+}, { size });
+
+test('storage is charged to storage_used_bytes on confirm, once per key', async () => {
+  const userId = await userWithActivePlan(1, 9101);          // Free: 100 MB
+  const token  = h.userTokenFor(userId);
+
+  assert.equal(await storageUsed(userId), 0);
+
+  const { key, status } = await uploadOf(token, 'user_frame', 2 * MB);
+  assert.equal(status, 200);
+  assert.equal(await storageUsed(userId), 2 * MB, 'charged to the bytes column, not a phantom storage_count');
+
+  const ledger = await models.UserUpload.findOne({ where: { s3_key: key } });
+  assert.equal(Number(ledger.bytes), 2 * MB);
+  assert.equal(ledger.slot, 'user_frame');
+
+  // Re-confirming the same key (a client retry) must not charge twice.
+  await withStubbedS3(async () => {
+    const again = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+    assert.equal(again.status, 200);
+  }, { size: 2 * MB });
+  assert.equal(await storageUsed(userId), 2 * MB, 'idempotent');
+});
+
+test('deleting the file that used the storage gives the bytes back', async () => {
+  const userId = await userWithActivePlan(1, 9102);
+  const token  = h.userTokenFor(userId);
+
+  const { key } = await uploadOf(token, 'user_frame', 3 * MB);
+  assert.equal(await storageUsed(userId), 3 * MB);
+
+  const frame = await h.request('POST', `${P}/frames`, { token, body: { name: 'TST Quota Frame', s3_key: key } });
+  assert.equal(frame.status, 201);
+
+  await withStubbedS3(async (calls) => {
+    const del = await h.request('DELETE', `${P}/frames/${frame.body.data.uid}`, { token });
+    assert.equal(del.status, 200);
+    assert.deepEqual(calls.deleted, [key], 'the object is removed, not just the row');
+  });
+
+  assert.equal(await storageUsed(userId), 0, 'refunded');
+  assert.equal(await models.UserUpload.count({ where: { s3_key: key } }), 0, 'ledger row cleared');
+});
+
+test('replacing a business logo releases the old file', async () => {
+  const userId = await userWithActivePlan(1, 9103);
+  const token  = h.userTokenFor(userId);
+
+  const first = await uploadOf(token, 'business_logo', 1 * MB);
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Quota Biz ${Date.now()}`, industry: 'restaurant-food', logo_s3_key: first.key },
+  })).body.data;
+  assert.equal(await storageUsed(userId), 1 * MB);
+
+  const second = await uploadOf(token, 'business_logo', 2 * MB);
+  assert.equal(await storageUsed(userId), 3 * MB, 'both files are on the books while both exist');
+
+  await withStubbedS3(async (calls) => {
+    await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { logo_s3_key: second.key } });
+    assert.deepEqual(calls.deleted, [first.key], 'the replaced logo is deleted');
+  });
+  assert.equal(await storageUsed(userId), 2 * MB, 'only the live logo is charged');
+
+  // Clearing it releases the rest.
+  await withStubbedS3(async () => {
+    await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { logo_s3_key: null } });
+  });
+  assert.equal(await storageUsed(userId), 0);
+});
+
+test('an upload over the plan limit is refused and deleted, not stored', async () => {
+  const userId = await userWithActivePlan(1, 9104);
+  const token  = h.userTokenFor(userId);
+
+  await withStorageLimitMb(5, async () => {
+    // Fits.
+    const ok = await uploadOf(token, 'user_frame', 4 * MB);
+    assert.equal(ok.status, 200);
+    assert.equal(await storageUsed(userId), 4 * MB);
+
+    // 4 MB + 2 MB > 5 MB â€” refused, and the object is removed rather than left
+    // behind active (it would never be swept: the lifecycle rule only sees pending).
+    await withStubbedS3(async (calls) => {
+      const key = (await h.request('POST', `${P}/uploads/presign`, {
+        token, body: { target: { slot: 'user_frame' }, filename: 'big.png' },
+      })).body.data.key;
+      const over = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+      assert.equal(over.status, 402, 'QUOTA_EXCEEDED');
+      assert.deepEqual(calls.deleted, [key]);
+      assert.deepEqual(calls.tagged, [], 'never promoted');
+      assert.equal(await models.UserUpload.count({ where: { s3_key: key } }), 0, 'not on the books');
+    }, { size: 2 * MB });
+
+    assert.equal(await storageUsed(userId), 4 * MB, 'the rejected file did not change the total');
+
+    // Once full, presign refuses up front rather than letting the client upload
+    // a file that confirm would only throw away.
+    await withStorageLimitMb(4, async () => {
+      const r = await h.request('POST', `${P}/uploads/presign`, {
+        token, body: { target: { slot: 'user_frame' }, filename: 'x.png' },
+      });
+      assert.equal(r.status, 402);
+    });
+  });
+});
+
+test('GET /subscriptions/me reports storage in MB, with exact bytes alongside', async () => {
+  const userId = await userWithActivePlan(1, 9105);          // Free: 100 MB
+  const token  = h.userTokenFor(userId);
+  await uploadOf(token, 'user_frame', Math.round(2.5 * MB));
+
+  const me = await h.request('GET', `${P}/subscriptions/me`, { token });
+  assert.equal(me.status, 200);
+  const storage = me.body.data.features.find((f) => f.key === 'storage');
+
+  assert.equal(storage.unit, 'MB');
+  assert.equal(storage.limit, 100);
+  assert.equal(storage.used, 2.5);
+  assert.equal(storage.remaining, 97.5, 'MB compared against MB â€” not 100 minus a byte count');
+  assert.equal(storage.used_bytes, Math.round(2.5 * MB));
+
+  // A plain counter is unchanged by the unit handling.
+  const downloads = me.body.data.features.find((f) => f.key === 'downloads');
+  assert.equal(downloads.unit, 'count');
+  assert.equal(downloads.used_bytes, undefined);
+});
+
+test('an unlimited plan records storage but never blocks', async () => {
+  const userId = await userWithActivePlan(2, 9106);          // Pro: unlimited
+  const token  = h.userTokenFor(userId);
+
+  const ok = await uploadOf(token, 'user_frame', 9 * MB);
+  assert.equal(ok.status, 200);
+  assert.equal(await storageUsed(userId), 9 * MB, 'still recorded, so a later policy change needs no backfill');
+
+  const me = await h.request('GET', `${P}/subscriptions/me`, { token });
+  const storage = me.body.data.features.find((f) => f.key === 'storage');
+  assert.equal(storage.unlimited, true);
+  assert.equal(storage.limit, null);
+  assert.equal(storage.remaining, null);
+});
+
+test('releasing more than was charged floors the counter at zero', async () => {
+  const userId = await userWithActivePlan(1, 9107);
+  const quota  = require('../src/services/quota.service');
+
+  await quota.consume(userId, 'storage', 1000);
+  assert.equal(await storageUsed(userId), 1000);
+
+  await quota.release(userId, 'storage', 5000);
+  assert.equal(await storageUsed(userId), 0, 'never negative â€” that would read as free headroom');
+});
+
+test('deleting a product or a business releases the storage held underneath it', async () => {
+  const userId = await userWithActivePlan(1, 9108);
+  const token  = h.userTokenFor(userId);
+
+  const logo = await uploadOf(token, 'business_logo', 1 * MB);
+  const biz  = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Cascade Biz ${Date.now()}`, industry: 'restaurant-food', logo_s3_key: logo.key },
+  })).body.data;
+
+  const mkProductWithImage = async (name, size) => {
+    const product = (await h.request('POST', `${P}/products`, { token, body: { business_uid: biz.uid, name } })).body.data;
+    const img = await uploadOf(token, 'product_image', size);
+    await h.request('POST', `${P}/products/${product.uid}/images`, { token, body: { s3_key: img.key } });
+    return { product, key: img.key };
+  };
+
+  const a = await mkProductWithImage('TST Cascade P1', 2 * MB);
+  const b = await mkProductWithImage('TST Cascade P2', 3 * MB);
+  assert.equal(await storageUsed(userId), 6 * MB, 'logo + two product images');
+
+  // Deleting one product frees only its own image.
+  await withStubbedS3(async (calls) => {
+    assert.equal((await h.request('DELETE', `${P}/products/${a.product.uid}`, { token })).status, 200);
+    assert.deepEqual(calls.deleted, [a.key]);
+  });
+  assert.equal(await storageUsed(userId), 4 * MB);
+
+  // Deleting the business takes the logo and the surviving product's image.
+  await withStubbedS3(async (calls) => {
+    assert.equal((await h.request('DELETE', `${P}/businesses/${biz.uid}`, { token })).status, 200);
+    assert.deepEqual(calls.deleted.sort(), [logo.key, b.key].sort());
+  });
+  assert.equal(await storageUsed(userId), 0, 'nothing stranded as permanently charged');
+});
+
+// ---------- Brand colours ----------
+const mkBusinessFor = async (token, label) => (await h.request('POST', `${P}/businesses`, {
+  token, body: { name: `TST ${label} ${Date.now()}${Math.random().toString(36).slice(2, 6)}`, industry: 'restaurant-food' },
+})).body.data;
+
+test('brand palette can be set at signup, and order is preserved as sent', async () => {
+  const owner = await mkUser('Palette');
+  const token = h.userTokenFor(owner.id);
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token,
+    body: {
+      name: `TST Palette Biz ${Date.now()}`,
+      industry: 'restaurant-food',
+      brand_colors: [
+        { hex: '#ff0000', label: 'Brand Red' },
+        { hex: '#00FF00' },
+        { hex: '#0000ff', label: '  Deep Blue  ' },
+      ],
+    },
+  });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.body.data.brand_colors, [
+    { hex: '#FF0000', label: 'Brand Red' },
+    { hex: '#00FF00' },
+    { hex: '#0000FF', label: 'Deep Blue' },
+  ], 'upper-cased, labels trimmed, blank labels dropped, order untouched');
+});
+
+test('PUT /businesses/{uid}/brand-colors replaces the palette and is owner-only', async () => {
+  const owner = await mkUser('PaletteMgr');
+  const token = h.userTokenFor(owner.id);
+  const biz   = await mkBusinessFor(token, 'PalMgr Biz');
+
+  assert.deepEqual((await h.request('GET', `${P}/businesses/${biz.uid}/brand-colors`, { token })).body.data, [],
+    'unset reads as an empty array, not null');
+
+  const set = await h.request('PUT', `${P}/businesses/${biz.uid}/brand-colors`, {
+    token, body: { brand_colors: [{ hex: '#123456' }, { hex: '#ABCDEF', label: 'Accent' }] },
+  });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.body.data, [{ hex: '#123456' }, { hex: '#ABCDEF', label: 'Accent' }]);
+
+  // Full replace, not a merge.
+  const replaced = await h.request('PUT', `${P}/businesses/${biz.uid}/brand-colors`, {
+    token, body: { brand_colors: [{ hex: '#FFFFFF' }] },
+  });
+  assert.deepEqual(replaced.body.data, [{ hex: '#FFFFFF' }]);
+
+  const cleared = await h.request('PUT', `${P}/businesses/${biz.uid}/brand-colors`, { token, body: { brand_colors: [] } });
+  assert.deepEqual(cleared.body.data, []);
+
+  const stranger = await mkUser('PaletteStranger');
+  assert.equal((await h.request('PUT', `${P}/businesses/${biz.uid}/brand-colors`, {
+    token: h.userTokenFor(stranger.id), body: { brand_colors: [{ hex: '#000000' }] },
+  })).status, 403);
+});
+
+test('brand palette rejects bad hex, duplicates and oversized palettes', async () => {
+  const owner = await mkUser('PaletteBad');
+  const token = h.userTokenFor(owner.id);
+  const biz   = await mkBusinessFor(token, 'PalBad Biz');
+
+  const put = (brand_colors) => h.request('PUT', `${P}/businesses/${biz.uid}/brand-colors`, { token, body: { brand_colors } });
+
+  assert.equal((await put([{ hex: '#FFF' }])).status, 400, '3-digit shorthand is not accepted');
+  assert.equal((await put([{ hex: 'FF0000' }])).status, 400, 'missing #');
+  assert.equal((await put([{ hex: '#GGGGGG' }])).status, 400, 'not hex');
+  assert.equal((await put([{ hex: '#FF0000' }, { hex: '#ff0000' }])).status, 400, 'same colour twice, case-insensitively');
+  assert.equal((await put([
+    { hex: '#111111' }, { hex: '#222222' }, { hex: '#333333' },
+    { hex: '#444444' }, { hex: '#555555' }, { hex: '#666666' }, { hex: '#777777' },
+  ])).status, 400, 'seven is over the cap');
+
+  // Exactly six is fine.
+  assert.equal((await put([
+    { hex: '#111111' }, { hex: '#222222' }, { hex: '#333333' },
+    { hex: '#444444' }, { hex: '#555555' }, { hex: '#666666' },
+  ])).status, 200);
+
+  // Nothing was written by any of the rejected calls.
+  assert.equal((await h.request('GET', `${P}/businesses/${biz.uid}/brand-colors`, { token })).body.data.length, 6);
+});
+
+test('the brand palette stays out of the public storefront', async () => {
+  const owner = await mkUser('PalettePrivate');
+  const token = h.userTokenFor(owner.id);
+  const biz   = (await h.request('POST', `${P}/businesses`, {
+    token,
+    body: {
+      name: `TST Palette Private ${Date.now()}`, industry: 'restaurant-food',
+      brand_colors: [{ hex: '#ABCDEF' }],
+    },
+  })).body.data;
+
+  const pub = await h.request('GET', `${P}/businesses/${biz.uid}/public`);
+  assert.equal(pub.status, 200);
+  assert.equal(pub.body.data.brand_colors, undefined, 'a design input, not storefront content');
+
+  // The owner still sees it.
+  const mine = await h.request('GET', `${P}/businesses/${biz.uid}`, { token });
+  assert.deepEqual(mine.body.data.brand_colors, [{ hex: '#ABCDEF' }]);
+});
+
+// ---------- JSON columns are parsed, not handed back as strings ----------
+test('JSON columns come back parsed (they were returning raw strings)', async () => {
+  const owner = await mkUser('JsonCols');
+  const token = h.userTokenFor(owner.id);
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token,
+    body: {
+      name: `TST Json Biz ${Date.now()}`, industry: 'restaurant-food',
+      social_links:    { instagram: 'https://example.test/a' },
+      operating_hours: { mon: { open: '09:00', close: '18:00' } },
+      brand_colors:    [{ hex: '#AABBCC' }],
+    },
+  })).body.data;
+
+  assert.deepEqual(biz.social_links, { instagram: 'https://example.test/a' });
+  assert.deepEqual(biz.operating_hours, { mon: { open: '09:00', close: '18:00' } });
+  assert.deepEqual(biz.brand_colors, [{ hex: '#AABBCC' }]);
+
+  // Same on the public storefront, which is where the FE reads them.
+  const pub = await h.request('GET', `${P}/businesses/${biz.uid}/public`);
+  assert.deepEqual(pub.body.data.social_links, { instagram: 'https://example.test/a' });
+  assert.equal(typeof pub.body.data.operating_hours, 'object');
+
+  const role = await models.Role.findByPk(2);
+  assert.ok(Array.isArray(role.permissions), 'roles.permissions is an array, not a JSON string');
+});
+
+test('a wildcard role is not silently a superuser', async () => {
+  // Regression: authorizeAdmin checks `perms.includes('*')`. While permissions came
+  // back as the raw string '["templates.*","categories.*",...]' that was a SUBSTRING
+  // test, which any wildcard satisfied â€” so content_admin passed the superuser gate
+  // and could reach plans, coupons and admin-user management.
+  const bcrypt = require('bcryptjs');
+  const email  = `tst-content-admin-${Date.now()}@example.com`;
+  const admin  = await models.AdminUser.create({
+    uid: uuid(), name: 'TST Content Admin', email,
+    password_hash: await bcrypt.hash('password123', 10), role_id: 2, is_active: 1,
+  });
+
+  try {
+    const login = await h.request('POST', `${P}/auth/admin/login`, { body: { email, password: 'password123' } });
+    assert.equal(login.status, 200);
+    const token = login.body.data.access_token;
+
+    // content_admin holds categories.* â€” still allowed in its own domains.
+    assert.equal((await h.request('GET', `${P}/admin/business-categories`, { token })).status, 200);
+
+    // ...and nowhere else.
+    assert.equal((await h.request('GET', `${P}/admin/plans`, { token })).status, 403, 'plans are outside its grant');
+    assert.equal((await h.request('GET', `${P}/admin/admins`, { token })).status, 403, 'admin management even more so');
+  } finally {
+    await admin.destroy();
+  }
+});
+
+// ---------- Sessions, password & account settings ----------
+const otpLogin = async (phone) => {
+  const sent = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
+  const r = await h.request('POST', `${P}/auth/verify-otp`, {
+    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'test_app' },
+  });
+  return r.body.data;
+};
+
+const newPhone = () => `7${String(Date.now()).slice(-9)}${Math.floor(Math.random() * 10)}`.slice(0, 10);
+
+test('logout actually ends the session â€” the refresh token dies with it', async () => {
+  const phone = newPhone();
+  const t = await otpLogin(phone);
+  const user = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  // Before: the refresh token works.
+  assert.equal((await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } })).status, 200);
+
+  // Log in again (the refresh above rotated the first session) and log out.
+  const t2 = await otpLogin(phone);
+  assert.equal((await h.request('POST', `${P}/auth/logout`, { token: t2.access_token })).status, 200);
+
+  // The access token is blacklisted...
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: t2.access_token })).status, 401);
+  // ...and so is the refresh token, which previously survived logout entirely.
+  const after = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t2.refresh_token } });
+  assert.equal(after.status, 401, 'a logged-out session cannot mint new access tokens');
+});
+
+test('revoke-others signs out every other device immediately, keeping the current one', async () => {
+  const phone = newPhone();
+  const a = await otpLogin(phone);
+  const user = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+  const b = await otpLogin(phone);
+  const c = await otpLogin(phone);
+
+  // All three are live.
+  for (const t of [a, b, c]) {
+    assert.equal((await h.request('GET', `${P}/users/me`, { token: t.access_token })).status, 200);
+  }
+
+  const revoked = await h.request('POST', `${P}/users/me/sessions/revoke-others`, { token: c.access_token });
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.body.data.sessions_ended, 2);
+
+  // Immediate â€” not "once the access token expires in 15 minutes".
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: a.access_token })).status, 401);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).status, 401);
+  assert.equal((await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: a.refresh_token } })).status, 401);
+
+  // The caller keeps working.
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: c.access_token })).status, 200);
+});
+
+test('set password: only when there is none, and it ends other sessions', async () => {
+  const phone = newPhone();
+  const a = await otpLogin(phone);
+  const user = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+  const b = await otpLogin(phone);
+
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).body.data.has_password, false);
+
+  const set = await h.request('POST', `${P}/users/me/password`, { token: b.access_token, body: { new_password: 'sup3rsecret' } });
+  assert.equal(set.status, 200);
+  assert.equal(set.body.data.sessions_ended, 1);
+
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).body.data.has_password, true);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: a.access_token })).status, 401, 'the other device was signed out');
+
+  // A second set is refused â€” that would be a password change without proving the old one.
+  const again = await h.request('POST', `${P}/users/me/password`, { token: b.access_token, body: { new_password: 'another1pass' } });
+  assert.equal(again.status, 409);
+
+  // Change works now, and needs the current password.
+  assert.equal((await h.request('PATCH', `${P}/users/me/password`, {
+    token: b.access_token, body: { current_password: 'wrongpass', new_password: 'another1pass' },
+  })).status, 409);
+
+  const changed = await h.request('PATCH', `${P}/users/me/password`, {
+    token: b.access_token, body: { current_password: 'sup3rsecret', new_password: 'another1pass' },
+  });
+  assert.equal(changed.status, 200);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).status, 200, 'the caller stays signed in');
+
+  // Too short is rejected.
+  assert.equal((await h.request('POST', `${P}/users/me/password`, { token: b.access_token, body: { new_password: 'short' } })).status, 400);
+});
+
+test('deactivate ends everything and cannot be undone by logging in again', async () => {
+  const phone = newPhone();
+  const a = await otpLogin(phone);
+  const user = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+  const b = await otpLogin(phone);
+
+  const off = await h.request('POST', `${P}/users/me/deactivate`, { token: b.access_token });
+  assert.equal(off.status, 200);
+
+  await user.reload();
+  assert.equal(user.is_active, 0);
+
+  // Every session, including the caller's own.
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: a.access_token })).status, 401);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).status, 401);
+  assert.equal((await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: b.refresh_token } })).status, 401);
+
+  // And OTP does not let them straight back in.
+  const sent = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
+  const back = await h.request('POST', `${P}/auth/verify-otp`, {
+    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'test_app' },
+  });
+  assert.equal(back.status, 401, 'deactivation would be meaningless otherwise');
+});
+
+test('a deactivated owner disappears from the public directory but nothing is deleted', async () => {
+  const phone = newPhone();
+  const t = await otpLogin(phone);
+  const user = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token: t.access_token,
+    body: { name: `TST Deact Biz ${Date.now()}`, industry: 'restaurant-food', latitude: 12.97, longitude: 77.59 },
+  })).body.data;
+
+  assert.equal((await h.request('GET', `${P}/businesses/${biz.uid}/public`)).status, 200);
+  const near = await h.request('GET', `${P}/businesses/nearby?lat=12.97&lng=77.59&radius=5`);
+  assert.ok(near.body.data.some((b) => b.uid === biz.uid), 'listed while active');
+
+  await h.request('POST', `${P}/users/me/deactivate`, { token: t.access_token });
+
+  assert.equal((await h.request('GET', `${P}/businesses/${biz.uid}/public`)).status, 404, 'storefront gone');
+  const nearAfter = await h.request('GET', `${P}/businesses/nearby?lat=12.97&lng=77.59&radius=5`);
+  assert.ok(!nearAfter.body.data.some((b) => b.uid === biz.uid), 'delisted from Near Me');
+
+  // The business row itself is untouched, so reactivating restores the listing.
+  const row = await Business.findOne({ where: { uid: biz.uid } });
+  assert.equal(row.is_active, 1, 'not soft-deleted â€” reactivation brings it back as it was');
+});
+
+test('notification preferences: defaults without a row, partial update, lazily created row', async () => {
+  const u     = await mkUser('Prefs');
+  const token = h.userTokenFor(u.id);
+
+  const initial = await h.request('GET', `${P}/users/me/preferences`, { token });
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.data.notify_push, true);
+  assert.equal(initial.body.data.notify_email, true);
+  assert.equal(initial.body.data.notify_whatsapp, true);
+  assert.equal(await models.UserPreference.count({ where: { user_id: u.id } }), 0, 'no row written by a read');
+
+  const patched = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { notify_email: false } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.data.notify_email, false);
+  assert.equal(patched.body.data.notify_push, true, 'only what was sent changed');
+  assert.equal(await models.UserPreference.count({ where: { user_id: u.id } }), 1, 'row created on first write');
+
+  const again = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { notify_whatsapp: false } });
+  assert.equal(again.body.data.notify_email, false, 'the earlier change survives');
+  assert.equal(again.body.data.notify_whatsapp, false);
+
+  assert.equal((await h.request('PATCH', `${P}/users/me/preferences`, { token, body: {} })).status, 400, 'empty body rejected');
+  assert.equal((await h.request('GET', `${P}/users/me/preferences`, {})).status, 401);
+});
+
+// ---------- Preferred Languages (content languages for templates) ----------
+test('GET /languages lists the picker options with native names', async () => {
+  const r = await h.request('GET', `${P}/languages`);
+  assert.equal(r.status, 200);
+  const byCode = Object.fromEntries(r.body.data.map((l) => [l.code, l]));
+  assert.ok(byCode.en && byCode.ta, 'seeded');
+  assert.equal(byCode.ta.name, 'Tamil', 'English label for admin screens');
+  assert.equal(byCode.ta.native_name, 'தமிழ்', 'what the picker renders');
+  assert.equal(byCode.en.display_order, 1, 'English leads — it is the default');
+});
+
+test('preferred languages: default English until chosen, then a full replace', async () => {
+  const u     = await mkUser('Langs');
+  const token = h.userTokenFor(u.id);
+
+  const initial = await h.request('GET', `${P}/users/me/preferences`, { token });
+  assert.deepEqual(initial.body.data.languages.map((l) => l.code), ['en']);
+  assert.equal(initial.body.data.languages_are_default, true, 'the user has not actually chosen yet');
+  assert.equal(await models.UserLanguage.count({ where: { user_id: u.id } }), 0, 'the default is not written as rows');
+
+  const set = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['en', 'ml'] } });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.body.data.languages.map((l) => l.code).sort(), ['en', 'ml']);
+  assert.equal(set.body.data.languages_are_default, false);
+
+  // Full replace, not a merge.
+  const replaced = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['ta'] } });
+  assert.deepEqual(replaced.body.data.languages.map((l) => l.code), ['ta']);
+
+  // Clearing puts them back on the default.
+  const cleared = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: [] } });
+  assert.deepEqual(cleared.body.data.languages.map((l) => l.code), ['en']);
+  assert.equal(cleared.body.data.languages_are_default, true);
+
+  // An unknown language is named in the 400 rather than silently dropped — the
+  // saved filter must match what the screen showed.
+  const bad = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['en', 'zz'] } });
+  assert.equal(bad.status, 400);
+  assert.ok(bad.body.error.details.some((d) => d.message.includes('zz')));
+});
+
+test('template browse narrows to the viewer\'s languages, keeping language-neutral designs', async () => {
+  const stamp = Date.now();
+  const ta = await models.Language.findOne({ where: { code: 'ta' } });
+  const ml = await models.Language.findOne({ where: { code: 'ml' } });
+
+  const mk = async (label, languageId) => {
+    const t = await Template.create({
+      uid: uuid(), name: `TST Lang ${label} ${stamp}`, content: '{"c":1}', status: 'active',
+      category_id: 2, language_id: languageId,
+    });
+    track.templates.push(t.id);
+    return t;
+  };
+  const tamil   = await mk('Tamil', ta.id);
+  const malay   = await mk('Malayalam', ml.id);
+  const neutral = await mk('Neutral', null);
+
+  const browse = async (token, qs = '') => {
+    const r = await h.request('GET', `${P}/templates?category_id=2${qs}`, token ? { token } : {});
+    return r.body.data.map((t) => t.uid);
+  };
+
+  const u     = await mkUser('LangBrowse');
+  const token = h.userTokenFor(u.id);
+
+  // No picks yet -> English + neutral. The Tamil and Malayalam ones are filtered out,
+  // but the untagged design still shows.
+  let uids = await browse(token);
+  assert.ok(uids.includes(neutral.uid), 'language-neutral designs always show');
+  assert.ok(!uids.includes(tamil.uid) && !uids.includes(malay.uid));
+
+  await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['ta'] } });
+  uids = await browse(token);
+  assert.ok(uids.includes(tamil.uid), 'their chosen language appears');
+  assert.ok(uids.includes(neutral.uid), 'neutral still comes through');
+  assert.ok(!uids.includes(malay.uid), 'a language they did not choose does not');
+
+  // ?language= overrides the saved picks (browsing a specific language).
+  uids = await browse(token, '&language=ml');
+  assert.ok(uids.includes(malay.uid) && !uids.includes(tamil.uid));
+
+  // ?all_languages=1 opts out entirely — for SEO/landing pages.
+  uids = await browse(token, '&all_languages=1');
+  assert.ok([tamil.uid, malay.uid, neutral.uid].every((x) => uids.includes(x)));
+
+  // Guests get the same default as a user who has not chosen.
+  uids = await browse(null);
+  assert.ok(uids.includes(neutral.uid) && !uids.includes(tamil.uid));
+});
+
+test('admin can set a template language, and languages are admin-managed', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+
+  const created = await h.request('POST', `${P}/admin/languages`, {
+    token, body: { code: 'zz', name: `TST Lang ${stamp}`, native_name: 'ZZ', display_order: 99 },
+  });
+  assert.equal(created.status, 201);
+  const langId = created.body.data.id;
+
+  // Duplicate code is a clean 409, not a raw DB error.
+  assert.equal((await h.request('POST', `${P}/admin/languages`, {
+    token, body: { code: 'zz', name: `TST Lang Dup ${stamp}`, native_name: 'ZZ2' },
+  })).status, 409);
+
+  const tpl = await Template.create({ uid: uuid(), name: `TST LangSet ${stamp}`, content: '{"c":1}', status: 'draft' });
+  track.templates.push(tpl.id);
+  const tagged = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { language_id: langId } });
+  assert.equal(tagged.status, 200);
+  await tpl.reload();
+  assert.equal(tpl.language_id, langId);
+
+  // Deleting the language must not delete the designs drawn in it.
+  assert.equal((await h.request('DELETE', `${P}/admin/languages/${created.body.data.uid}`, { token })).status, 200);
+  await tpl.reload();
+  assert.equal(tpl.language_id, null, 'the template survives, just untagged');
+});
+
+// ---------- Watermark (own branding, gated by the custom_watermark plan feature) ----------
+test('watermark: free accounts cannot enable it, paid can, and turning it off always works', async () => {
+  const freeId = await mkUser('WmFree').then((u) => u.id);
+  const freeTok = h.userTokenFor(freeId);
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token: freeTok, body: { name: `TST WM Biz ${Date.now()}`, industry: 'restaurant-food' },
+  })).body.data;
+
+  assert.equal(biz.watermark_enabled, 0, 'off by default');
+  assert.equal(biz.watermark_allowed, false, 'no plan, no entitlement');
+  assert.equal(biz.watermark_active, false);
+
+  const denied = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token: freeTok, body: { watermark_enabled: 1 } });
+  assert.equal(denied.status, 403, 'the paywall holds server-side, not just in the UI');
+
+  // Grant Pro (plan 2 carries custom_watermark).
+  const sub = await UserSubscription.create({
+    uid: uuid(), user_id: freeId, plan_id: 2, sub_type: 'regular', status: 'active',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
+  });
+
+  const allowed = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token: freeTok, body: { watermark_enabled: 1 } });
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.body.data.watermark_enabled, 1);
+  assert.equal(allowed.body.data.watermark_active, true);
+
+  // Plan lapses: the stored flag stays, but the capability is gone and
+  // watermark_active says so â€” the app must stamp only when active is true.
+  await sub.update({ status: 'expired' });
+  const lapsed = await h.request('GET', `${P}/businesses/${biz.uid}`, { token: freeTok });
+  assert.equal(lapsed.body.data.watermark_enabled, 1, 'their setting is remembered');
+  assert.equal(lapsed.body.data.watermark_allowed, false);
+  assert.equal(lapsed.body.data.watermark_active, false, 'so nothing is stamped');
+
+  // Turning it OFF is always allowed â€” a lapsed plan must not trap the setting on.
+  const off = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token: freeTok, body: { watermark_enabled: 0 } });
+  assert.equal(off.status, 200);
+  assert.equal(off.body.data.watermark_enabled, 0);
+});
+
+test('custom_watermark shows up as a normal boolean entitlement', async () => {
+  const userId = await userWithActivePlan(2, 9201);       // Pro
+  const me = await h.request('GET', `${P}/subscriptions/me`, { token: h.userTokenFor(userId) });
+  const wm = me.body.data.features.find((f) => f.key === 'custom_watermark');
+  assert.ok(wm, 'listed alongside the other entitlements');
+  assert.equal(wm.data_type, 'boolean');
+  assert.equal(wm.enabled, true);
+
+  const freeId = await userWithActivePlan(1, 9202);       // Free
+  const freeMe = await h.request('GET', `${P}/subscriptions/me`, { token: h.userTokenFor(freeId) });
+  assert.equal(freeMe.body.data.features.find((f) => f.key === 'custom_watermark').enabled, false);
+});
+
+// ---------- Feedback ----------
+test('feedback: rating required, message optional, signed-in users only', async () => {
+  const u     = await mkUser('Feedback');
+  const token = h.userTokenFor(u.id);
+
+  assert.equal((await h.request('POST', `${P}/feedback`, { body: { rating: 5 } })).status, 401, 'registered users only');
+
+  const sent = await h.request('POST', `${P}/feedback`, {
+    token, body: { rating: 4, message: '  Love the templates  ', app_version: '2.4.1', platform: 'android' },
+  });
+  assert.equal(sent.status, 201);
+  assert.equal(sent.body.data.rating, 4);
+  assert.ok(sent.body.data.uid);
+
+  const row = await models.Feedback.findOne({ where: { uid: sent.body.data.uid } });
+  assert.equal(row.message, 'Love the templates', 'trimmed');
+  assert.equal(row.user_id, u.id);
+  assert.equal(row.app_version, '2.4.1');
+
+  // Rating alone is enough â€” the faces are the point of the form.
+  const bare = await h.request('POST', `${P}/feedback`, { token, body: { rating: 1 } });
+  assert.equal(bare.status, 201);
+  const bareRow = await models.Feedback.findOne({ where: { uid: bare.body.data.uid } });
+  assert.equal(bareRow.message, null);
+
+  // A whitespace-only note is stored as "no comment", not as blank text.
+  const blank = await h.request('POST', `${P}/feedback`, { token, body: { rating: 3, message: '   ' } });
+  assert.equal((await models.Feedback.findOne({ where: { uid: blank.body.data.uid } })).message, null);
+
+  // Out-of-range / missing ratings are refused.
+  for (const body of [{}, { rating: 0 }, { rating: 6 }, { message: 'no rating' }]) {
+    assert.equal((await h.request('POST', `${P}/feedback`, { token, body })).status, 400, JSON.stringify(body));
+  }
+});
+
+test('admin can list and delete feedback, but not author it', async () => {
+  const u     = await mkUser('FeedbackAdmin');
+  const token = h.userTokenFor(u.id);
+  const sent  = await h.request('POST', `${P}/feedback`, { token, body: { rating: 2, message: 'TST admin-visible note' } });
+  assert.equal(sent.status, 201);
+
+  const adminTok = h.adminToken(['*']);
+  const list = await h.request('GET', `${P}/admin/feedback?limit=200`, { token: adminTok });
+  assert.equal(list.status, 200);
+  const mine = list.body.data.find((f) => f.uid === sent.body.data.uid);
+  assert.ok(mine, 'appears in the admin list');
+  assert.equal(mine.User.id, u.id, 'the submitter comes with it');
+  assert.ok(typeof list.body.meta.total === 'number');
+
+  // Filterable by rating.
+  const filtered = await h.request('GET', `${P}/admin/feedback?rating=2&limit=200`, { token: adminTok });
+  assert.ok(filtered.body.data.every((f) => f.rating === 2));
+
+  // There is no admin create route â€” feedback is a record of what a user said.
+  assert.equal((await h.request('POST', `${P}/admin/feedback`, { token: adminTok, body: { rating: 5 } })).status, 404);
+
+  // Spam removal works.
+  assert.equal((await h.request('DELETE', `${P}/admin/feedback/${sent.body.data.uid}`, { token: adminTok })).status, 200);
+  assert.equal(await models.Feedback.count({ where: { uid: sent.body.data.uid } }), 0);
+
+  // And needs the permission.
+  const weak = h.adminToken(['categories.*']);
+  assert.equal((await h.request('GET', `${P}/admin/feedback`, { token: weak })).status, 403);
+});
+
+// ---------- Media Library ("My Uploads") ----------
+test('media library: upload with dimensions, list newest first, delete refunds storage', async () => {
+  const userId = await userWithActivePlan(1, 9301);          // Free: 100 MB
+  const token  = h.userTokenFor(userId);
+
+  const upload = async (filename, size, width, height) => withStubbedS3(async () => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename },
+    })).body.data.key;
+    const r = await h.request('POST', `${P}/uploads/confirm`, {
+      token, body: { uploads: [{ key, width, height, filename }] },
+    });
+    assert.equal(r.status, 200);
+    return key;
+  }, { size });
+
+  const first  = await upload('beach-sunset.jpg', 2 * MB, 1920, 1080);
+  const second = await upload('logo-draft.png', 1 * MB, 512, 512);
+
+  assert.ok(first.startsWith(`users/${(await User.findByPk(userId)).uid}/media/`), 'its own prefix');
+  assert.equal(await storageUsed(userId), 3 * MB, 'charged like any other upload');
+
+  const list = await h.request('GET', `${P}/uploads`, { token });
+  assert.equal(list.status, 200);
+  assert.equal(list.body.meta.total, 2);
+  assert.equal(list.body.data[0].s3_key, second, 'newest first');
+
+  const item = list.body.data[0];
+  assert.equal(item.width, 512);
+  assert.equal(item.height, 512);
+  assert.equal(item.original_filename, 'logo-draft.png', 'the uuid key would otherwise lose the name');
+  assert.equal(item.slot, 'media_library');
+  assert.equal(Number(item.bytes), 1 * MB);
+  assert.equal(item.user_id, undefined, 'internal columns stay server-side');
+  assert.equal(item.id, undefined);
+
+  // Delete frees the storage and the object.
+  await withStubbedS3(async (calls) => {
+    const del = await h.request('DELETE', `${P}/uploads/${item.uid}`, { token });
+    assert.equal(del.status, 200);
+    assert.deepEqual(calls.deleted, [second]);
+  });
+  assert.equal(await storageUsed(userId), 2 * MB, 'refunded');
+  assert.equal((await h.request('GET', `${P}/uploads`, { token })).body.meta.total, 1);
+});
+
+test('the media library shows only editor images, not logos or product images', async () => {
+  const userId = await userWithActivePlan(1, 9302);
+  const token  = h.userTokenFor(userId);
+
+  const put = async (slot, size) => withStubbedS3(async () => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot }, filename: 'f.png' },
+    })).body.data.key;
+    await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+    return key;
+  }, { size });
+
+  const media = await put('media_library', 1 * MB);
+  const logo  = await put('business_logo', 1 * MB);
+
+  const defaultList = await h.request('GET', `${P}/uploads`, { token });
+  assert.deepEqual(defaultList.body.data.map((u) => u.s3_key), [media],
+    'a logo cannot be deleted from the media grid by accident');
+
+  // Other slots are reachable explicitly.
+  const logos = await h.request('GET', `${P}/uploads?slot=business_logo`, { token });
+  assert.deepEqual(logos.body.data.map((u) => u.s3_key), [logo]);
+
+  // An unknown slot falls back to the library rather than erroring.
+  const bogus = await h.request('GET', `${P}/uploads?slot=not_a_slot`, { token });
+  assert.deepEqual(bogus.body.data.map((u) => u.s3_key), [media]);
+});
+
+test('uploads are owner-scoped: another user cannot list or delete yours', async () => {
+  const mineId  = await userWithActivePlan(1, 9303);
+  const token   = h.userTokenFor(mineId);
+  const other   = await mkUser('MediaStranger');
+  const otherTok = h.userTokenFor(other.id);
+
+  const key = await withStubbedS3(async () => {
+    const k = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'private.png' },
+    })).body.data.key;
+    await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [k] } });
+    return k;
+  }, { size: 1 * MB });
+
+  const row = await models.UserUpload.findOne({ where: { s3_key: key } });
+
+  assert.deepEqual((await h.request('GET', `${P}/uploads`, { token: otherTok })).body.data, [],
+    'a stranger sees nothing of yours');
+
+  // 404 rather than 403 â€” there is nothing to confirm to them.
+  assert.equal((await h.request('DELETE', `${P}/uploads/${row.uid}`, { token: otherTok })).status, 404);
+  assert.equal(await models.UserUpload.count({ where: { s3_key: key } }), 1, 'still there');
+
+  assert.equal((await h.request('GET', `${P}/uploads`, {})).status, 401);
+  assert.equal((await h.request('DELETE', `${P}/uploads/${row.uid}`, {})).status, 401);
+});
+
+test('confirm accepts either shape, but not both and not neither', async () => {
+  const u     = await mkUser('MediaShape');
+  const token = h.userTokenFor(u.id);
+
+  await withStubbedS3(async () => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'x.png' },
+    })).body.data.key;
+
+    // Legacy `keys` form still works â€” it just records no dimensions.
+    assert.equal((await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } })).status, 200);
+    const row = await models.UserUpload.findOne({ where: { s3_key: key } });
+    assert.equal(row.width, null);
+    assert.equal(row.original_filename, null);
+
+    assert.equal((await h.request('POST', `${P}/uploads/confirm`, {
+      token, body: { keys: [key], uploads: [{ key }] },
+    })).status, 400, 'one shape or the other, not both');
+    assert.equal((await h.request('POST', `${P}/uploads/confirm`, { token, body: {} })).status, 400);
+  }, { size: 1024 });
+});
+
+// ---------- Brand Kit fonts ----------
+const mkLibraryFont = async (family, { is_premium = 0, languageCodes = [] } = {}) => {
+  const font = await models.Font.create({ uid: uuid(), user_id: null, family, is_premium, is_active: 1 });
+  track.fonts.push(font.id);
+  await models.FontFile.create({ font_id: font.id, weight: 400, style: 'normal', format: 'woff2', s3_key: `fonts/${font.uid}/regular.woff2` });
+  if (languageCodes.length) {
+    const langs = await models.Language.findAll({ where: { code: languageCodes } });
+    await font.setLanguages(langs.map((l) => l.id));
+  }
+  return font;
+};
+
+test('GET /fonts shows the library, marks premium locked, and filters by script', async () => {
+  const stamp = Date.now();
+  const free  = await mkLibraryFont(`TST Free Sans ${stamp}`);
+  const prem  = await mkLibraryFont(`TST Premium Serif ${stamp}`, { is_premium: 1 });
+  const tamil = await mkLibraryFont(`TST Tamil Face ${stamp}`, { languageCodes: ['ta'] });
+
+  const guest = await h.request('GET', `${P}/fonts`);
+  assert.equal(guest.status, 200);
+  const byUid = Object.fromEntries(guest.body.data.map((f) => [f.uid, f]));
+
+  assert.equal(byUid[free.uid].is_locked, false);
+  assert.ok(byUid[free.uid].FontFiles.length, 'files come with it');
+  assert.equal(byUid[prem.uid].is_locked, true, 'premium is visible but locked');
+  assert.equal(byUid[prem.uid].FontFiles, undefined, 'its files are withheld until upgrade');
+  assert.equal(byUid[free.uid].user_id, undefined, 'ownership stays internal');
+
+  // A paid viewer gets the premium files.
+  const paidId = await userWithActivePlan(2, 9401);
+  const paid = await h.request('GET', `${P}/fonts`, { token: h.userTokenFor(paidId, 'paid') });
+  const paidPrem = paid.body.data.find((f) => f.uid === prem.uid);
+  assert.equal(paidPrem.is_locked, false);
+  assert.ok(paidPrem.FontFiles.length);
+
+  // Script filter: the Tamil-tagged font plus every font with no declared coverage.
+  const ta = await h.request('GET', `${P}/fonts?language=ta`);
+  const taUids = ta.body.data.map((f) => f.uid);
+  assert.ok(taUids.includes(tamil.uid), 'declared Tamil coverage');
+  assert.ok(taUids.includes(free.uid), 'unclassified fonts are unknown, not incapable');
+
+  const hi = await h.request('GET', `${P}/fonts?language=hi`);
+  assert.ok(!hi.body.data.map((f) => f.uid).includes(tamil.uid), 'a Tamil-only face is not offered for Hindi');
+});
+
+test('a user can register a font they uploaded, and only from their own key', async () => {
+  const u     = await mkUser('FontOwner');
+  const token = h.userTokenFor(u.id);
+  const other = await mkUser('FontStranger');
+
+  // Font uploads are the one non-image slot.
+  const key = await withStubbedS3(async () => {
+    const presigned = await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'brand_font' }, filename: 'AcmeSans.woff2', content_type: 'font/woff2' },
+    });
+    assert.equal(presigned.status, 200);
+    assert.ok(presigned.body.data.key.includes(`/fonts/`), 'its own prefix');
+    await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [presigned.body.data.key] } });
+    return presigned.body.data.key;
+  }, { size: 200 * 1024 });
+
+  assert.equal(await storageUsed(u.id), 200 * 1024, 'counts against storage like any upload');
+
+  const created = await h.request('POST', `${P}/fonts`, {
+    token, body: { family: `TST Acme ${Date.now()}`, files: [{ s3_key: key, format: 'woff2' }] },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.data.is_own, true);
+  assert.equal(created.body.data.FontFiles.length, 1);
+
+  // It shows in MY list but not a stranger's.
+  const mine = await h.request('GET', `${P}/fonts`, { token });
+  assert.ok(mine.body.data.some((f) => f.uid === created.body.data.uid));
+  const theirs = await h.request('GET', `${P}/fonts`, { token: h.userTokenFor(other.id) });
+  assert.ok(!theirs.body.data.some((f) => f.uid === created.body.data.uid), 'private to its owner');
+
+  // A key that was not issued to me for this slot is refused.
+  const stolen = await h.request('POST', `${P}/fonts`, {
+    token: h.userTokenFor(other.id),
+    body: { family: 'TST Stolen', files: [{ s3_key: key, format: 'woff2' }] },
+  });
+  assert.equal(stolen.status, 400);
+
+  // Deleting frees the storage; library fonts cannot be deleted.
+  await withStubbedS3(async (calls) => {
+    const del = await h.request('DELETE', `${P}/fonts/${created.body.data.uid}`, { token });
+    assert.equal(del.status, 200);
+    assert.deepEqual(calls.deleted, [key]);
+  });
+  assert.equal(await storageUsed(u.id), 0, 'refunded');
+
+  const lib = await mkLibraryFont(`TST Undeletable ${Date.now()}`);
+  assert.equal((await h.request('DELETE', `${P}/fonts/${lib.uid}`, { token })).status, 403);
+});
+
+test('font uploads reject images, and image slots reject fonts', async () => {
+  const u     = await mkUser('FontTypes');
+  const token = h.userTokenFor(u.id);
+
+  const presign = (slot, filename, content_type) => h.request('POST', `${P}/uploads/presign`, {
+    token, body: { target: { slot }, filename, ...(content_type ? { content_type } : {}) },
+  });
+
+  await withStubbedS3(async () => {
+    assert.equal((await presign('brand_font', 'x.png', 'image/png')).status, 400, 'an image is not a font');
+    assert.equal((await presign('brand_font', 'x.exe')).status, 400, 'extension is checked, not just the MIME type');
+    assert.equal((await presign('media_library', 'x.woff2', 'font/woff2')).status, 400, 'a font is not an image');
+    assert.equal((await presign('brand_font', 'x.ttf', 'application/octet-stream')).status, 200,
+      'browsers send octet-stream for fonts; the extension carries the check');
+  });
+});
+
+test('brand kit fonts: heading/body roles, gated by what the user may use', async () => {
+  const stamp = Date.now();
+  const freeFont = await mkLibraryFont(`TST Kit Sans ${stamp}`);
+  const premFont = await mkLibraryFont(`TST Kit Serif ${stamp}`, { is_premium: 1 });
+
+  const u     = await mkUser('FontKit');
+  const token = h.userTokenFor(u.id);
+  const biz   = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Font Biz ${stamp}`, industry: 'restaurant-food' },
+  })).body.data;
+
+  const set = await h.request('PATCH', `${P}/businesses/${biz.uid}`, {
+    token, body: { heading_font_id: freeFont.id, body_font_id: freeFont.id },
+  });
+  assert.equal(set.status, 200);
+  assert.equal(set.body.data.headingFont.family, freeFont.family);
+  assert.equal(set.body.data.bodyFont.family, freeFont.family);
+
+  // A premium library font needs the plan â€” checked against the DB, not the token's claim.
+  const denied = await h.request('PATCH', `${P}/businesses/${biz.uid}`, {
+    token, body: { heading_font_id: premFont.id },
+  });
+  assert.equal(denied.status, 403);
+
+  await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, sub_type: 'regular', status: 'active',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
+  });
+  assert.equal((await h.request('PATCH', `${P}/businesses/${biz.uid}`, {
+    token, body: { heading_font_id: premFont.id },
+  })).status, 200, 'allowed once subscribed');
+
+  // An unknown font id is a clean 400, and null clears the role.
+  assert.equal((await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { body_font_id: 99999999 } })).status, 400);
+  const cleared = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { body_font_id: null } });
+  assert.equal(cleared.body.data.body_font_id, null);
+
+  // Deleting a font must not delete the businesses styled with it.
+  const own = await models.Font.create({ uid: uuid(), user_id: u.id, family: `TST Doomed ${stamp}`, is_active: 1 });
+  await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { body_font_id: own.id } });
+  await own.destroy();
+  const after = await h.request('GET', `${P}/businesses/${biz.uid}`, { token });
+  assert.equal(after.status, 200, 'the business survives');
+  assert.equal(after.body.data.body_font_id, null, 'the reference is nulled, not orphaned');
+});
+
+test('admin library fonts: name unique among library rows only, files and scripts replaceable', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+  const family = `TST Admin Face ${stamp}`;
+
+  const created = await h.request('POST', `${P}/admin/fonts`, { token, body: { family, is_premium: 0 } });
+  assert.equal(created.status, 201);
+  track.fonts.push(created.body.data.id);
+
+  assert.equal((await h.request('POST', `${P}/admin/fonts`, { token, body: { family } })).status, 409,
+    'two library fonts cannot share a name');
+
+  // ...but a USER may name their own font the same thing.
+  const u = await mkUser('FontNameClash');
+  const own = await models.Font.create({ uid: uuid(), user_id: u.id, family, is_active: 1 });
+  assert.ok(own.id, 'a private font is not blocked by the library name');
+
+  const withFiles = await h.request('PUT', `${P}/admin/fonts/${created.body.data.uid}/files`, {
+    token,
+    body: { files: [
+      { s3_key: 'fonts/a/regular.woff2', format: 'woff2', weight: 400 },
+      { s3_key: 'fonts/a/bold.woff2',    format: 'woff2', weight: 700 },
+    ] },
+  });
+  assert.equal(withFiles.status, 200);
+  assert.equal(withFiles.body.data.FontFiles.length, 2, 'a family is many files');
+
+  // Full replace, not append.
+  const replaced = await h.request('PUT', `${P}/admin/fonts/${created.body.data.uid}/files`, {
+    token, body: { files: [{ s3_key: 'fonts/a/only.ttf', format: 'ttf' }] },
+  });
+  assert.equal(replaced.body.data.FontFiles.length, 1);
+
+  const ta = await models.Language.findOne({ where: { code: 'ta' } });
+  const scoped = await h.request('PUT', `${P}/admin/fonts/${created.body.data.uid}/languages`, {
+    token, body: { language_ids: [ta.id] },
+  });
+  assert.equal(scoped.status, 200);
+  assert.deepEqual(scoped.body.data.Languages.map((l) => l.code), ['ta']);
+});
+
+// ---------- Admin panel enablement fixes ----------
+test('content_admin can reach fonts and languages, but not feedback or plans', async () => {
+  const bcrypt = require('bcryptjs');
+  const email  = `tst-content-perms-${Date.now()}@example.com`;
+  const admin  = await models.AdminUser.create({
+    uid: uuid(), name: 'TST Content Perms', email,
+    password_hash: await bcrypt.hash('password123', 10), role_id: 2, is_active: 1,
+  });
+
+  try {
+    const login = await h.request('POST', `${P}/auth/admin/login`, { body: { email, password: 'password123' } });
+    assert.equal(login.status, 200);
+    const token = login.body.data.access_token;
+
+    // Granted by the migration, so the Fonts and Languages screens work.
+    assert.equal((await h.request('GET', `${P}/admin/fonts`, { token })).status, 200);
+    assert.equal((await h.request('GET', `${P}/admin/languages`, { token })).status, 200);
+
+    // Feedback carries submitter PII and is deliberately NOT granted.
+    assert.equal((await h.request('GET', `${P}/admin/feedback`, { token })).status, 403);
+    // And the domain boundary still holds elsewhere.
+    assert.equal((await h.request('GET', `${P}/admin/plans`, { token })).status, 403);
+  } finally {
+    await admin.destroy();
+  }
+});
+
+test('the role permission migration is additive and idempotent', async () => {
+  const role = await models.Role.findOne({ where: { name: 'content_admin' } });
+  const perms = role.permissions;
+
+  assert.ok(Array.isArray(perms), 'parsed, not a raw JSON string');
+  for (const p of ['languages.*', 'fonts.*']) assert.ok(perms.includes(p), `${p} granted`);
+  assert.ok(!perms.includes('feedback.*'), 'feedback stays with super_admin');
+
+  // The domains it already had survived â€” the migration appends, never replaces.
+  for (const p of ['templates.*', 'categories.*', 'assets.*']) assert.ok(perms.includes(p), `${p} preserved`);
+  assert.equal(new Set(perms).size, perms.length, 'no duplicates from a re-run');
+});
+
+test('an admin deactivating a user ends their sessions immediately', async () => {
+  const phone = newPhone();
+  const a = await otpLogin(phone);
+  const user = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+  const b = await otpLogin(phone);
+
+  // Both live before the ban.
+  for (const t of [a, b]) {
+    assert.equal((await h.request('GET', `${P}/users/me`, { token: t.access_token })).status, 200);
+  }
+
+  const banned = await h.request('PATCH', `${P}/admin/users/${user.uid}/status`, {
+    token: h.adminToken(['*']), body: { is_active: 0 },
+  });
+  assert.equal(banned.status, 200);
+
+  // Immediate â€” not "once the access token expires".
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: a.access_token })).status, 401);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).status, 401);
+  assert.equal((await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: b.refresh_token } })).status, 401);
+
+  // Reactivating does not revoke anything further; the user simply logs in again.
+  const back = await h.request('PATCH', `${P}/admin/users/${user.uid}/status`, {
+    token: h.adminToken(['*']), body: { is_active: 1 },
+  });
+  assert.equal(back.status, 200);
+  const fresh = await otpLogin(phone);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: fresh.access_token })).status, 200);
+});
+
+test('a font can no longer be filed as an asset â€” fonts belong to the fonts library', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+
+  // Creating an asset of type font is rejected: it would land somewhere the Brand
+  // Kit can never see, with no way to express weights or script coverage.
+  const asAsset = await h.request('POST', `${P}/admin/assets`, {
+    token, body: { name: `TST Font Asset ${stamp}`, s3_key: 'assets/font/x.woff2', asset_type: 'font' },
+  });
+  assert.equal(asAsset.status, 400);
+
+  // Nor can one be uploaded down that path.
+  const presigned = await h.request('POST', `${P}/admin/uploads/presign`, {
+    token, body: { target: { type: 'asset', asset_type: 'font' }, filename: 'x.woff2' },
+  });
+  assert.equal(presigned.status, 400);
+
+  // The remaining asset types are untouched.
+  const ok = await h.request('POST', `${P}/admin/assets`, {
+    token, body: { name: `TST Icon Asset ${stamp}`, s3_key: 'assets/icon/x.png', asset_type: 'icon' },
+  });
+  assert.equal(ok.status, 201);
+  track.assets.push(ok.body.data.id);
+
+  // One list, not four copies drifting apart.
+  const { ASSET_TYPES } = require('../src/utils/assetTypes');
+  assert.ok(!ASSET_TYPES.includes('font'));
+  assert.deepEqual(require('../src/services/upload.service').ASSET_TYPES, ASSET_TYPES);
 });

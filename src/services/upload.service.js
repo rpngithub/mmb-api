@@ -19,13 +19,21 @@ const IMAGE_SLOTS = {
   special_event_banner:        'events/banner',
   banner:                      'banners',
   testimonial:                 'testimonials',
+  // Not an image — a library font file (.woff2/.ttf/…). It shares this registry
+  // because the key strategy is identical (uuid, name dropped), but it gets its
+  // OWN root rather than living under `assets/font/`: a library font is a
+  // `font_files` row, not an `assets` row, and mixing them would make the two
+  // indistinguishable to a lifecycle or CDN rule.
+  font_file:                   'fonts',
 };
-const ASSET_TYPES = ['icon', 'emoji', 'shape', 'font', 'audio', 'video', 'animated', 'bg'];
+// Shared list — 'font' is deliberately not in it; library fonts use the
+// `font_file` slot above and live under `fonts/`. See utils/assetTypes.js.
+const { ASSET_TYPES } = require('./../utils/assetTypes');
 
 // Any final key must live under one of these roots (re-validated on multipart complete/abort).
 // 'themes/' is retained deliberately: thumbnails uploaded before the Brand Series rename
 // still live there, and their stored keys must keep validating on re-save.
-const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/'];
+const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/', 'fonts/'];
 
 const bad = (field, message) => new ValidationError('Validation failed', [{ field, message }]);
 

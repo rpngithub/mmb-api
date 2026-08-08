@@ -22,14 +22,16 @@ const INT_RE  = /^\d+$/;
 
 // `hasUid` lets callers skip the UUID branch for models without a uid column
 // (e.g. Tag): such a ref is only ever a slug or a legacy id.
-async function resolveRef(model, ref, { hasUid = true } = {}) {
+// `field` names the human-readable column when the model does not call it `slug`
+// (e.g. Language, whose friendly ref is its `code` — 'en', 'ta').
+async function resolveRef(model, ref, { hasUid = true, field = 'slug' } = {}) {
   if (ref === undefined || ref === null) return undefined;
   const s = String(ref).trim();
   if (s === '') return undefined;
   if (s === 'null') return null;                 // explicit top-level parent
   if (INT_RE.test(s)) return Number(s);          // legacy integer id (accepted as-is)
 
-  const where = hasUid && UUID_RE.test(s) ? { uid: s } : { slug: s };
+  const where = hasUid && UUID_RE.test(s) ? { uid: s } : { [field]: s };
   const row   = await model.findOne({ where, attributes: ['id'] });
   return row ? row.id : NOT_FOUND;
 }

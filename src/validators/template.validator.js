@@ -8,6 +8,10 @@ const STATUSES       = ['draft', 'active', 'inactive'];
 const createTemplateSchema = Joi.object({
   name:          Joi.string().min(1).max(200).required(),
   category_id:   Joi.number().integer().allow(null).optional(),
+  // The language the design's text is in. NULL = language-neutral (no text, or
+  // symbols only) and shown to every user whatever they picked in Preferred
+  // Languages — which is also the default, so untagged templates stay visible.
+  language_id:   Joi.number().integer().allow(null).optional(),
   template_type: Joi.string().valid(...TEMPLATE_TYPES).optional(),
   is_premium:    Joi.number().valid(0, 1).optional(),
   status:        Joi.string().valid(...STATUSES).optional(),
@@ -16,6 +20,10 @@ const createTemplateSchema = Joi.object({
 const updateTemplateSchema = Joi.object({
   name:          Joi.string().min(1).max(200).optional(),
   category_id:   Joi.number().integer().allow(null).optional(),
+  // The language the design's text is in. NULL = language-neutral (no text, or
+  // symbols only) and shown to every user whatever they picked in Preferred
+  // Languages — which is also the default, so untagged templates stay visible.
+  language_id:   Joi.number().integer().allow(null).optional(),
   template_type: Joi.string().valid(...TEMPLATE_TYPES).optional(),
   is_premium:    Joi.number().valid(0, 1).optional(),
   status:        Joi.string().valid(...STATUSES).optional(),

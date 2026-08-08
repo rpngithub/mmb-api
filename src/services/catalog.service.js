@@ -1,7 +1,7 @@
 const { Op } = require('sequelize');
 const {
   sequelize, BusinessCategory, TemplateCategory, AssetCategory, Tag, TemplateSize,
-  BrandSeries, Variant, VariantBadge, StylePersonality, Color,
+  BrandSeries, Variant, VariantBadge, StylePersonality, Color, Language,
   Plan, FaqCategory, Faq, Testimonial, AppBanner,
 } = require('../models');
 const planRepo      = require('../repositories/plan.repository');
@@ -105,8 +105,14 @@ function sortRelatedIndustries(plain) {
 // `with_related` (any value) additionally attaches each row's curated
 // `RelatedIndustries` block. Opt-in because it's dead weight for the pickers and
 // menus that make up most calls — only SEO landing pages need it.
-async function listBusinessCategories({ parent, parent_id, tree, hierarchy, with_related } = {}) {
+// `q` searches the industry name — what the picker's search box (and its voice
+// input) sends. It applies to the flat and `parent`-filtered shapes, where the
+// user is scanning one list; `tree` and `hierarchy` ignore it, since filtering a
+// nested shape by name would drop the parents that give the matches their meaning.
+async function listBusinessCategories({ parent, parent_id, tree, hierarchy, with_related, q } = {}) {
   const where = { is_active: 1 };
+  const term  = typeof q === 'string' ? q.trim() : '';
+  if (term) where.name = { [Op.like]: `%${term}%` };
   const order = [['display_order', 'ASC'], ['name', 'ASC']];
   const withRelated = with_related !== undefined;
   const opts = { where, order, ...(withRelated ? { include: [relatedIndustryInclude] } : {}) };
@@ -185,6 +191,46 @@ async function listAssetCategories({ parent, parent_id } = {}) {
 
 function listTags() {
   return Tag.findAll({ order: [['name', 'ASC']] });
+}
+
+// The "Preferred Languages" picker. CONTENT languages — which templates a user is
+// shown — not the app's UI language. `native_name` is what the picker renders.
+function listLanguages() {
+  return Language.findAll({
+    where: { is_active: 1 },
+    order: [['display_order', 'ASC'], ['name', 'ASC']],
+  });
+}
+
+// The keyword suggestions for an industry — what the signup picker offers under
+// "My Keywords". Curated per industry via business_category_tags.
+//
+// A sub-industry inherits its parent's keywords: a bakery's picker should offer
+// the generic food keywords alongside the bakery-specific ones, and curating them
+// twice is how the two lists drift apart. Merged and de-duped, the industry's own
+// keywords first so the most specific suggestions lead.
+async function listIndustryKeywords(ref) {
+  const id = await resolveRef(BusinessCategory, ref);
+  if (!id) throw new NotFoundError('industry not found');
+
+  const industry = await BusinessCategory.findOne({
+    where:      { id, is_active: 1 },
+    attributes: ['id', 'parent_id'],
+    include:    [{ model: Tag, attributes: ['id', 'name', 'slug'], through: { attributes: [] } }],
+  });
+  if (!industry) throw new NotFoundError('industry not found');
+
+  const own = industry.Tags || [];
+  if (!industry.parent_id) return own;
+
+  const parent = await BusinessCategory.findOne({
+    where:      { id: industry.parent_id, is_active: 1 },
+    attributes: ['id'],
+    include:    [{ model: Tag, attributes: ['id', 'name', 'slug'], through: { attributes: [] } }],
+  });
+
+  const seen = new Set(own.map((t) => t.id));
+  return [...own, ...(parent?.Tags || []).filter((t) => !seen.has(t.id))];
 }
 
 function listTemplateSizes() {
@@ -417,7 +463,7 @@ async function listPlans({ plan_type, billing_option_type } = {}) {
 }
 
 module.exports = {
-  listBusinessCategories, getIndustryDetail, listTemplateCategories, listAssetCategories, listTags, listTemplateSizes,
+  listBusinessCategories, getIndustryDetail, listIndustryKeywords, listTemplateCategories, listAssetCategories, listTags, listLanguages, listTemplateSizes,
   listBrandSeries, listVariants, getVariantDetail, listFaqCategories, listFaqs, listTestimonials,
   listBanners, listPlans,
 };

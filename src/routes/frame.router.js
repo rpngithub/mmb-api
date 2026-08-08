@@ -28,7 +28,7 @@ const { createFrameSchema, updateFrameSchema } = require('../validators/userFram
  *             required: [name, s3_key]
  *             properties:
  *               name:       { type: string }
- *               s3_key:     { type: string }
+ *               s3_key:     { type: string, description: "Key from POST /uploads/presign with slot `user_frame`. A key outside your own namespace is rejected." }
  *               frame_type: { type: string, enum: [image, animated] }
  *     responses:
  *       201:

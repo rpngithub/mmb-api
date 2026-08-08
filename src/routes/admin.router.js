@@ -9,6 +9,7 @@ const uploadController = require('../controllers/upload.controller');
 const importController = require('../controllers/import.controller');
 const { IMPORT_ENTITIES } = require('../services/import.service');
 const models       = require('../models');
+const { ConflictError } = require('../errors');
 const {
   createAdminSchema, updateAdminSchema, userStatusSchema, adminStatusSchema, createRoleSchema, updateRoleSchema,
 } = require('../validators/admin.validator');
@@ -26,7 +27,11 @@ const {
   createTemplateCategorySchema, updateTemplateCategorySchema,
   createBusinessCategorySchema, updateBusinessCategorySchema,
   createTagSchema, updateTagSchema, setTagsSchema, setRelatedIndustriesSchema,
+  createLanguageSchema, updateLanguageSchema,
 } = require('../validators/category.validator');
+const {
+  createFontSchema, updateFontSchema, setFontFilesSchema, setFontLanguagesSchema,
+} = require('../validators/font.validator');
 const {
   presignSchema, multipartInitiateSchema, presignPartsSchema,
   completeSchema, abortSchema, confirmSchema,
@@ -80,14 +85,30 @@ const {
  *       `/admin/brand-series`, `/admin/style-personalities` & `/admin/colors` (brand_series) ·
  *       `/admin/template-sizes` (sizes) ·
  *       `/admin/tags` (tags) · `/admin/assets` & `/admin/asset-categories` (assets) ·
+ *       `/admin/languages` (languages) · `/admin/fonts` (fonts) ·
  *       `/admin/special-events` (events) · `/admin/banners` (banners) ·
  *       `/admin/faqs` & `/admin/faq-categories` (faqs) · `/admin/testimonials` (testimonials) ·
  *       `/admin/plans`, `/admin/plan-billing-options` & `/admin/plan-features` (plans) · `/admin/feature-types` (features) ·
  *       `/admin/coupons` (coupons) · `/admin/app-settings` (settings).
  *
  *
- *       **Bulk reorder** — `/admin/template-categories` additionally exposes
- *       `PATCH /reorder` (documented below) for drag-and-drop ordering.
+ *       **Bulk reorder** — `/admin/template-categories`, `/admin/languages` and
+ *       `/admin/fonts` additionally expose `PATCH /reorder` (documented below) for
+ *       drag-and-drop ordering.
+ *
+ *
+ *       **Fonts** — `/admin/fonts` manages the curated LIBRARY only (rows created here
+ *       always have `user_id` NULL; a user's own uploaded font lives in the same table but
+ *       is created through `POST /fonts`). Family names are unique among library fonts,
+ *       not globally, so a user may name their upload the same thing. A family is several
+ *       files, managed separately — see `PUT /admin/fonts/{uid}/files` and
+ *       `PUT /admin/fonts/{uid}/languages` (script coverage) below.
+ *
+ *
+ *       **Industry moderation** — user-suggested sub-industries arrive as
+ *       `/admin/business-categories?status=pending`; `PATCH` with `{ status: 'approved' }`
+ *       publishes one (which also flips `is_active`). `status` and `is_active` are separate
+ *       on purpose: retiring an approved industry must not push it back into the queue.
  *
  *
  *       **Coupons** — `/admin/coupons` validates on write: `code` is unique
@@ -264,6 +285,110 @@ router.patch('/users/:uid/status', authenticate, authorizeAdmin('users.update'),
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ActivityLogListResponse' } } }
  */
 router.get('/activity-logs', authenticate, authorizeAdmin('activity.read'), controller.listActivity);
+
+/**
+ * @swagger
+ * /admin/feedback:
+ *   get:
+ *     summary: List user feedback (newest first)
+ *     description: >-
+ *       Read-only by design — feedback is a record of what a user said, so there is no admin
+ *       create or edit, only listing and removing spam. Each row carries the submitting user.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: rating,  schema: { type: integer, minimum: 1, maximum: 5 } }
+ *       - { in: query, name: user_id, schema: { type: integer } }
+ *       - { in: query, name: limit,   schema: { type: integer, default: 50, maximum: 200 } }
+ *       - { in: query, name: offset,  schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Paged feedback (meta.total), each row with its submitting user
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FeedbackListResponse' } } }
+ * /admin/feedback/{uid}:
+ *   delete:
+ *     summary: Delete a feedback entry (spam removal)
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Deleted
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/SuccessResponse' } } }
+ *       404:
+ *         description: Not found
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+/**
+ * @swagger
+ * /admin/fonts/{uid}/files:
+ *   put:
+ *     summary: Replace a library font's files
+ *     description: >-
+ *       Full replace — a family is many files, one per (weight, style, format). Upload each
+ *       via the admin upload endpoints first, then send the keys here. Sending an empty list
+ *       is rejected: a font with no files cannot render.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [files]
+ *             properties:
+ *               files:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [s3_key, format]
+ *                   properties:
+ *                     s3_key: { type: string }
+ *                     format: { type: string, enum: [woff2, woff, ttf, otf] }
+ *                     weight: { type: integer, default: 400 }
+ *                     style:  { type: string, enum: [normal, italic], default: normal }
+ *     responses:
+ *       200:
+ *         description: The font with its files and languages
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FontResponse' } } }
+ *       404:
+ *         description: Not found
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ * /admin/fonts/{uid}/languages:
+ *   put:
+ *     summary: Set which scripts a font can render
+ *     description: >-
+ *       Full replace. This is what stops a user picking a brand font that cannot draw their
+ *       content language — a Devanagari font tagged only `hi` will not be offered to someone
+ *       filtering fonts by Tamil. An EMPTY list means "unspecified", and an unspecified font
+ *       is offered everywhere rather than nowhere.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [language_ids]
+ *             properties:
+ *               language_ids: { type: array, items: { type: integer }, description: "Ids from GET /languages" }
+ *     responses:
+ *       200:
+ *         description: The font with its files and languages
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FontResponse' } } }
+ *       404:
+ *         description: Not found
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.put('/fonts/:uid/files',     authenticate, authorizeAdmin('fonts.update'), validate(setFontFilesSchema),     controller.setFontFiles);
+router.put('/fonts/:uid/languages', authenticate, authorizeAdmin('fonts.update'), validate(setFontLanguagesSchema), controller.setFontLanguages);
+
+router.get('/feedback', authenticate, authorizeAdmin('feedback.read'), controller.listFeedback);
+router.delete('/feedback/:uid', authenticate, authorizeAdmin('feedback.delete'), controller.deleteFeedback);
 
 // ---- Roles (RBAC) ----
 router.use('/roles', adminCrud({
@@ -522,7 +647,7 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: path,  name: entity,  required: true, schema: { type: string, enum: [industries, template-categories, variants] } }
+ *       - { in: path,  name: entity,  required: true, schema: { type: string, enum: [industries, template-categories, variants, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants` and behaves identically" }
  *       - { in: query, name: example, schema: { type: boolean }, description: "When true, returns the REFERENCE-ONLY example file (do not upload it)" }
  *     responses:
  *       200: { description: "CSV file (text/csv). Import template by default; reference/example file when example=1", content: { text/csv: { schema: { type: string } } } }
@@ -541,7 +666,7 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *       is listed in `rows[].warnings`.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
- *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants] } }]
+ *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants`" }]
  *     requestBody:
  *       required: true
  *       content:
@@ -727,7 +852,70 @@ router.put('/variants/:uid/relations', authenticate, authorizeAdmin('variants.up
 router.get('/brand-series/:uid/relations', authenticate, authorizeAdmin('brand_series.read'),   controller.getBrandSeriesRelations);
 router.put('/brand-series/:uid/relations', authenticate, authorizeAdmin('brand_series.update'), validate(setBrandSeriesRelationsSchema), controller.setBrandSeriesRelations);
 
-// Deprecated aliases (Theme -> Variant rename); excluded from Swagger on purpose.
+// Deprecated aliases (Theme -> Variant rename), documented as `deprecated: true` so the
+// admin panel can see what it is still calling and where to move to.
+/**
+ * @swagger
+ * /admin/themes/{uid}/templates:
+ *   get:
+ *     summary: "[Deprecated] Pre-rename alias of /admin/variants/{uid}/templates"
+ *     deprecated: true
+ *     description: >-
+ *       Identical to `GET /admin/variants/{uid}/templates` — same handler, same
+ *       `variants.read` permission. Responses carry `Deprecation: true` and a `Link` header
+ *       naming the successor. **Use `/admin/variants/{uid}/templates`.**
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: The variant with its assigned templates }
+ *   put:
+ *     summary: "[Deprecated] Pre-rename alias of PUT /admin/variants/{uid}/templates"
+ *     deprecated: true
+ *     description: "Full replace, as on the successor. Requires `variants.update`. **Use `/admin/variants/{uid}/templates`.**"
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { type: object, required: [template_ids], properties: { template_ids: { type: array, items: { type: integer } } } }
+ *     responses:
+ *       200: { description: Updated variant with its templates }
+ * /admin/themes/{uid}/relations:
+ *   get:
+ *     summary: "[Deprecated] Pre-rename alias of /admin/variants/{uid}/relations"
+ *     deprecated: true
+ *     description: "**Use `/admin/variants/{uid}/relations`.**"
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: The variant with its entitled plans, industries and badge }
+ *   put:
+ *     summary: "[Deprecated] Pre-rename alias of PUT /admin/variants/{uid}/relations"
+ *     deprecated: true
+ *     description: >-
+ *       Identical to the successor, including that `plan_ids` IS the premium entitlement —
+ *       an empty array locks the variant to everyone. **Use `/admin/variants/{uid}/relations`.**
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             minProperties: 1
+ *             properties:
+ *               plan_ids:              { type: array, items: { type: integer } }
+ *               industry_ids:          { type: array, items: { type: integer } }
+ *               business_category_ids: { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of industry_ids" }
+ *     responses:
+ *       200: { description: Updated variant with its relations }
+ */
 router.get('/themes/:uid/templates', authenticate, authorizeAdmin('variants.read'),   deprecated('/api/v1/admin/variants/{uid}/templates'), controller.getVariantTemplates);
 router.put('/themes/:uid/templates', authenticate, authorizeAdmin('variants.update'), deprecated('/api/v1/admin/variants/{uid}/templates'), validate(setVariantTemplatesSchema), controller.setVariantTemplates);
 router.get('/themes/:uid/relations', authenticate, authorizeAdmin('variants.read'),   deprecated('/api/v1/admin/variants/{uid}/relations'), controller.getVariantRelations);
@@ -864,7 +1052,19 @@ const COld = (path, successor, opts) => router.use(path, deprecated(successor), 
 // it the admin panel's checklist is bypassable with a direct PATCH.
 C('/templates',           { model: models.Template,         resource: 'template',          permission: 'templates', unique: ['name'], createSchema: createTemplateSchema, updateSchema: updateTemplateSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => templatePublish.assertPublishable(row, payload) });
 C('/template-categories', { model: models.TemplateCategory, resource: 'template_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, reorderable: true, createSchema: createTemplateCategorySchema, updateSchema: updateTemplateCategorySchema });
-C('/business-categories', { model: models.BusinessCategory, resource: 'business_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, createSchema: createBusinessCategorySchema, updateSchema: updateBusinessCategorySchema, include: [{ model: models.Tag, through: { attributes: [] } }] });
+// The moderation queue for user-suggested sub-industries ("Others" at signup) is
+// just `GET /admin/business-categories?status=pending` — `suggestedBy` names who
+// asked for it. `beforeWrite` keeps `status` and `is_active` from drifting apart:
+// approving publishes the row (which is what makes it appear in the catalogue and
+// lights up the businesses already pointing at it), rejecting keeps it hidden. An
+// admin can still retire an APPROVED industry by setting is_active on its own —
+// that must not push it back into the queue, so the sync only fires on transition.
+const syncIndustryVisibility = (payload, row) => {
+  if (payload.status === undefined || payload.status === row?.status) return;
+  if (payload.status === 'approved')            payload.is_active = 1;
+  if (payload.status === 'rejected')            payload.is_active = 0;
+};
+C('/business-categories', { model: models.BusinessCategory, resource: 'business_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, filterable: ['status', 'parent_id', 'is_active'], createSchema: createBusinessCategorySchema, updateSchema: updateBusinessCategorySchema, beforeWrite: syncIndustryVisibility, include: [{ model: models.Tag, through: { attributes: [] } }, { model: models.User, as: 'suggestedBy', attributes: ['id', 'uid', 'name', 'phone'] }] });
 const VARIANT_CRUD      = { model: models.Variant,     resource: 'variant',      permission: 'variants',     unique: ['name'], filterable: ['series_id', 'badge_id'], filterAlias: { group_id: 'series_id' }, createSchema: createVariantSchema, updateSchema: updateVariantSchema, include: [{ model: models.VariantBadge }] };
 const BRAND_SERIES_CRUD = { model: models.BrandSeries, resource: 'brand_series', permission: 'brand_series', unique: ['name', 'slug'], autoSlug: true, createSchema: createBrandSeriesSchema, updateSchema: updateBrandSeriesSchema };
 C('/variants',            VARIANT_CRUD);
@@ -877,6 +1077,23 @@ COld('/themes',           '/api/v1/admin/variants',     VARIANT_CRUD);
 COld('/theme-groups',     '/api/v1/admin/brand-series', BRAND_SERIES_CRUD);
 C('/template-sizes',      { model: models.TemplateSize,     resource: 'template_size',    permission: 'sizes', unique: ['name', 'slug'], autoSlug: true, createSchema: createTemplateSizeSchema, updateSchema: updateTemplateSizeSchema });
 C('/tags',                { model: models.Tag,              resource: 'tag',              permission: 'tags', idField: 'id', hasUid: false, unique: ['name', 'slug'], autoSlug: true, createSchema: createTagSchema, updateSchema: updateTagSchema });
+// Content languages for templates ("Preferred Languages" in the app). Reorderable
+// because display_order drives the picker's order; `code` and `name` are unique so
+// a duplicate is a clean 409 rather than a raw DB error.
+C('/languages',           { model: models.Language,         resource: 'language',         permission: 'languages', unique: ['code', 'name'], reorderable: true, filterable: ['is_active'], createSchema: createLanguageSchema, updateSchema: updateLanguageSchema });
+// Brand Kit fonts. This CRUD manages the LIBRARY only — rows here always have
+// user_id NULL (the schema has no such field, so it cannot be set). A user's own
+// uploaded font lives in the same table but is created through POST /fonts.
+//
+// `unique` is not used: it checks globally, which would let a library font clash
+// with somebody's private upload of the same name. beforeWrite scopes the check to
+// library rows instead, matching the (user_id, family) index.
+const assertLibraryFamilyFree = async (payload, row) => {
+  if (!payload.family) return;
+  const clash = await models.Font.findOne({ where: { family: payload.family, user_id: null } });
+  if (clash && (!row || clash.id !== row.id)) throw new ConflictError('A library font with this name already exists');
+};
+C('/fonts',               { model: models.Font,             resource: 'font',             permission: 'fonts', reorderable: true, filterable: ['is_active', 'is_premium'], beforeWrite: assertLibraryFamilyFree, createSchema: createFontSchema, updateSchema: updateFontSchema, listOptions: { where: { user_id: null } }, include: [{ model: models.FontFile }, { model: models.Language, through: { attributes: [] } }] });
 C('/assets',              { model: models.Asset,            resource: 'asset',            permission: 'assets', filterable: ['category_id', 'asset_type', 'status'], createSchema: createAssetSchema, updateSchema: updateAssetSchema });
 C('/asset-categories',    { model: models.AssetCategory,    resource: 'asset_category',   permission: 'assets', unique: ['slug'], autoSlug: true, createSchema: createAssetCategorySchema, updateSchema: updateAssetCategorySchema });
 C('/special-events',      { model: models.SpecialEvent,     resource: 'special_event',    permission: 'events', unique: ['name'], createSchema: createSpecialEventSchema, updateSchema: updateSpecialEventSchema });

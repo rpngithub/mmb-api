@@ -25,6 +25,28 @@ const remove = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
+// ---- "My Keywords" ----
+const getKeywords = async (req, res) => {
+  const items = await businessService.getKeywords(req.params.uid, req.user.userId);
+  res.json({ success: true, data: items });
+};
+
+const setKeywords = async (req, res) => {
+  const items = await businessService.setKeywords(req.params.uid, req.user.userId, req.body.keywords);
+  res.json({ success: true, data: items });
+};
+
+// ---- Brand palette ----
+const getBrandColors = async (req, res) => {
+  const colors = await businessService.getBrandColors(req.params.uid, req.user.userId);
+  res.json({ success: true, data: colors });
+};
+
+const setBrandColors = async (req, res) => {
+  const colors = await businessService.setBrandColors(req.params.uid, req.user.userId, req.body.brand_colors);
+  res.json({ success: true, data: colors });
+};
+
 // ---- Public discovery ----
 const nearby = async (req, res) => {
   const items = await businessService.listNearby(req.query);
@@ -61,6 +83,7 @@ const removeVariant = async (req, res) => {
 };
 
 module.exports = {
-  create, list, getOne, update, remove, nearby, publicProfile, publicProducts,
+  create, list, getOne, update, remove, getKeywords, setKeywords, getBrandColors, setBrandColors,
+  nearby, publicProfile, publicProducts,
   listVariants, adoptVariant, removeVariant,
 };

@@ -33,14 +33,31 @@ const createBusinessCategorySchema = Joi.object({
   is_active:        Joi.number().valid(0, 1).optional(),
 });
 
+// `status` is the moderation verdict on a user-suggested sub-industry; setting it
+// to approved/rejected also flips is_active (see syncIndustryVisibility in the
+// admin router), so an admin normally sends status alone.
 const updateBusinessCategorySchema = Joi.object({
   parent_id:        Joi.number().integer().allow(null).optional(),
   name:             Joi.string().min(1).max(100).optional(),
   icon_s3_key:      s3Key.optional(),
   thumbnail_s3_key: s3Key.optional(),
   display_order:    Joi.number().integer().optional(),
+  status:           Joi.string().valid('approved', 'pending', 'rejected').optional(),
   is_active:        Joi.number().valid(0, 1).optional(),
 }).min(1);
+
+// ---- Languages (content languages for templates) ----
+const createLanguageSchema = Joi.object({
+  code:          Joi.string().lowercase().max(10).pattern(/^[a-z]{2}(-[a-z]{2})?$/).required(),
+  name:          Joi.string().min(1).max(50).required(),   // "Tamil" — English label
+  native_name:   Joi.string().min(1).max(50).required(),   // "தமிழ்" — what the picker shows
+  display_order: Joi.number().integer().optional(),
+  is_active:     Joi.number().valid(0, 1).optional(),
+});
+
+const updateLanguageSchema = createLanguageSchema.fork(
+  ['code', 'name', 'native_name'], (s) => s.optional(),
+).min(1);
 
 // ---- Tags ----
 const createTagSchema = Joi.object({
@@ -70,5 +87,6 @@ module.exports = {
   createTemplateCategorySchema, updateTemplateCategorySchema,
   createBusinessCategorySchema, updateBusinessCategorySchema,
   createTagSchema, updateTagSchema,
+  createLanguageSchema, updateLanguageSchema,
   setTagsSchema, setRelatedIndustriesSchema,
 };
