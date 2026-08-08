@@ -1,0 +1,4167 @@
+{
+  "collection": {
+    "info": {
+      "_postman_id": "mmb-0002-0000-0000-0000-000000000000",
+      "name": "MakeMyBrand API (App)",
+      "description": "App/frontend-facing endpoints of the mmb-api (admin endpoints excluded). Base path `/api/{{api_version}}`.\n\n**Getting started**\n1. Select the *MakeMyBrand App (Local)* environment.\n2. Run **Auth → Send OTP** then **Verify OTP** (dev/staging returns the OTP; the scripts auto-save tokens).\n\nTokens and created resource ids are captured into environment variables automatically.\n\n**Conventions**\n- Every response is the envelope `{ success, data, meta? }`.\n- Catalogue filters accept a **slug** (preferred), a uid, or a legacy numeric id; `*_id` params are deprecated.\n- `industry` is the public name for a business category.",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "auth": {
+      "type": "bearer",
+      "bearer": [
+        {
+          "key": "token",
+          "value": "{{access_token}}",
+          "type": "string"
+        }
+      ]
+    },
+    "event": [
+      {
+        "listen": "prerequest",
+        "script": {
+          "type": "text/javascript",
+          "exec": [
+            "// (collection pre-request) intentionally empty"
+          ]
+        }
+      },
+      {
+        "listen": "test",
+        "script": {
+          "type": "text/javascript",
+          "exec": [
+            "// per-request tests handle assertions"
+          ]
+        }
+      }
+    ],
+    "variable": [
+      {
+        "key": "base_url",
+        "value": "http://localhost:3000/api/v1",
+        "type": "string"
+      }
+    ],
+    "item": [
+      {
+        "name": "Auth",
+        "description": "Mobile OTP login for users; email+password for admins.\n\nRun **Send OTP → Verify OTP** to populate `access_token`. Run **Admin Login** to populate `admin_access_token`.",
+        "item": [
+          {
+            "name": "Send OTP",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/auth/send-otp",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "send-otp"
+                ]
+              },
+              "description": "purpose: `login` | `reset`. In development/staging the response `data.otp` is returned and auto-saved to the `otp` env var.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"purpose\": \"{{purpose}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.otp) { pm.environment.set('otp', d.otp); console.log('Saved otp', d.otp); }"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Verify OTP",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/auth/verify-otp",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "verify-otp"
+                ]
+              },
+              "description": "Authenticates the user and auto-saves `access_token` + `refresh_token`. The collection default auth is `Bearer {{access_token}}`, so every user request inherits it.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"otp\": \"{{otp}}\",\n  \"purpose\": \"{{purpose}}\",\n  \"client_mnemonic\": \"{{client_mnemonic}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.access_token) pm.environment.set('access_token', d.access_token);",
+                    "if (d.refresh_token) pm.environment.set('refresh_token', d.refresh_token);",
+                    "pm.test('issued access token', () => pm.expect(d).to.have.property('access_token'));"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Refresh Tokens",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/auth/refresh",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "refresh"
+                ]
+              },
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.access_token) pm.environment.set('access_token', d.access_token);",
+                    "if (d.refresh_token) pm.environment.set('refresh_token', d.refresh_token);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Logout",
+            "request": {
+              "method": "POST",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/auth/logout",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "logout"
+                ]
+              },
+              "auth": {
+                "type": "bearer",
+                "bearer": [
+                  {
+                    "key": "token",
+                    "value": "{{access_token}}",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Users",
+        "description": "Signed-in user profile, settings, sessions and GST/billing details.",
+        "item": [
+          {
+            "name": "Get My Profile",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me"
+                ]
+              },
+              "description": "Carries `has_password` (whether the OTP-only account has set one yet) and the `onboarding` block (`account_type`, what step is still open)."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update My Profile",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me"
+                ]
+              },
+              "description": "Allow-list of writable fields — everything else on the user is server-owned.\n\n`account_type` (`business` | `personal`) answers signup step 2 and can only be set while onboarding is still open (409 afterwards); `personal` completes onboarding immediately.\n`profile_photo_s3_key` must be a key issued to you by `POST /uploads/presign` with slot `profile_photo` — `null` clears it.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"Pramod\",\n  \"email\": \"pramod+{{$timestamp}}@example.com\",\n  \"account_type\": \"business\",\n  \"profile_photo_s3_key\": \"\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Set First Password (OTP-only account)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/password",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "password"
+                ]
+              },
+              "description": "For accounts with `has_password: false`. No current password is required — the live session is itself the product of an OTP. 409 if one is already set (use PATCH). Ends all OTHER sessions.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"new_password\": \"NewPass123\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Change Password",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/password",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "password"
+                ]
+              },
+              "description": "Returns 409 when `current_password` does not match.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"current_password\": \"NewPass123\",\n  \"new_password\": \"NewPass456\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Preferences",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/preferences",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "preferences"
+                ]
+              },
+              "description": "Always a full object — defaults are applied for users who never saved any."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update Preferences",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/preferences",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "preferences"
+                ]
+              },
+              "description": "Partial update — send only what changed. `languages` is \"Preferred Languages\": a multi-select of **content** languages deciding which templates the user is shown, NOT the app UI language. It is a full replace (`[]` resets to the default) and entries are codes/uids/ids from `GET /languages`; an unknown one is a 400 naming it.\n\nThe `notify_*` flags cover TRANSACTIONAL messages only — OTP delivery ignores them.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"languages\": [\n    \"en\",\n    \"ml\"\n  ],\n  \"notify_push\": true,\n  \"notify_email\": false,\n  \"notify_whatsapp\": true\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Log Out Other Devices",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/sessions/revoke-others",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "sessions",
+                  "revoke-others"
+                ]
+              },
+              "description": "Ends every session but this one. Effective immediately — each revoked session's access token is blacklisted, not just its refresh token.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Deactivate My Account",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/deactivate",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "deactivate"
+                ]
+              },
+              "description": "Switches the account off and ends EVERY session including this one — discard the tokens after calling. Nothing is deleted; an admin can reactivate.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Billing",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/billing",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "billing"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Upsert Billing",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/billing",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "billing"
+                ]
+              },
+              "description": "One billing record per user — creates or updates in place. `gstin` must be exactly 15 chars (or null/empty).",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"billing_name\": \"Acme Pvt Ltd\",\n  \"gstin\": \"22AAAAA0000A1Z5\",\n  \"billing_address\": \"12 MG Road\",\n  \"billing_state\": \"Karnataka\",\n  \"billing_pincode\": \"560001\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Businesses",
+        "description": "Owner-scoped business management, the Brand Kit (keywords, palette, fonts, watermark), the public \"Near Me\" storefront, and adopted (premium) variants.",
+        "item": [
+          {
+            "name": "Create Business",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/businesses",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses"
+                ]
+              },
+              "description": "`industry` is the public name for the business category and accepts a **slug**, uid, or numeric id. `category_id` is the deprecated legacy form (still accepted).\n\n`sub_industry` is the child pick under `industry`; `custom_sub_industry` is the \"Others\" path — free text that files a PENDING industry for admin approval and links the business to it right away (the chip stays hidden publicly until approved). The two are mutually exclusive.\n\n`keywords` must already exist in the tag catalogue — see `GET /industries/{ref}/keywords` for the suggestions; an unknown keyword is a 400 naming it.\n\n`logo_s3_key` / `cover_s3_key` must be keys **you** were issued by `POST /uploads/presign` for slots `business_logo` / `business_cover`; a key from another namespace or slot is rejected.\n\n`heading_font_id` / `body_font_id` come from `GET /fonts` (a premium library font needs a paid plan). `watermark_enabled: 1` needs the `custom_watermark` plan feature (403 otherwise) — turning it off is always allowed.\n\nOne business per account: a second create is a **409**.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"My Coffee Shop\",\n  \"industry\": \"{{industry_slug}}\",\n  \"description\": \"Best coffee in town\",\n  \"logo_s3_key\": \"\",\n  \"cover_s3_key\": \"\",\n  \"brand_colors\": [\n    {\n      \"hex\": \"#1A2B3C\",\n      \"label\": \"Brand Blue\"\n    },\n    {\n      \"hex\": \"#F5A623\"\n    }\n  ],\n  \"watermark_enabled\": 0,\n  \"heading_font_id\": null,\n  \"body_font_id\": null,\n  \"city\": \"Bengaluru\",\n  \"state\": \"Karnataka\",\n  \"address\": \"12 MG Road\",\n  \"latitude\": 12.9716,\n  \"longitude\": 77.5946,\n  \"phone\": \"+919876543210\",\n  \"whatsapp\": \"+919876543210\",\n  \"email\": \"hello@coffee.com\",\n  \"website\": \"https://coffee.com\",\n  \"social_links\": {\n    \"instagram\": \"https://instagram.com/coffee\"\n  },\n  \"operating_hours\": {\n    \"mon\": {\n      \"open\": \"09:00\",\n      \"close\": \"21:00\"\n    },\n    \"sun\": null\n  }\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('business_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List My Businesses",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Business",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update Business",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}"
+                ]
+              },
+              "description": "Every create field is patchable. `watermark_enabled: 1` is plan-gated (`custom_watermark`) and 403s on a free plan; `heading_font_id` / `body_font_id` need ids from `GET /fonts`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"description\": \"Updated description\",\n  \"industry\": \"{{industry_slug}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Delete Business",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}"
+                ]
+              },
+              "description": "Soft delete, owner only."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get My Keywords",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/keywords",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "keywords"
+                ]
+              },
+              "description": "The \"My Keywords\" card — the tags describing the owner's products & services."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Set My Keywords (full replace)",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/keywords",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "keywords"
+                ]
+              },
+              "description": "Full replace — send the complete list, not a delta; `[]` clears it. Entries are numeric ids, slugs or display names that must already exist in the tag catalogue (there is no custom-keyword path). An unrecognised entry is a 400 naming it, never a silent drop.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"keywords\": [\n    \"coffee\",\n    \"bakery\"\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Brand Colors",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/brand-colors",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "brand-colors"
+                ]
+              },
+              "description": "Ordered array of `{ hex, label? }` — always an array, `[]` when unset."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Set Brand Colors (full replace)",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/brand-colors",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "brand-colors"
+                ]
+              },
+              "description": "Full replace; `[]` clears it. **Order is the meaning** — the first colour is the primary and is preserved exactly as sent. Max 6. `hex` must be the full 6-digit form (`#1A2B3C`; 3-digit shorthand is rejected) and is stored upper-cased, so `#ff0000` and `#FF0000` are one colour. Repeating a colour is a 400.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"brand_colors\": [\n    {\n      \"hex\": \"#1A2B3C\",\n      \"label\": \"Brand Blue\"\n    },\n    {\n      \"hex\": \"#F5A623\",\n      \"label\": \"Accent\"\n    }\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Nearby Businesses (public)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/nearby?lat={{lat}}&lng={{lng}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "nearby"
+                ],
+                "query": [
+                  {
+                    "key": "lat",
+                    "value": "{{lat}}"
+                  },
+                  {
+                    "key": "lng",
+                    "value": "{{lng}}"
+                  },
+                  {
+                    "key": "radius",
+                    "value": "10",
+                    "disabled": true
+                  },
+                  {
+                    "key": "q",
+                    "value": "coffee",
+                    "disabled": true
+                  },
+                  {
+                    "key": "category",
+                    "value": "restaurant-food",
+                    "disabled": true
+                  },
+                  {
+                    "key": "category_id",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "sort",
+                    "value": "distance",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "20",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Active businesses within `radius` km of lat/lng, with a computed `distance_km`.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Public Profile",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/public",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "public"
+                ]
+              },
+              "description": "Public-safe storefront fields only (contact, hours, rating, geo, category).",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Public Products",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/products",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "products"
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Adopted Variants",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/variants",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "variants"
+                ]
+              },
+              "description": "Variants added to this business, each with its active template cards."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Adopt Variant (\"Use This Brand Series\")",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/variants",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "variants"
+                ]
+              },
+              "description": "The button says brand series, but the grant is per-VARIANT — adopting one does not unlock its siblings. Requires the owner's ACTIVE plan to entitle the variant (403 otherwise). Idempotent, and the grant is durable — access survives a lapsed plan.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"variant_uid\": \"{{variant_uid}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Remove Adopted Variant",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}/variants/{{variant_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}",
+                  "variants",
+                  "{{variant_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Projects",
+        "description": "User designs (canvas documents) and their export records.",
+        "item": [
+          {
+            "name": "Create Project",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/projects",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects"
+                ]
+              },
+              "description": "All of `business_id`, `template_id` and `size_id` are optional, and all three are **numeric ids**, not uids — unlike the rest of the app API, which addresses things by uid. Nothing in this collection captures a numeric business id, so they are left out of the sample body; fill them from `GET /businesses`, `GET /templates` and `GET /template-sizes` when you need a project bound to a template.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"Diwali Poster\",\n  \"content\": \"{}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('project_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Projects",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/projects",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Project",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update Project",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}"
+                ]
+              },
+              "description": "status: `draft` | `published` | `archived`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"Diwali Poster v2\",\n  \"status\": \"published\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Delete Project",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Create Export",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}/exports",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}",
+                  "exports"
+                ]
+              },
+              "description": "export_type: `download` | `share`; platform: `whatsapp` | `instagram` | `facebook` | `direct`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"export_type\": \"download\",\n  \"platform\": \"whatsapp\",\n  \"s3_key\": \"exports/example.png\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Exports",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}/exports",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}",
+                  "exports"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Products",
+        "description": "Products/services of a business (shown on the public storefront).",
+        "item": [
+          {
+            "name": "Create Product",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/products",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products"
+                ]
+              },
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"business_uid\": \"{{business_uid}}\",\n  \"name\": \"Cappuccino\",\n  \"description\": \"Hot coffee\",\n  \"price\": 150\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('product_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Products",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/products?business_uid={{business_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products"
+                ],
+                "query": [
+                  {
+                    "key": "business_uid",
+                    "value": "{{business_uid}}"
+                  }
+                ]
+              },
+              "description": "`business_uid` is required."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Product",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/products/{{product_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products",
+                  "{{product_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update Product",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/products/{{product_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products",
+                  "{{product_uid}}"
+                ]
+              },
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"price\": 160,\n  \"is_active\": 1\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Delete Product",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/products/{{product_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products",
+                  "{{product_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Add Product Image",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/products/{{product_uid}}/images",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products",
+                  "{{product_uid}}",
+                  "images"
+                ]
+              },
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"s3_key\": \"products/example.png\",\n  \"display_order\": 0\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {}; if (d.id) pm.environment.set('product_image_id', d.id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Remove Product Image",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/products/{{product_uid}}/images/{{product_image_id}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products",
+                  "{{product_uid}}",
+                  "images",
+                  "{{product_image_id}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Frames",
+        "description": "User-uploaded frames/overlays.",
+        "item": [
+          {
+            "name": "Create Frame",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/frames",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames"
+                ]
+              },
+              "description": "frame_type: `image` | `animated`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"Festive Frame\",\n  \"s3_key\": \"frames/example.png\",\n  \"frame_type\": \"image\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('frame_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Frames",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/frames",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Frame",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/frames/{{frame_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "{{frame_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update Frame",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/frames/{{frame_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "{{frame_uid}}"
+                ]
+              },
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"Festive Frame v2\",\n  \"is_active\": 1\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Delete Frame",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/frames/{{frame_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "{{frame_uid}}"
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Uploads (my files)",
+        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, frame, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `user_frame`, `media_library` (the editor's \"My Uploads\"), `brand_font` (the only non-image slot).\n\nImages are raster only (`image/jpeg|png|webp|gif`) — SVG is deliberately refused for user uploads. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently.\n\nSize is enforced at **confirm** (10 MB) — a presigned PUT cannot carry a size condition — and an oversized object is deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule, so an abandoned upload costs nothing. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
+        "item": [
+          {
+            "name": "Presign Upload",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/presign",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "presign"
+                ]
+              },
+              "description": "Returns `{ key, upload_url, required_headers, expires_in, max_bytes }`. `filename` is used only for its extension — the stored name is a uuid.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"target\": {\n    \"slot\": \"media_library\"\n  },\n  \"filename\": \"photo.jpg\",\n  \"content_type\": \"image/jpeg\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {}; if (d.key) pm.environment.set('my_upload_key', d.key);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Presign Upload (brand font)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/presign",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "presign"
+                ]
+              },
+              "description": "The font slot for a user's own Brand Kit typeface. Register the confirmed keys with `POST /fonts`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"target\": {\n    \"slot\": \"brand_font\"\n  },\n  \"filename\": \"AcmeSans-Regular.woff2\",\n  \"content_type\": \"font/woff2\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {}; if (d.key) pm.environment.set('my_font_key', d.key);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Confirm Upload (simple)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/confirm",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "confirm"
+                ]
+              },
+              "description": "Promotes pending → active. Rejects any key outside your namespace and any key with no object behind it.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"keys\": [\n    \"{{my_upload_key}}\"\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Confirm Upload (media library, with metadata)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/confirm",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "confirm"
+                ]
+              },
+              "description": "Same promotion, but records the dimensions and the user's own filename the media grid needs — the server cannot work those out without decoding the file. Send `uploads` **or** `keys`, never both.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"uploads\": [\n    {\n      \"key\": \"{{my_upload_key}}\",\n      \"width\": 1080,\n      \"height\": 1080,\n      \"filename\": \"photo.jpg\"\n    }\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "My Uploads (\"Media Library\")",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/uploads",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads"
+                ],
+                "query": [
+                  {
+                    "key": "slot",
+                    "value": "media_library",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "50",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Newest first. Defaults to the `media_library` slot — logos, covers, product images and frames are managed on their own screens, so nobody can delete their logo from a media grid by accident. Prepend `cdn_base_url` to `s3_key`."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data; const first = Array.isArray(d) ? d[0] : null; if (first && first.uid) pm.environment.set('my_upload_uid', first.uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Delete Upload",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/uploads/{{my_upload_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "{{my_upload_uid}}"
+                ]
+              },
+              "description": "Removes the file and refunds its bytes against the plan quota. **Warn the user first** — a saved design that used the image will render it broken, and nothing links a project to the uploads it uses (project content is an opaque blob)."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Fonts",
+        "description": "Brand Kit typography — the curated library plus the user's own uploads, in one list. Assign a font to a business with `heading_font_id` / `body_font_id` on `PATCH /businesses/{uid}`.",
+        "item": [
+          {
+            "name": "Fonts Available To Me",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/fonts",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "fonts"
+                ],
+                "query": [
+                  {
+                    "key": "language",
+                    "value": "ta",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Optional auth — send `Bearer {{access_token}}` to include your own uploads and unlock premium library fonts. `is_own` marks yours; `is_locked` marks a premium library font your plan does not include (it still appears, but its files are withheld).\n\nEach row carries its `FontFiles` (weight, style, format, s3_key) and `Languages` (script coverage). `?language=ta` narrows to fonts that can render that script — fonts with no declared coverage are always included, since unclassified means unknown, not incapable.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Register My Font",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/fonts",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "fonts"
+                ]
+              },
+              "description": "Turns files uploaded to the `brand_font` slot into a selectable family. Upload each file first (`/uploads/presign` → `/uploads/confirm`), then send the keys here — a key you did not upload to that slot is a 400.\n\nShip **both** `ttf`/`otf` and `woff2` where you can: the Flutter app cannot render woff2, and the web editor wants it. 409 if you already have a family with this name.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"family\": \"Acme Sans\",\n  \"files\": [\n    {\n      \"s3_key\": \"{{my_font_key}}\",\n      \"format\": \"woff2\",\n      \"weight\": 400,\n      \"style\": \"normal\"\n    },\n    {\n      \"s3_key\": \"{{my_font_key}}\",\n      \"format\": \"ttf\",\n      \"weight\": 700,\n      \"style\": \"normal\"\n    }\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('font_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Delete My Font",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/fonts/{{font_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "fonts",
+                  "{{font_uid}}"
+                ]
+              },
+              "description": "Removes the family and its files and refunds the storage. A business using it falls back to the default typeface rather than breaking. Library fonts cannot be deleted (403)."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Feedback",
+        "description": "In-app feedback. Signed-in users only, so every submission is attributable and support has someone to reply to. Admins read it under **Admin → Feedback**.",
+        "item": [
+          {
+            "name": "Send Feedback",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/feedback",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "feedback"
+                ]
+              },
+              "description": "`rating` is the five faces on the Feedback screen, 1 (worst) to 5 (best), and is required; the note is optional. Rate limited — a burst returns 429.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"rating\": 5,\n  \"message\": \"Love the new templates!\",\n  \"app_version\": \"2.4.1\",\n  \"platform\": \"android\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Templates (public)",
+        "description": "Optional auth — send `access_token` to unlock premium content and raise the rate-limit tier, or none for anonymous.\n\nThe browse view **must be anchored**: at least one of `category` or `industry` is required (400 otherwise). All taxonomy filters accept a friendly slug, a uid, or a legacy numeric id.\n\nVariant templates are NOT browsable here — they are premium and plan-gated, served only via `GET /variants/{uid}`.",
+        "item": [
+          {
+            "name": "List Templates",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/templates?category={{template_category_slug}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "templates"
+                ],
+                "query": [
+                  {
+                    "key": "category",
+                    "value": "{{template_category_slug}}"
+                  },
+                  {
+                    "key": "industry",
+                    "value": "{{industry_slug}}",
+                    "disabled": true
+                  },
+                  {
+                    "key": "business_category",
+                    "value": "{{industry_slug}}",
+                    "disabled": true
+                  },
+                  {
+                    "key": "size",
+                    "value": "square",
+                    "disabled": true
+                  },
+                  {
+                    "key": "tags",
+                    "value": "sale,festival",
+                    "disabled": true
+                  },
+                  {
+                    "key": "template_type",
+                    "value": "image",
+                    "disabled": true
+                  },
+                  {
+                    "key": "category_id",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "business_category_id",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "size_id",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "30",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data; const first = Array.isArray(d) ? d[0] : (d && d.items && d.items[0]);",
+                    "if (first && first.uid) pm.environment.set('template_uid', first.uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Template",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/templates/{{template_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "templates",
+                  "{{template_uid}}"
+                ]
+              },
+              "description": "Premium templates return `is_locked=true` with `content` withheld unless the caller is a paid user.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Assets (public)",
+        "description": "`category` (the anchor) is required. Premium assets return `is_locked=true` and omit `s3_key` for guests/free users.",
+        "item": [
+          {
+            "name": "List Assets",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/assets?category={{asset_category_slug}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "assets"
+                ],
+                "query": [
+                  {
+                    "key": "category",
+                    "value": "{{asset_category_slug}}"
+                  },
+                  {
+                    "key": "tags",
+                    "value": "sale",
+                    "disabled": true
+                  },
+                  {
+                    "key": "asset_type",
+                    "value": "icon",
+                    "disabled": true
+                  },
+                  {
+                    "key": "category_id",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "50",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Catalog (public)",
+        "description": "Public read-only reference data — no auth required (a token only raises the rate-limit tier and targets audience-specific content).\n\nTaxonomy filters (`parent`, `group`, `category`) accept a **slug**, a uid, or a legacy numeric id. The `*_id` forms are deprecated aliases.",
+        "item": [
+          {
+            "name": "Industries",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/industries",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "industries"
+                ],
+                "query": [
+                  {
+                    "key": "parent",
+                    "value": "null",
+                    "disabled": true
+                  },
+                  {
+                    "key": "parent_id",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "with_related",
+                    "value": "1",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "The public \"industry\" catalogue (business categories). Use `parent=null` for top-level industries. `with_related=1` attaches each row's curated SEO cross-link block (`RelatedIndustries`).",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Industry Detail (SEO landing page)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/industries/{{industry_slug}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "industries",
+                  "{{industry_slug}}"
+                ]
+              },
+              "description": "One industry by slug, uid or legacy numeric id, always carrying `RelatedIndustries` — the curated, editor-ordered cross-link block (active industries only).",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Industry Keywords (signup \"My Keywords\" picker)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/industries/{{industry_slug}}/keywords",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "industries",
+                  "{{industry_slug}}",
+                  "keywords"
+                ]
+              },
+              "description": "The curated keywords for one industry. A sub-industry ALSO inherits its parent's keywords — merged and de-duped, its own first — so a bakery's picker offers the bakery keywords ahead of the generic food ones. `ref` is a slug, uid or numeric id. These are exactly the values `POST /businesses` and `PUT /businesses/{uid}/keywords` accept.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Business Categories (deprecated alias)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/business-categories",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "business-categories"
+                ],
+                "query": [
+                  {
+                    "key": "parent",
+                    "value": "null",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Deprecated backward-compatible alias of `GET /industries`. New clients should call `/industries`.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Template Categories",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/template-categories",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "template-categories"
+                ],
+                "query": [
+                  {
+                    "key": "tree",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "homepage",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "parent",
+                    "value": "null",
+                    "disabled": true
+                  },
+                  {
+                    "key": "parent_id",
+                    "value": "1",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Set `tree=1` for the full active hierarchy nested parent→child (each node carries a recursive `children` array, ordered by display_order). `parent`/`parent_id` are ignored in tree mode.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Asset Categories",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/asset-categories",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "asset-categories"
+                ],
+                "query": [
+                  {
+                    "key": "parent",
+                    "value": "null",
+                    "disabled": true
+                  },
+                  {
+                    "key": "parent_id",
+                    "value": "1",
+                    "disabled": true
+                  }
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Tags",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/tags",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "tags"
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Template Sizes",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/template-sizes",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "template-sizes"
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Languages (the \"Preferred Languages\" picker)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/languages",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "languages"
+                ]
+              },
+              "description": "Active content languages in display order. These select which TEMPLATES a user is shown — they are **not** the app's UI language. Render `native_name` (\"தமிழ்\"), which is what a speaker scans for; `name` is the English label for admin screens. Save the user's picks with `PATCH /users/me/preferences`.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Brand Series",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/brand-series",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "brand-series"
+                ],
+                "query": [
+                  {
+                    "key": "preview_variants",
+                    "value": "4",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Active brand series with their style personalities, tags and colour palette, the counts the card renders (`variants_count`, `templates_count`), and a preview slice of variants. `is_locked` is a ROLLUP of the variants — gating lives on the variant, so a series reads as locked only when every variant is.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data; const first = Array.isArray(d) ? d[0] : null;",
+                    "if (first && first.uid) pm.environment.set('brand_series_uid', first.uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Variants",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/variants",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "variants"
+                ],
+                "query": [
+                  {
+                    "key": "series",
+                    "value": "premium-picks",
+                    "disabled": true
+                  },
+                  {
+                    "key": "series_id",
+                    "value": "1",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Filter by brand series — `series` accepts a slug, uid or numeric id. The pre-rename `group` / `group_id` params are still accepted.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data; const first = Array.isArray(d) ? d[0] : null;",
+                    "if (first && first.uid) pm.environment.set('variant_uid', first.uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Variant (templates always listed, locked ones stripped)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/variants/{{variant_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "variants",
+                  "{{variant_uid}}"
+                ]
+              },
+              "description": "The variant card is public, and so is the TEMPLATE LIST — templates are always returned so a visitor can see what they would be buying. When the caller is not entitled, `is_locked=true` and every template comes back WITHOUT its `content` (thumbnails only). Send `Bearer {{access_token}}` to be entitled — guests are always locked. Opening a template or starting a project from one is still refused while locked.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "FAQ Categories",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/faq-categories",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "faq-categories"
+                ]
+              },
+              "description": "Active FAQ categories with their FAQs nested.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "FAQs (grouped by category)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/faqs",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "faqs"
+                ],
+                "query": [
+                  {
+                    "key": "category",
+                    "value": "general",
+                    "disabled": true
+                  },
+                  {
+                    "key": "category_id",
+                    "value": "1",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "`category` narrows to a single group and accepts a slug, uid, or numeric id (`null` = the uncategorized group).",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Testimonials",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/testimonials",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "testimonials"
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Banners",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/banners",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "banners"
+                ]
+              },
+              "description": "Active, in-window app banners — audience-targeted by the caller's tier.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Special Events (festival calendar)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/special-events",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "special-events"
+                ],
+                "query": [
+                  {
+                    "key": "range",
+                    "value": "month",
+                    "disabled": true
+                  },
+                  {
+                    "key": "from",
+                    "value": "2026-12-01",
+                    "disabled": true
+                  },
+                  {
+                    "key": "to",
+                    "value": "2026-12-31",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Active events falling in a date window, each with `occurs_on` and its active `Templates`. Recurring events match on month-day, one-offs on `full_date`. Default window is a rolling week; use `range=month` or explicit `from`/`to`. The window is echoed in `meta.range`.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Plans (public pricing)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/plans",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "plans"
+                ],
+                "query": [
+                  {
+                    "key": "plan_type",
+                    "value": "subscription",
+                    "disabled": true
+                  },
+                  {
+                    "key": "billing_option_type",
+                    "value": "monthly",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Active plans with billing options, card-visible features, `trial_days`, and applicable coupons. Use `plan_type=access_pass` to fetch the one-time ₹10 pass.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Config",
+        "description": "Public app settings (`is_public` app-settings rows, typed).",
+        "item": [
+          {
+            "name": "Get App Config",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/config",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "config"
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Subscriptions",
+        "description": "Plan purchase (Razorpay one-time + recurring), coupons, trials, the ₹10 access pass, and the current entitlement state.",
+        "item": [
+          {
+            "name": "My Subscription & Entitlements",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/me",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "me"
+                ]
+              },
+              "description": "The ACTIVE subscription with its plan, billing cycle, and per-feature entitlements (limit/used/remaining, or `enabled` for booleans). Poll after checkout to detect activation. `has_active_subscription: false` ⇒ treat as free tier."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Verify Coupon",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/coupon/verify",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "coupon",
+                  "verify"
+                ]
+              },
+              "description": "Applies the full redemption rule set (validity window, `max_uses` cap, plan restriction, audience). 404 = unknown/expired; 409 = exists but not redeemable.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"code\": \"{{coupon_code}}\",\n  \"plan_id\": 1\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Initiate Subscription",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/subscriptions",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions"
+                ]
+              },
+              "description": "Creates a pending subscription and returns a Razorpay order (one-time) or a subscription `short_url` (recurring). A bad coupon fails the request rather than silently charging full price; `used_count` is consumed only on activation.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"plan_billing_option_id\": 1,\n  \"coupon_code\": \"{{coupon_code}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const oid = d.razorpay_order_id || (d.order && d.order.id); if (oid) pm.environment.set('razorpay_order_id', oid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Initiate Access Pass (₹10)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/access-pass",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "access-pass"
+                ]
+              },
+              "description": "One-time pass, allowed once per user ever (409 afterwards). Grants the access-pass plan's features for `pass_days`, then reverts to free.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const oid = d.razorpay_order_id || (d.order && d.order.id); if (oid) pm.environment.set('razorpay_order_id', oid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Verify Payment",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/payment/verify",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "payment",
+                  "verify"
+                ]
+              },
+              "description": "Post-Checkout UX confirmation; activates idempotently. The webhook remains the source of truth.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"razorpay_order_id\": \"{{razorpay_order_id}}\",\n  \"razorpay_payment_id\": \"{{razorpay_payment_id}}\",\n  \"razorpay_signature\": \"{{razorpay_signature}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Plans (deprecated alias)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/plans",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "plans"
+                ]
+              },
+              "description": "Deprecated alias of the public `GET /plans`. New clients should call `/plans`.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "environment": {
+    "id": "mmb-0003-0000-0000-0000-000000000000",
+    "name": "MakeMyBrand App (Local)",
+    "values": [
+      {
+        "key": "base_url",
+        "value": "http://localhost:3000/api/v1",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "api_version",
+        "value": "v1",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "phone",
+        "value": "+919876543210",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "purpose",
+        "value": "login",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "otp",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "client_mnemonic",
+        "value": "postman-client",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "access_token",
+        "value": "",
+        "type": "secret",
+        "enabled": true
+      },
+      {
+        "key": "refresh_token",
+        "value": "",
+        "type": "secret",
+        "enabled": true
+      },
+      {
+        "key": "industry_slug",
+        "value": "restaurant-food",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "template_category_slug",
+        "value": "festival",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "asset_category_slug",
+        "value": "stickers",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "lat",
+        "value": "12.9716",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "lng",
+        "value": "77.5946",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "business_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "project_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "product_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "product_image_id",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "frame_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "template_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "variant_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "brand_series_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "my_upload_key",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "my_upload_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "my_font_key",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "font_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "coupon_code",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "razorpay_order_id",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "razorpay_payment_id",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "razorpay_signature",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      }
+    ],
+    "_postman_variable_scope": "environment"
+  }
+}
