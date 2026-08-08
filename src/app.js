@@ -76,6 +76,30 @@ if (process.env.NODE_ENV !== 'production') {
   console.log('[Swagger] Docs available at /api/docs');
 }
 
+// Browser playground for frontend devs (see playground/README.md). Deliberately NOT
+// gated on `NODE_ENV !== 'production'` like Swagger above: an unset NODE_ENV falls back
+// to .env.development, which would mount a live, token-capturing API client on a
+// production host. Requiring an explicit opt-in makes a misconfigured deploy fail closed.
+if (process.env.ENABLE_PLAYGROUND === 'true') {
+  const path = require('path');
+  app.use(
+    '/playground',
+    (req, res, next) => {
+      // Scoped to this route only. The playground runs each request's capture script
+      // through `new Function`, which helmet's default `script-src 'self'` blocks, and
+      // it must be able to call a base URL on another host (a local page pointed at
+      // staging), which `connect-src 'self'` blocks.
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src *",
+      );
+      next();
+    },
+    express.static(path.join(__dirname, '..', 'playground')),
+  );
+  console.log('[Playground] Available at /playground');
+}
+
 app.use(errorHandler);
 
 module.exports = app;

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MakeMyBrand API Playground</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <strong>MakeMyBrand</strong> <span class="muted">API Playground</span>
+    </div>
+    <label class="base-url">
+      <span>Base URL</span>
+      <input id="base-url" type="text" spellcheck="false">
+    </label>
+    <div class="auth-state">
+      <span id="auth-dot" class="dot"></span>
+      <span id="auth-label">not signed in</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ── requests ────────────────────────────────────────────────── -->
+    <nav class="sidebar" id="sidebar">
+      <input id="filter" type="search" placeholder="Filter requests…" autocomplete="off">
+      <div id="tree" class="tree"></div>
+    </nav>
+
+    <!-- ── request / response ──────────────────────────────────────── -->
+    <section class="main" id="main">
+      <div class="empty" id="empty">
+        <h1>Pick a request</h1>
+        <p>
+          Everything here is generated from the API's own route definitions, so it matches what the
+          server actually accepts.
+        </p>
+        <ol>
+          <li>Run <strong>Auth → Send OTP</strong>. Outside production the OTP comes back in the
+            response and is captured automatically.</li>
+          <li>Run <strong>Auth → Verify OTP</strong>. The access token is captured, and every
+            request below inherits it.</li>
+          <li>Use <strong>Run folder</strong> on any group to play a whole journey end to end and
+            watch where it breaks.</li>
+        </ol>
+        <p class="muted">
+          Captured values (tokens, uids) appear in the Variables panel on the right and persist in
+          this browser.
+        </p>
+      </div>
+
+      <div class="request-pane hidden" id="request-pane">
+        <div class="req-head">
+          <div>
+            <h2 id="req-name"></h2>
+            <div class="url-line">
+              <span class="method" id="req-method"></span>
+              <code id="req-url"></code>
+            </div>
+          </div>
+          <button id="send" class="primary">Send</button>
+        </div>
+
+        <p class="desc" id="req-desc"></p>
+
+        <div class="tabs" id="req-tabs">
+          <button data-tab="params" class="active">Query</button>
+          <button data-tab="body">Body</button>
+          <button data-tab="script">Captures</button>
+        </div>
+
+        <div class="tab-panel" id="tab-params"></div>
+        <div class="tab-panel hidden" id="tab-body">
+          <textarea id="body-editor" spellcheck="false"></textarea>
+          <p class="hint" id="body-hint"></p>
+        </div>
+        <div class="tab-panel hidden" id="tab-script">
+          <p class="hint">Values this request writes back into the Variables panel when it succeeds.</p>
+          <pre id="script-view"></pre>
+        </div>
+
+        <div id="response"></div>
+      </div>
+
+      <div class="run-pane hidden" id="run-pane"></div>
+    </section>
+
+    <!-- ── variables ───────────────────────────────────────────────── -->
+    <aside class="vars" id="vars">
+      <div class="vars-head">
+        <h3>Variables</h3>
+        <button id="reset-vars" class="link" title="Restore seed values">reset</button>
+      </div>
+      <p class="hint">
+        <code>{{name}}</code> in a URL or body is replaced with these. Empty ones are usually filled
+        in for you by an earlier request.
+      </p>
+      <div id="var-list"></div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
