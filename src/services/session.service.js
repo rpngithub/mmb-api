@@ -11,20 +11,32 @@ const blacklistRepo = require('../repositories/tokenBlacklist.repository');
 // which is the wrong answer for "log out the laptop I just sold". Doing only (2)
 // lets them refresh straight back in. The session row records `access_jti` so both
 // are possible from one place.
+// Both access tokens are blacklisted, not just the newest. A session that refreshed
+// recently has handed the client TWO live access tokens — the new one and the one it
+// replaced, still good for the rest of its 15 minutes. Killing only the newest left
+// the older one working, so "sign out my other devices" did not actually sign them
+// out. Anything older than those two has already expired on its own.
 async function revokeSession(session, reason = 'logout') {
   if (!session) return;
 
   await sessionRepo.revokeByJti(session.jti);
 
-  // Nothing to blacklist if the access token has already expired on its own, or
-  // if this session predates the access_jti column.
-  if (!session.access_jti) return;
-  const expiresAt = session.access_expires_at ? new Date(session.access_expires_at) : null;
+  await _blacklistAccessToken(session, session.access_jti, session.access_expires_at, reason);
+  await _blacklistAccessToken(session, session.prev_access_jti, session.prev_access_expires_at, reason);
+}
+
+async function _blacklistAccessToken(session, jti, expiresAtRaw, reason) {
+  // Nothing to do when there is no such token: a session predating these columns, or
+  // one that has never rotated and so has no previous token.
+  if (!jti) return;
+
+  // An access token that has already expired needs no blacklisting.
+  const expiresAt = expiresAtRaw ? new Date(expiresAtRaw) : null;
   if (expiresAt && expiresAt <= new Date()) return;
 
   try {
     await blacklistRepo.addToBlacklist({
-      jti:        session.access_jti,
+      jti,
       actor_type: session.actor_type,
       actor_id:   session.actor_id,
       reason,
@@ -34,8 +46,9 @@ async function revokeSession(session, reason = 'logout') {
       expires_at: expiresAt || session.expires_at,
     });
   } catch (err) {
-    // jti is unique — a token already blacklisted (double logout) is a no-op, not
-    // a failure. Anything else is real and should surface.
+    // jti is unique — a token already blacklisted (double logout, or the caller's own
+    // token which logout blacklists directly) is a no-op, not a failure. Anything
+    // else is real and should surface.
     if (err.name !== 'SequelizeUniqueConstraintError') throw err;
   }
 }

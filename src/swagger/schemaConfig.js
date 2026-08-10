@@ -12,7 +12,9 @@
 
 module.exports = {
   // Stripped from EVERY schema (sensitive / internal).
-  globalExclude: ['password_hash', 'otp_hash', 'refresh_token_hash', 'razorpay_signature'],
+  globalExclude: [
+    'password_hash', 'otp_hash', 'refresh_token_hash', 'prev_refresh_token_hash', 'razorpay_signature',
+  ],
 
   // Internal/auth tables not exposed through the API.
   UserSession:          { skip: true },

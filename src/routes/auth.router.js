@@ -72,7 +72,42 @@ router.post('/verify-otp', validate(verifyOtpSchema), rateLimiter.auth, controll
  * /auth/refresh:
  *   post:
  *     summary: Rotate refresh token and get a new access token
+ *     description: >-
+ *       Refresh tokens are single-use: each call returns a new pair and the token
+ *       you sent stops working. Store the new one and send only that next time.
+ *
+ *       Clients must allow only ONE refresh in flight at a time and queue other
+ *       requests behind it. Two concurrent refreshes with the same token cannot
+ *       both succeed.
+ *
+ *       Every failure is a 401; the `error.code` says what to do about it.
+ *       `REFRESH_IN_PROGRESS` — a refresh raced with another, or an old token was
+ *       retried moments after rotating. Nothing was revoked: retry with the newest
+ *       token and do NOT sign the user out.
+ *       `TOKEN_REUSE_DETECTED` — an already-used refresh token was replayed, which
+ *       is treated as a stolen token. EVERY session for the account has been signed
+ *       out and the user must log in again.
+ *       Any other code (`UNAUTHORIZED`) — the token or its session is no longer
+ *       valid; send the user to login.
  *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [refresh_token]
+ *             properties:
+ *               refresh_token: { type: string }
+ *     responses:
+ *       200:
+ *         description: A new access/refresh pair. The previous refresh token is now dead.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/AuthResponse'
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
  */
 router.post('/refresh', validate(refreshSchema), controller.refresh);
 

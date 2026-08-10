@@ -4019,7 +4019,7 @@
       },
       {
         "key": "client_mnemonic",
-        "value": "postman-client",
+        "value": "playground",
         "type": "default",
         "enabled": true
       },

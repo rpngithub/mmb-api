@@ -5,8 +5,11 @@ const { v4: uuid } = require('uuid');
 const h = require('./helpers');
 
 const { models } = h;
-const { User, Business, Template, UserSubscription, Payment, ActivityLog, OtpCode } = models;
+const { User, Business, Template, UserSubscription, Payment, ActivityLog, OtpCode, UserSession } = models;
 const { hashOtp } = require('../src/utils/otpHelper');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const { JWT_SECRET } = require('../src/config/jwt');
 
 const P = '/api/v1';
 let startLogId = 0;
@@ -140,7 +143,7 @@ test('OTP login: send-otp then verify-otp issues tokens with free tier', async (
   assert.match(String(send.body.data.otp), /^\d{6}$/, 'otp exposed in test env');
 
   const verify = await h.request('POST', `${P}/auth/verify-otp`, {
-    body: { phone, otp: send.body.data.otp, purpose: 'login', client_mnemonic: 'test' },
+    body: { phone, otp: send.body.data.otp, purpose: 'login', client_mnemonic: 'android' },
   });
   assert.equal(verify.status, 200);
   assert.ok(verify.body.data.access_token && verify.body.data.refresh_token);
@@ -157,9 +160,40 @@ test('verify-otp rejects a wrong OTP', async () => {
   const phone = `9${String((Date.now() + 7) % 1000000000).padStart(9, '0')}`;
   await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
   const verify = await h.request('POST', `${P}/auth/verify-otp`, {
-    body: { phone, otp: '000000', purpose: 'login', client_mnemonic: 'test' },
+    body: { phone, otp: '000000', purpose: 'login', client_mnemonic: 'android' },
   });
   assert.equal(verify.status, 401);
+  const u = await User.findOne({ where: { phone } });
+  if (u) track.users.push(u.id);
+});
+
+// `client_mnemonic` was free text landing in a JWT claim and a STRING(50) column.
+// The value nothing gates on today is the value something gates on tomorrow, and a
+// user-side login must not be able to call itself the admin panel.
+test('verify-otp only accepts known clients, and admin_panel is not one of them', async () => {
+  const phone = newPhone();
+  const sent  = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
+
+  const reject = (client) => h.request('POST', `${P}/auth/verify-otp`, {
+    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: client },
+  });
+
+  assert.equal((await reject('admin_panel')).status, 400, 'a user cannot claim to be the admin panel');
+  assert.equal((await reject('whatever-i-like')).status, 400);
+  assert.equal((await reject('Android')).status, 400, 'matched exactly, so case matters');
+  // Used to reach the INSERT and 500 on a STRING(50) column, after burning the OTP.
+  assert.equal((await reject('x'.repeat(200))).status, 400);
+
+  // The OTP survived all of that, so a real client can still finish the login.
+  const ok = await h.request('POST', `${P}/auth/verify-otp`, {
+    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'ios' },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(
+    JSON.parse(Buffer.from(ok.body.data.access_token.split('.')[1], 'base64').toString()).client_type,
+    'ios', 'the accepted value is what lands in the token',
+  );
+
   const u = await User.findOne({ where: { phone } });
   if (u) track.users.push(u.id);
 });
@@ -205,10 +239,13 @@ test('refresh issues an access token with identical claims to login', async () =
   assert.equal(refreshClaims.name,  loginClaims.name);
   assert.equal(refreshClaims.email, loginClaims.email);
 
-  // Same claim set, ignoring the claims that are expected to differ per token:
-  // jti/iat/exp, plus `sid` — refreshing revokes the old session and opens a new
-  // one, so the session id it names is a different session by design.
-  const stable = (c) => { const { jti, iat, exp, sid, ...rest } = c; return rest; };
+  // `sid` survives a refresh: rotation keeps the same session row, so the session
+  // an access token names stays live for the life of the login. (It used to change
+  // every refresh, because each one revoked the old session and opened a new one.)
+  assert.equal(refreshClaims.sid, loginClaims.sid, 'refresh rotates in place, keeping the session');
+
+  // Same claim set, ignoring the claims that differ per token by design: jti/iat/exp.
+  const stable = (c) => { const { jti, iat, exp, ...rest } = c; return rest; };
   assert.deepEqual(stable(refreshClaims), stable(loginClaims), 'login and refresh claim sets match');
 });
 
@@ -2601,7 +2638,7 @@ test('a wildcard role is not silently a superuser', async () => {
 const otpLogin = async (phone) => {
   const sent = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
   const r = await h.request('POST', `${P}/auth/verify-otp`, {
-    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'test_app' },
+    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'android' },
   });
   return r.body.data;
 };
@@ -2626,6 +2663,198 @@ test('logout actually ends the session â€” the refresh token dies with it',
   // ...and so is the refresh token, which previously survived logout entirely.
   const after = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t2.refresh_token } });
   assert.equal(after.status, 401, 'a logged-out session cannot mint new access tokens');
+});
+
+// ---------- Refresh token rotation & reuse detection ----------
+const sidOf = (t) => JSON.parse(Buffer.from(t.split('.')[1], 'base64').toString()).sid;
+
+// A refresh token is single-use, so one that has already been rotated away turning
+// up again means two parties hold the chain. Rejecting only the replayed token —
+// which is all this used to do — leaves whoever refreshed FIRST holding a live
+// token they can keep rotating for the session's full 30 days. If that was a thief,
+// the real user sees nothing but one unexplained logout. So the whole account goes.
+test('replaying a rotated refresh token signs every session out', async () => {
+  const phone  = newPhone();
+  const stolen = await otpLogin(phone);
+  const user   = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  // A second device, to prove the whole account goes and not just this session.
+  const other = await otpLogin(phone);
+
+  const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: stolen.refresh_token } });
+  assert.equal(rotated.status, 200);
+  assert.equal(sidOf(rotated.body.data.access_token), sidOf(stolen.access_token), 'rotation keeps the same session');
+
+  // Step outside the grace window, which otherwise (correctly) reads an immediate
+  // replay as an innocent retry.
+  await UserSession.update(
+    { rotated_at: new Date(Date.now() - 60_000) },
+    { where: { uid: sidOf(stolen.access_token) } },
+  );
+
+  const replay = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: stolen.refresh_token } });
+  assert.equal(replay.status, 401);
+  assert.equal(replay.body.error.code, 'TOKEN_REUSE_DETECTED');
+
+  // The token the first refresh minted is dead too. This is the part that rejecting
+  // only the replayed token missed entirely.
+  assert.equal(
+    (await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: rotated.body.data.refresh_token } })).status,
+    401, 'the token minted by the first refresh no longer works',
+  );
+  // Immediate, via the access-token blacklist — not "in 15 minutes when it expires".
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: rotated.body.data.access_token })).status, 401);
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: other.access_token })).status, 401, 'and other devices');
+
+  // Recorded: detection nobody can see afterwards is not worth much.
+  const logged = await ActivityLog.findOne({
+    where: { action: 'refresh_token_reuse_detected', actor_type: 'user', actor_id: user.id },
+  });
+  assert.ok(logged, 'reuse is written to the audit trail');
+});
+
+test('a refresh retried inside the grace window is a retry, not a break-in', async () => {
+  const phone = newPhone();
+  const t     = await otpLogin(phone);
+  const user  = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
+  assert.equal(rotated.status, 200);
+
+  // The same token again, immediately: a flaky connection re-sending, or two tabs
+  // racing. It fails — but nothing is revoked, and the code says "retry".
+  const retry = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
+  assert.equal(retry.status, 401);
+  assert.equal(retry.body.error.code, 'REFRESH_IN_PROGRESS');
+
+  // The point of the window: the user stays signed in.
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: rotated.body.data.access_token })).status, 200);
+  assert.equal(
+    (await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: rotated.body.data.refresh_token } })).status,
+    200, 'the newest refresh token is unaffected',
+  );
+});
+
+// Why the token is verified against its stored hash BEFORE the replay is acted on:
+// knowing a session's previous jti must not be enough to trigger the account-wide
+// sign-out, or reuse detection becomes a way to log any user out on demand.
+//
+// This also pins down why refresh tokens are stored as SHA-256 rather than bcrypt.
+// bcrypt truncates at 72 bytes, and a JWT's first 72 bytes are the fixed header plus
+// the opening of the payload — jti, iat, exp and the whole signature fall outside it.
+// Under bcrypt this exact token verified against the stored hash and the account was
+// signed out.
+test('a token bearing a known prev_jti but the wrong body revokes nothing', async () => {
+  const phone = newPhone();
+  const t     = await otpLogin(phone);
+  const user  = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
+  assert.equal(rotated.status, 200);
+
+  const session = await UserSession.findOne({ where: { uid: sidOf(t.access_token) } });
+  await session.update({ rotated_at: new Date(Date.now() - 60_000) });
+
+  // Same jti as the replaced token, and deliberately identical up to and past byte
+  // 72 — only `exp` and the signature differ. That is exactly the region bcrypt threw
+  // away, so this token used to verify against the stored hash; under sha256 it does
+  // not.
+  const forged = jwt.sign(
+    { sub: user.uid, userId: user.id, actor_type: 'user', jti: session.prev_jti },
+    JWT_SECRET,
+    { expiresIn: '31d' },
+  );
+  assert.notEqual(forged, t.refresh_token, 'the forged token really is a different token');
+
+  const attempt = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: forged } });
+  assert.equal(attempt.status, 401);
+  assert.equal(attempt.body.error.code, 'UNAUTHORIZED', 'rejected as a bad token, not treated as reuse');
+
+  // The victim is untouched.
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: rotated.body.data.access_token })).status, 200);
+  assert.equal(
+    (await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: rotated.body.data.refresh_token } })).status,
+    200, 'the real session still refreshes',
+  );
+});
+
+// Rotation makes logout robust in a way it was not before. `sid` names the same
+// session for the life of the login, so logging out with an access token from BEFORE
+// a refresh still ends the session. Previously that sid pointed at the row the
+// refresh had already revoked, the revoke matched nothing, and the refreshed pair
+// sailed on for another 30 days.
+test('logout with a pre-refresh access token still ends the live session', async () => {
+  const phone = newPhone();
+  const t     = await otpLogin(phone);
+  const user  = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
+  assert.equal(rotated.status, 200);
+
+  // Log out holding the OLD access token, from before the rotation.
+  assert.equal((await h.request('POST', `${P}/auth/logout`, { token: t.access_token })).status, 200);
+
+  // Both halves of the post-rotation pair are dead — the access token immediately,
+  // via the blacklist, not in 15 minutes when it would have expired anyway.
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: rotated.body.data.access_token })).status, 401);
+  assert.equal(
+    (await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: rotated.body.data.refresh_token } })).status,
+    401, 'the refreshed token cannot outlive the logout',
+  );
+});
+
+// A device that refreshed recently holds TWO live access tokens: the new one and the
+// one it replaced, still good for the rest of its 15 minutes. Revoking only the
+// newest meant "sign out my other devices" reported success while leaving that device
+// able to keep reading for another quarter of an hour.
+test('revoke-others kills the access token a device held before its last refresh', async () => {
+  const phone = newPhone();
+  const a     = await otpLogin(phone);
+  const user  = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+  const b = await otpLogin(phone);
+
+  const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: a.refresh_token } });
+  assert.equal(rotated.status, 200);
+  assert.equal(
+    (await h.request('GET', `${P}/users/me`, { token: a.access_token })).status,
+    200, 'the pre-refresh access token is still live — which is why it has to be revoked',
+  );
+
+  const revoked = await h.request('POST', `${P}/users/me/sessions/revoke-others`, { token: b.access_token });
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.body.data.sessions_ended, 1);
+
+  // Both of A's access tokens, not just the newest.
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: rotated.body.data.access_token })).status, 401);
+  assert.equal(
+    (await h.request('GET', `${P}/users/me`, { token: a.access_token })).status,
+    401, 'and the one it was holding from before the refresh',
+  );
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: b.access_token })).status, 200, 'the caller keeps working');
+});
+
+// Sessions that already existed when the SHA-256 switch shipped hold a bcrypt hash.
+// They have to keep working — otherwise the deploy logs every user out — and they
+// upgrade themselves on the next refresh.
+test('a session stored with the old bcrypt hash still refreshes, and is upgraded', async () => {
+  const phone = newPhone();
+  const t     = await otpLogin(phone);
+  const user  = await User.findOne({ where: { phone } });
+  track.users.push(user.id);
+
+  const session = await UserSession.findOne({ where: { uid: sidOf(t.access_token) } });
+  await session.update({ refresh_token_hash: await bcrypt.hash(t.refresh_token, 10) });
+
+  const refreshed = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
+  assert.equal(refreshed.status, 200, 'a pre-existing session is not invalidated by the change');
+
+  await session.reload();
+  assert.match(session.refresh_token_hash, /^[0-9a-f]{64}$/, 'rewritten as sha256 on rotation');
 });
 
 test('revoke-others signs out every other device immediately, keeping the current one', async () => {
@@ -2710,7 +2939,7 @@ test('deactivate ends everything and cannot be undone by logging in again', asyn
   // And OTP does not let them straight back in.
   const sent = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
   const back = await h.request('POST', `${P}/auth/verify-otp`, {
-    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'test_app' },
+    body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'android' },
   });
   assert.equal(back.status, 401, 'deactivation would be meaningless otherwise');
 });

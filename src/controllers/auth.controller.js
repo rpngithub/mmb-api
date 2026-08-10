@@ -16,7 +16,8 @@ const adminLogin = async (req, res) => {
 };
 
 const refresh = async (req, res) => {
-  const tokens = await authService.refreshTokens(req.body);
+  // The ip is only for the audit row written if a replayed refresh token is caught.
+  const tokens = await authService.refreshTokens(req.body, { ip: req.ip });
   res.json({ success: true, data: tokens });
 };
 
