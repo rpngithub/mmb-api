@@ -27,7 +27,7 @@ const { sendOtpSchema, verifyOtpSchema, refreshSchema, adminLoginSchema } = requ
  *             $ref: '#/components/schemas/SendOtpRequest'
  *     responses:
  *       200:
- *         description: OTP sent. In development/staging the `otp` field is included in the response.
+ *         description: OTP sent. In development only, the `otp` field is included in the response; staging and production text it.
  *         content:
  *           application/json:
  *             schema:

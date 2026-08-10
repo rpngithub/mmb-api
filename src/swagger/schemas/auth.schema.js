@@ -17,7 +17,7 @@
  *           type: object
  *           properties:
  *             message: { type: string, example: "OTP sent successfully" }
- *             otp:     { type: string, example: "482910", description: "Only present in development and staging" }
+ *             otp:     { type: string, example: "482910", description: "Only present in development" }
  *
  *     VerifyOtpRequest:
  *       type: object

@@ -51,6 +51,14 @@ module.exports = {
     message:      'Too many OTP requests. Try again in 10 minutes.',
     keyGenerator: (req) => `otp:send:${req.body?.phone || req.ip}`,
   }),
+  // Dev SMS diagnostics. Every call spends a real DLT credit and texts a real handset,
+  // so it is capped harder than otpSend even though the route is development-only.
+  smsTest: createLimiter({
+    windowMs:     10 * 60_000,
+    max:          5,
+    message:      'Too many SMS test sends. Try again in 10 minutes.',
+    keyGenerator: (req) => `sms:test:${req.ip}`,
+  }),
   admin: createLimiter({
     windowMs:     60_000,
     max:          300,

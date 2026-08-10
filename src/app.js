@@ -69,6 +69,16 @@ app.use(`${API_PREFIX}/fonts`,         fontRouter);
 app.use(`${API_PREFIX}/admin`,         adminRouter);
 app.use(`${API_PREFIX}`,               catalogRouter);
 
+// Dev-only SMS diagnostics (POST /dev/test-sms). Unauthenticated and it spends real
+// SMS credits, so it needs two things to be true: an explicit opt-in, and an env that
+// is not production. The opt-in alone would not be enough — an unset NODE_ENV falls
+// back to .env.development, so a copied env file could switch it on where it must
+// never exist. Keep ENABLE_SMS_TEST out of .env.staging and .env.production.
+if (process.env.ENABLE_SMS_TEST === 'true' && process.env.NODE_ENV !== 'production') {
+  app.use(`${API_PREFIX}/dev`, require('./routes/dev.router'));
+  console.log('[Dev] SMS test endpoint mounted at POST ' + `${API_PREFIX}/dev/test-sms`);
+}
+
 if (process.env.NODE_ENV !== 'production') {
   const swaggerUi  = require('swagger-ui-express');
   const swaggerSpec = require('./swagger');

@@ -634,7 +634,8 @@ router.post('/uploads/multipart/complete',      authenticate, authorizeAdmin(), 
 router.post('/uploads/multipart/abort',         authenticate, authorizeAdmin(), validate(abortSchema),           uploadController.multipartAbort);
 router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), validate(confirmSchema),         uploadController.confirm);
 
-// ---- CSV bulk import (admin catalog taxonomy: industries, template-categories, variants) ----
+// ---- CSV bulk import (admin catalog taxonomy: industries, template-categories, variants,
+//      asset-categories, assets) ----
 // Each entity exposes a template download (import + ?example=1 reference variant) and a
 // multipart CSV upload with a `dry_run` flag. Upload validates per row and skips bad rows,
 // returning a per-row report. Registered from the import.service entity registry so the
@@ -643,11 +644,11 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  * @swagger
  * /admin/imports/{entity}/template:
  *   get:
- *     summary: Download a CSV template for bulk import (entity = industries | template-categories | variants)
+ *     summary: Download a CSV template for bulk import (entity = industries | template-categories | variants | asset-categories | assets)
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: path,  name: entity,  required: true, schema: { type: string, enum: [industries, template-categories, variants, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants` and behaves identically" }
+ *       - { in: path,  name: entity,  required: true, schema: { type: string, enum: [industries, template-categories, variants, asset-categories, assets, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants` and behaves identically" }
  *       - { in: query, name: example, schema: { type: boolean }, description: "When true, returns the REFERENCE-ONLY example file (do not upload it)" }
  *     responses:
  *       200: { description: "CSV file (text/csv). Import template by default; reference/example file when example=1", content: { text/csv: { schema: { type: string } } } }
@@ -656,17 +657,21 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *   post:
  *     summary: Upload a CSV to bulk import/upsert records (skip-bad-rows; returns a per-row report)
  *     description: >-
- *       Rows are upserted by `name` (case-insensitive). Parent categories are resolved from a
- *       name/slug column across the file. Uploading the reference/example file is rejected.
- *       Set `dry_run` to validate without writing.
- *       Image columns (`icon_s3_key`, `thumbnail_s3_key`, `series_icon_s3_key`) take an S3 key
- *       for a file the editor has already uploaded — a full URL is accepted and trimmed to the
- *       key. Blank keeps the current image, `NONE` clears it. Key checks (prefix, extension,
- *       reuse, and an S3 existence probe) are ADVISORY: the row still imports and every problem
- *       is listed in `rows[].warnings`.
+ *       Rows are upserted by `name` (case-insensitive) — except `assets`, which are upserted by
+ *       `s3_key`, since asset names repeat across categories: re-importing a key updates that
+ *       asset instead of creating a second one. Parent categories are resolved from a
+ *       name/slug column across the file; an asset's `category` must already exist (name, slug
+ *       or uid) and an unknown one skips the row. Uploading the reference/example file is
+ *       rejected. Set `dry_run` to validate without writing.
+ *       File columns (`icon_s3_key`, `thumbnail_s3_key`, `series_icon_s3_key`, `s3_key`) take an
+ *       S3 key for a file the editor has already uploaded — a full URL is accepted and trimmed to
+ *       the key. Blank keeps the current file, `NONE` clears it (`assets.s3_key` is required, so a
+ *       blank one skips the row). All other key checks (prefix, extension, reuse, and an S3
+ *       existence probe) are ADVISORY: the row still imports and every problem is listed in
+ *       `rows[].warnings`.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
- *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants`" }]
+ *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants, asset-categories, assets, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants`" }]
  *     requestBody:
  *       required: true
  *       content:
