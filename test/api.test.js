@@ -1064,6 +1064,152 @@ test('import: the pre-rename `themes` entity key still resolves to variants', as
   track.brandSeries.push(series.id);
 });
 
+test('import asset-categories: creates a tree, then updates on re-import', async () => {
+  const token = h.adminToken(['assets.*']);
+  const stamp = Date.now();
+  const parentName = `IMP AssetCat ${stamp}`;
+  const childName  = `IMP AssetSubCat ${stamp}`;
+  const csv = [
+    'name,parent,slug,display_order,is_active',
+    `${childName},${parentName},imp-assetsub-${stamp},2,1`,   // child first
+    `${parentName},,imp-assetcat-${stamp},1,1`,
+  ].join('\n');
+
+  const res = await importCsv('asset-categories', csv, { token });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.summary.created, 2);
+
+  const parent = await models.AssetCategory.findOne({ where: { name: parentName } });
+  const child  = await models.AssetCategory.findOne({ where: { name: childName } });
+  assert.ok(parent && child, 'both categories created');
+  assert.equal(child.parent_id, parent.id, 'child linked to a parent defined later in the file');
+  track.assetCategories.push(child.id, parent.id);
+
+  const again = await importCsv('asset-categories', csv, { token });
+  assert.equal(again.body.data.summary.updated, 2, 're-import updates in place');
+  assert.equal(again.body.data.summary.created, 0);
+});
+
+test('import assets: resolves the category, upserts by s3_key, links tags, tags S3 active', async () => {
+  const token = h.adminToken(['assets.*']);
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `IMP Asset Cat ${stamp}`, slug: `imp-asset-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const iconKey  = `assets/icon/imp-${stamp}.svg`;
+  const audioKey = `assets/audio/imp-${stamp}.mp3`;
+  const tagName  = `impasset-${stamp}`;
+
+  const csv = (name) => [
+    'category,name,asset_type,s3_key,is_premium,status,tags',
+    // category by slug, and a full console URL that must be trimmed to the key
+    `${cat.slug},${name},icon,https://test-bucket.s3.ap-south-1.amazonaws.com/${iconKey},0,active,${tagName}`,
+    // category by name; audio key + audio content type -> no warnings
+    `${cat.name},IMP Chime ${stamp},audio,${audioKey},1,inactive,`,
+  ].join('\n');
+
+  const present = { [iconKey]: { content_type: 'image/svg+xml' }, [audioKey]: { content_type: 'audio/mpeg' } };
+  const { result: res, tagged } = await withS3Objects(present, () => importCsv('assets', csv(`IMP Diya ${stamp}`), { token }));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.summary.created, 2);
+  assert.equal(res.body.data.summary.skipped, 0);
+  assert.deepEqual(res.body.data.rows.flatMap((r) => r.warnings), [], 'clean rows carry no warnings');
+
+  const assets = await models.Asset.findAll({ where: { category_id: cat.id }, include: [models.Tag] });
+  assert.equal(assets.length, 2);
+  track.assets.push(...assets.map((a) => a.id));
+  const icon = assets.find((a) => a.asset_type === 'icon');
+  assert.equal(icon.s3_key, iconKey, 'pasted URL normalized to the bare key');
+  assert.equal(icon.status, 'active');
+  assert.equal(icon.is_premium, 0);
+  assert.deepEqual(icon.Tags.map((t) => t.name), [tagName]);
+  const audio = assets.find((a) => a.asset_type === 'audio');
+  assert.equal(audio.status, 'inactive');
+  assert.equal(audio.is_premium, 1);
+  track.tags.push(...(await models.Tag.findAll({ where: { name: tagName } })).map((t) => t.id));
+
+  assert.deepEqual(tagged.map(([k]) => k).sort(), [audioKey, iconKey].sort(), 'both files flipped to status=active');
+
+  // Same keys, renamed: the file is the identity, so this renames rather than duplicates.
+  const { result: res2 } = await withS3Objects(present, () => importCsv('assets', csv(`IMP Deepam ${stamp}`), { token }));
+  assert.equal(res2.body.data.summary.updated, 2);
+  assert.equal(res2.body.data.summary.created, 0);
+  await icon.reload();
+  assert.equal(icon.name, `IMP Deepam ${stamp}`, 'name corrected in place');
+  assert.equal(await models.Asset.count({ where: { category_id: cat.id } }), 2, 'no duplicates');
+});
+
+test('import assets: skips unknown category, blank s3_key and bad asset_type; warns on key problems', async () => {
+  const token = h.adminToken(['assets.*']);
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `IMP Warn Cat ${stamp}`, slug: `imp-warn-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const strayKey = `assets/emoji/stray-${stamp}.png`;   // wrong folder for an icon, absent from the bucket
+  const dupKey   = `assets/icon/dup-${stamp}.svg`;
+
+  const csv = [
+    'category,name,asset_type,s3_key,is_premium,status,tags',
+    `No Such Category ${stamp},IMP NoCat ${stamp},icon,assets/icon/x-${stamp}.svg,0,active,`, // unknown category -> skip
+    `${cat.slug},IMP NoFile ${stamp},icon,,0,active,`,                                        // no file -> skip
+    `${cat.slug},IMP BadType ${stamp},sticker,assets/icon/y-${stamp}.svg,0,active,`,          // bad asset_type -> skip
+    `${cat.slug},IMP Stray ${stamp},icon,${strayKey},0,active,`,                              // wrong prefix + missing -> warnings only
+    `${cat.slug},IMP Dup A ${stamp},icon,${dupKey},0,active,`,
+    `${cat.slug},IMP Dup B ${stamp},icon,${dupKey},0,active,`,                                // same file -> updates the row above
+  ].join('\n');
+
+  const { result: res, tagged } = await withS3Objects({ [dupKey]: { content_type: 'image/svg+xml' } }, () => importCsv('assets', csv, { token }));
+  assert.equal(res.status, 200);
+  const rows = res.body.data.rows;
+  const row = (n) => rows.find((r) => r.name === `IMP ${n} ${stamp}`);
+  assert.match(row('NoCat').message, /category 'No Such Category .*' not found/);
+  assert.match(row('NoCat').message, /import asset-categories/);
+  assert.match(row('NoFile').message, /s3_key is required/);
+  assert.match(row('BadType').message, /asset_type/);
+  assert.equal(res.body.data.summary.skipped, 3);
+
+  assert.equal(row('Stray').status, 'created', 'key problems never skip a row');
+  const strayWarnings = row('Stray').warnings.join(' | ');
+  assert.match(strayWarnings, /expected a key under 'assets\/icon\/'/);
+  assert.match(strayWarnings, /no such object in S3/);
+  assert.match(row('Dup B').warnings.join(' | '), /same file as line \d+ — that record is updated, not duplicated/);
+  assert.equal(row('Dup A').status, 'created');
+  assert.equal(row('Dup B').status, 'updated');
+  assert.deepEqual(tagged.map(([k]) => k), [dupKey], 'the absent stray key is not tagged');
+
+  const made = await models.Asset.findAll({ where: { category_id: cat.id } });
+  assert.equal(made.length, 2, 'stray + one deduplicated row');
+  assert.equal(made.find((a) => a.s3_key === dupKey).name, `IMP Dup B ${stamp}`, 'second row won the key');
+  track.assets.push(...made.map((a) => a.id));
+});
+
+test('import assets: an audio row pointing at an image warns about the file type', async () => {
+  const token = h.adminToken(['assets.*']);
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `IMP Kind Cat ${stamp}`, slug: `imp-kind-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const key = `assets/audio/wrong-${stamp}.png`;
+  const csv = [
+    'category,name,asset_type,s3_key,is_premium,status,tags',
+    `${cat.slug},IMP WrongKind ${stamp},audio,${key},0,active,`,
+  ].join('\n');
+
+  const { result: res } = await withS3Objects({ [key]: { content_type: 'image/png' } }, () => importCsv('assets', csv, { token }));
+  const warnings = res.body.data.rows[0].warnings.join(' | ');
+  assert.match(warnings, /'png' is not an audio type/, 'extension checked against the asset_type, not a fixed image list');
+  assert.match(warnings, /object is 'image\/png', not an audio/);
+  assert.equal(res.body.data.summary.created, 1);
+  const made = await models.Asset.findAll({ where: { category_id: cat.id } });
+  track.assets.push(...made.map((a) => a.id));
+});
+
+test('import assets: enforces the assets permission and validates the header', async () => {
+  const forbidden = await importCsv('assets', 'category,name,asset_type,s3_key\nX,Y,icon,assets/icon/z.svg', { token: h.adminToken(['categories.*']) });
+  assert.equal(forbidden.status, 403);
+
+  const noCategory = await importCsv('assets', 'name,asset_type,s3_key\nY,icon,assets/icon/z.svg', { token: h.adminToken(['assets.*']) });
+  assert.equal(noCategory.status, 400);
+  assert.match(noCategory.body.error.message, /category/);
+});
+
 test('admin create auto-generates slug from name', async () => {
   const slugify = require('../src/utils/slugify');
   const name = `TST AutoSlug ${Date.now()}`;

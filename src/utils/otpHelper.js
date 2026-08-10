@@ -18,7 +18,9 @@ const DLT_TEMPLATE = 'Dear Customer,{#var#} is your verification code -PNGOTP';
 
 const buildMessage = (otp) => DLT_TEMPLATE.replace('{#var#}', otp);
 
-const DEV_ENVS = ['development', 'staging', 'test'];
+// Local-only envs. `staging` is deliberately absent: staging exercises the real
+// vendor path, same as production.
+const DEV_ENVS = ['development', 'test'];
 
 /**
  * Route 2 is domestic-India and the vendor wants a bare 10-digit number, so strip
@@ -38,10 +40,12 @@ function toLocalNumber(phone) {
 }
 
 /**
- * Real sends stay off outside production so dev/staging keep relying on the OTP that
- * sendOtpService echoes in the response — no DLT credits burnt and no texts to the
- * real phone numbers sitting in the staging database. SMS_ENABLED=true forces a real
- * send (to verify vendor wiring from staging); SMS_ENABLED=false silences it anywhere.
+ * Real sends stay off in development and test only, where sendOtpService echoes the
+ * OTP in the response instead — no DLT credits burnt and no texts to whatever numbers
+ * a local database happens to hold. Staging and production both send for real, so a
+ * staging login costs credits and reaches the actual handset. SMS_ENABLED=false
+ * silences sends anywhere (useful to park staging without redeploying a code change);
+ * SMS_ENABLED=true forces a real send from dev.
  *
  * An unrecognised NODE_ENV sends for real, which is deliberate: that env also fails
  * the DEV_ENVS check in sendOtpService, so the OTP is not echoed either, and a real
@@ -55,12 +59,12 @@ function realSendEnabled() {
 
 const maskPhone = (phone) => String(phone).replace(/\d(?=\d{4})/g, 'x');
 
-const sendOtp = async (phone, otp) => {
-  if (!realSendEnabled()) {
-    console.log(`[OTP DEV] ${phone} → ${otp}`);
-    return;
-  }
-
+/**
+ * Vendor credentials plus the names of any that are missing, so a caller can report
+ * what is unset without reading process.env itself. The key is never returned — only
+ * whether one is present.
+ */
+function smsConfig() {
   const {
     PING4SMS_API_URL:     url,
     PING4SMS_API_KEY:     key,
@@ -76,6 +80,20 @@ const sendOtp = async (phone, otp) => {
     PING4SMS_TEMPLATE_ID: templateid,
   }).filter(([, value]) => !value).map(([name]) => name);
 
+  return { url, key, sender, templateid, route: route || '2', missing };
+}
+
+/**
+ * One call to the vendor. Returns what happened rather than throwing on a rejection,
+ * because the two callers want different things from a failure: sendOtp turns it into
+ * a 502 the user never sees the detail of, while the dev test endpoint reports the raw
+ * body — which is the only place the vendor explains itself (wrong key, unapproved
+ * template, no credits). Still throws for a missing config or an unusable number,
+ * which are caller errors, not vendor answers.
+ */
+async function deliverSms(phone, message) {
+  const { url, key, sender, templateid, route, missing } = smsConfig();
+
   if (missing.length) {
     throw new AppError(`SMS is not configured: missing ${missing.join(', ')}`, 500, 'SMS_NOT_CONFIGURED');
   }
@@ -86,7 +104,7 @@ const sendOtp = async (phone, otp) => {
   let response;
   try {
     response = await axios.get(url, {
-      params: { key, route: route || '2', sender, number, sms: buildMessage(otp), templateid },
+      params: { key, route, sender, number, sms: message, templateid },
       timeout: 10000,
       // The body is plain text. Left to itself axios runs JSON.parse over it, which
       // succeeds on an all-digit message id and hands back a Number instead of a
@@ -99,20 +117,44 @@ const sendOtp = async (phone, otp) => {
     });
   } catch (err) {
     // Network-level failure (DNS, timeout, TLS) — there is no response to inspect.
-    throw new AppError(`Could not reach the SMS provider: ${err.message}`, 502, 'SMS_SEND_FAILED');
+    return { delivered: false, number, status: null, body: '', transportError: err.message };
   }
 
   const body = String(response.data ?? '').trim();
 
-  // Success is a numeric message id; an error is a code or a plain-text message.
-  const delivered = response.status === 200 && /^\d{5,}$/.test(body);
+  return {
+    // Success is a numeric message id; an error is a code or a plain-text message.
+    delivered: response.status === 200 && /^\d{5,}$/.test(body),
+    number,
+    status:   response.status,
+    body,
+    transportError: null,
+  };
+}
 
-  if (!delivered) {
-    console.error(`[OTP SMS] failed for ${maskPhone(phone)} — HTTP ${response.status}, body: ${body.slice(0, 200)}`);
+const sendOtp = async (phone, otp) => {
+  if (!realSendEnabled()) {
+    console.log(`[OTP DEV] ${phone} → ${otp}`);
+    return;
+  }
+
+  const result = await deliverSms(phone, buildMessage(otp));
+
+  if (result.transportError) {
+    throw new AppError(`Could not reach the SMS provider: ${result.transportError}`, 502, 'SMS_SEND_FAILED');
+  }
+
+  if (!result.delivered) {
+    console.error(`[OTP SMS] failed for ${maskPhone(phone)} — HTTP ${result.status}, body: ${result.body.slice(0, 200)}`);
     throw new AppError('Could not send the OTP. Please try again.', 502, 'SMS_SEND_FAILED');
   }
 
-  console.log(`[OTP SMS] sent to ${maskPhone(phone)} (message id ${body})`);
+  console.log(`[OTP SMS] sent to ${maskPhone(phone)} (message id ${result.body})`);
 };
 
-module.exports = { generateOtp, hashOtp, verifyOtp, sendOtp };
+module.exports = {
+  generateOtp, hashOtp, verifyOtp, sendOtp,
+  // For the dev SMS test endpoint (services/devSms.service.js) — not part of the
+  // normal auth path.
+  deliverSms, smsConfig, buildMessage, realSendEnabled, DLT_TEMPLATE, toLocalNumber,
+};

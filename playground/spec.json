@@ -68,7 +68,7 @@
                   "send-otp"
                 ]
               },
-              "description": "purpose: `login` | `reset`. In development/staging the response `data.otp` is returned and auto-saved to the `otp` env var.",
+              "description": "purpose: `login` | `reset`. In development the response `data.otp` is returned and auto-saved to the `otp` env var; on staging the OTP is texted instead, so enter it manually.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"purpose\": \"{{purpose}}\"\n}",

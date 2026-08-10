@@ -10,6 +10,11 @@ const {
   createTemplateCategorySchema, updateTemplateCategorySchema,
 } = require('../validators/category.validator');
 const { createVariantSchema, updateVariantSchema } = require('../validators/brandSeries.validator');
+const {
+  createAssetSchema, updateAssetSchema,
+  createAssetCategorySchema, updateAssetCategorySchema,
+} = require('../validators/asset.validator');
+const { ASSET_TYPES } = require('../utils/assetTypes');
 
 const { sequelize } = models;
 
@@ -23,15 +28,42 @@ const coerceBool = (v) => {
   return v; // unrecognized -> let Joi reject with a clear message
 };
 
-// ---- Image (S3 key) columns. Editors upload the file to S3 themselves and paste
-//      the key here; the importer never moves bytes. Every image check is
+// `status` is an enum, not a flag, but an admin filling a sheet reaches for the
+// 1/0 they type in every other template — accept both spellings.
+const coerceStatus = (v) => {
+  const s = String(v).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'active'].includes(s)) return 'active';
+  if (['0', 'false', 'no', 'n', 'inactive'].includes(s)) return 'inactive';
+  return v;
+};
+
+// ---- File (S3 key) columns. Editors upload the file to S3 themselves and paste
+//      the key here; the importer never moves bytes. Every file check is
 //      ADVISORY — a bad key is reported as a row warning and still imported, so a
-//      typo never costs an editor the rest of the row. `NONE` clears the image,
-//      blank leaves whatever is already stored. ----
+//      typo never costs an editor the rest of the row. `NONE` clears the file,
+//      blank leaves whatever is already stored.
+//
+//      One exception: a column marked `required` (an asset IS its file — there is
+//      no record to import without one) skips the row when the cell is blank. ----
 const CLEAR_IMAGE = 'NONE';
-const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'svg'];
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const S3_CONCURRENCY = 15;
+
+// What a key is expected to point at. Drives the extension, content-type and size
+// warnings only; nothing here can stop a row importing.
+const FILE_KINDS = {
+  image:    { label: 'an image',     exts: ['png', 'jpg', 'jpeg', 'webp', 'svg'], ct: /^image\//i, max: 5 * 1024 * 1024 },
+  audio:    { label: 'an audio',     exts: ['mp3', 'wav', 'm4a', 'aac', 'ogg'],   ct: /^audio\//i, max: 20 * 1024 * 1024 },
+  video:    { label: 'a video',      exts: ['mp4', 'webm', 'mov'],                ct: /^video\//i, max: 50 * 1024 * 1024 },
+  // A Lottie animation is a .json, so this kind has to accept application/* next
+  // to the image/* and video/* of gif, webp and mp4.
+  animated: { label: 'an animation', exts: ['json', 'gif', 'webp', 'mp4'],        ct: /^(image|video|application)\//i, max: 10 * 1024 * 1024 },
+};
+
+// assets.asset_type -> the kind of file that row's key should point at.
+const ASSET_FILE_KIND = {
+  icon: 'image', emoji: 'image', shape: 'image', bg: 'image',
+  audio: 'audio', video: 'video', animated: 'animated',
+};
 
 // ---- Per-entity import definitions. The `columns` list is the single source of
 //      truth for both the CSV parser and the downloadable templates (no drift). ----
@@ -131,6 +163,93 @@ const ENTITIES = {
       ['Lemon Buzz', '', 'Lemon Buzz-02', 'Bright citrus palette', 'variants/thumbnail/lemon-buzz-02.png', '2', '1'],
     ],
   },
+
+  'asset-categories': {
+    label: 'Asset categories',
+    entityType: 'asset_category',
+    permission: 'assets',
+    model: () => models.AssetCategory,
+    createSchema: createAssetCategorySchema,
+    updateSchema: updateAssetCategorySchema,
+    hasUid: true,
+    autoSlug: true,
+    parentColumn: 'parent',
+    tags: false,
+    columns: ['name', 'parent', 'slug', 'display_order', 'is_active'],
+    intColumns: ['display_order'],
+    boolColumns: ['is_active'],
+    textColumns: [],
+    help: [
+      '# Asset categories import. Lines starting with # are ignored.',
+      '# Import this file BEFORE the assets that live in these categories.',
+      '# name (required): an existing category with the same name is updated. parent: name or slug of another asset category (blank = top level).',
+      '# slug: optional (auto from name) but must be unique across all asset categories. is_active: 1 or 0.',
+    ],
+    example: [
+      ['Festive Icons', '', 'festive-icons', '1', '1'],
+      ['Diwali', 'Festive Icons', 'diwali-icons', '2', '1'],
+      ['Backgrounds', '', '', '3', '1'],
+    ],
+  },
+
+  assets: {
+    label: 'Assets',
+    entityType: 'asset',
+    permission: 'assets',
+    model: () => models.Asset,
+    createSchema: createAssetSchema,
+    updateSchema: updateAssetSchema,
+    hasUid: true,
+    autoSlug: false,
+    // Asset NAMES repeat legitimately (a 'Star' icon per category), so the file is
+    // the identity: one S3 object = one asset. Re-importing a key updates that
+    // asset in place, which is what makes a corrected sheet safe to re-upload.
+    keyColumn: 's3_key',
+    requiredColumns: ['asset_type'],
+    tags: true,
+    // Lookup-only, unlike a variant's brand series: a mistyped category must not
+    // quietly invent a browse category, and an asset with no category is invisible
+    // in the app (the public asset list is category-anchored).
+    refColumns: [
+      {
+        column: 'category', field: 'category_id', model: () => models.AssetCategory,
+        required: true, label: 'asset category',
+        hint: 'create it in Asset Categories, or import asset-categories before this file',
+      },
+    ],
+    columns: ['category', 'name', 'asset_type', 's3_key', 'is_premium', 'status', 'tags'],
+    intColumns: [],
+    boolColumns: ['is_premium'],
+    textColumns: ['asset_type'],
+    statusColumns: ['status'],
+    fileNoun: 'Files',
+    s3KeyColumns: {
+      s3_key: {
+        required: true,
+        key: true,
+        // Mirrors the `asset` target of upload.service.buildKey.
+        prefix: (v) => `assets/${String(v.asset_type || '').trim().toLowerCase()}/`,
+        kind:   (v) => ASSET_FILE_KIND[String(v.asset_type || '').trim().toLowerCase()],
+        help: 'assets/<asset_type>/',
+        helpExts: '<ext>',
+      },
+    },
+    help: [
+      '# Assets import. Lines starting with # are ignored.',
+      '# category (required): name, slug or uid of an EXISTING asset category — import asset-categories first if it is new.',
+      '# name (required): the label shown in the editor. Names need not be unique.',
+      `# asset_type (required): one of ${ASSET_TYPES.join(', ')}.`,
+      '# s3_key (required): rows are matched on it — re-importing the same key UPDATES that asset instead of adding a second one.',
+      '#   File by asset_type: icon/emoji/shape/bg -> png, jpg, webp, svg · audio -> mp3, wav, m4a · video -> mp4, webm · animated -> json (Lottie), gif, webp, mp4',
+      '# is_premium: 1 or 0 (1 = paid plans only). status: active or inactive (1/0 accepted). tags: pipe-separated, e.g. diwali|festival|lamp',
+    ],
+    example: [
+      ['Festive Icons', 'Diya', 'icon', 'assets/icon/diya.svg', '0', 'active', 'diwali|festival'],
+      ['Festive Icons', 'Firecracker', 'icon', 'assets/icon/firecracker.svg', '1', 'active', 'diwali'],
+      ['Backgrounds', 'Gold Bokeh', 'bg', 'assets/bg/gold-bokeh.jpg', '1', 'active', 'festive|gold'],
+      ['Sound Effects', 'Chime', 'audio', 'assets/audio/chime.mp3', '0', 'inactive', ''],
+    ],
+  },
 };
 
 // Deprecated entity key -> current key. Keeps /admin/imports/themes working for
@@ -145,18 +264,34 @@ function getEntity(key) {
   return cfg;
 }
 
-// ---- Image columns ----------------------------------------------------------
+// ---- File columns -----------------------------------------------------------
 
-// Flatten an entity's image columns into one spec list. `scope` separates the
-// row's own images from an image that belongs to the upserted group (a variant
+// Normalize one `s3KeyColumns` entry. A column is declared either as a plain
+// prefix (string or list) or as an object; `prefix` and `kind` may be functions of
+// the row's cells, because an asset's expected location and file type both follow
+// its asset_type column. `helpPrefix`/`helpExts` are the static text used by the
+// downloadable template, where there is no row to read.
+function fileSpec(column, def, scope) {
+  const o = (def && typeof def === 'object' && !Array.isArray(def)) ? def : { prefix: def };
+  const at = (v, values) => (typeof v === 'function' ? v(values) : v);
+  return {
+    column,
+    scope,
+    required: Boolean(o.required),
+    isKey:    Boolean(o.key),
+    prefixes: (values) => [].concat(at(o.prefix, values)).filter(Boolean),
+    kind:     (values) => FILE_KINDS[at(o.kind, values)] || FILE_KINDS.image,
+    helpPrefix: o.help || [].concat(at(o.prefix, {})).filter(Boolean)[0] || '',
+    helpExts:   o.helpExts || null,
+  };
+}
+
+// Flatten an entity's file columns into one spec list. `scope` separates the
+// row's own files from a file that belongs to the upserted group (a variant
 // row carrying its brand series' icon).
-const imageSpecs = (cfg) => [
-  ...Object.entries(cfg.s3KeyColumns || {}).map(([column, prefixes]) => ({
-    column, scope: 'row', prefixes: [].concat(prefixes),
-  })),
-  ...(cfg.groupS3Key
-    ? [{ column: cfg.groupS3Key.column, scope: 'group', prefixes: [].concat(cfg.groupS3Key.prefix) }]
-    : []),
+const fileSpecs = (cfg) => [
+  ...Object.entries(cfg.s3KeyColumns || {}).map(([column, def]) => fileSpec(column, def, 'row')),
+  ...(cfg.groupS3Key ? [fileSpec(cfg.groupS3Key.column, cfg.groupS3Key.prefix, 'group')] : []),
 ];
 
 // Editors paste whatever the S3 console or the CDN shows them. Reduce it to a
@@ -177,17 +312,19 @@ function normalizeS3Key(raw) {
 }
 
 // Offline checks: no S3 call, so these run even when the bucket is unreachable.
-function shapeWarnings(spec, key) {
+function shapeWarnings(spec, key, values) {
   const w = [];
-  if (!spec.prefixes.some((p) => key.startsWith(p))) {
-    w.push(`${spec.column}: expected a key under '${spec.prefixes[0]}' — imported as given, check the upload location`);
+  const prefixes = spec.prefixes(values);
+  const kind = spec.kind(values);
+  if (prefixes.length && !prefixes.some((p) => key.startsWith(p))) {
+    w.push(`${spec.column}: expected a key under '${prefixes[0]}' — imported as given, check the upload location`);
   }
   if (/\s/.test(key)) w.push(`${spec.column}: key contains a space`);
   if (key.includes('..')) w.push(`${spec.column}: key contains '..'`);
   const m = /\.([A-Za-z0-9]+)$/.exec(key);
   const e = m ? m[1].toLowerCase() : '';
-  if (!IMAGE_EXTS.includes(e)) {
-    w.push(`${spec.column}: '${e || 'no file extension'}' is not an image type (${IMAGE_EXTS.join(', ')})`);
+  if (!kind.exts.includes(e)) {
+    w.push(`${spec.column}: '${e || 'no file extension'}' is not ${kind.label} type (${kind.exts.join(', ')})`);
   }
   return w;
 }
@@ -230,14 +367,15 @@ async function tagActive(keys) {
 }
 
 /**
- * Pass 0 over the parsed rows: normalize every image cell, collect advisory
+ * Pass 0 over the parsed rows: normalize every file cell, collect advisory
  * warnings (shape, prefix, duplicate reuse, missing/oversized object) and hand
- * back the cleaned values keyed by source line.
+ * back the cleaned values keyed by source line. `errors` holds the one
+ * non-advisory case — a required file column left blank — which skips the row.
  *
- * @returns {{ byLine: Map<number, { values, groupKey, warnings }>, notes: string[], missing: Set<string> }}
+ * @returns {{ byLine: Map<number, { values, kinds, groupKey, warnings, errors }>, notes: string[], missing: Set<string> }}
  */
-async function prepareImages(cfg, rows) {
-  const specs = imageSpecs(cfg);
+async function prepareFiles(cfg, rows) {
+  const specs = fileSpecs(cfg);
   const byLine = new Map();
   const notes = [];
   const missing = new Set();   // probed and confirmed absent — never worth tagging later
@@ -247,30 +385,34 @@ async function prepareImages(cfg, rows) {
   const distinct = new Set();
 
   for (const row of rows) {
-    const entry = { values: {}, groupKey: undefined, warnings: [] };
+    const entry = { values: {}, kinds: {}, groupKey: undefined, warnings: [], errors: [] };
     byLine.set(row.line, entry);
 
     for (const spec of specs) {
       const cell = String(row.values[spec.column] == null ? '' : row.values[spec.column]).trim();
-      if (!cell) continue;                                  // blank -> leave as-is
-      if (cell.toUpperCase() === CLEAR_IMAGE) {
-        if (spec.scope === 'row') entry.values[spec.column] = null;
+      const key = cell && cell.toUpperCase() !== CLEAR_IMAGE ? normalizeS3Key(cell) : '';
+      if (!key) {
+        if (spec.required) { entry.errors.push(`${spec.column} is required`); continue; }
+        if (!cell) continue;                                // blank -> leave as-is
+        if (cell.toUpperCase() === CLEAR_IMAGE && spec.scope === 'row') entry.values[spec.column] = null;
         continue;
       }
 
-      const key = normalizeS3Key(cell);
-      if (!key) continue;
       if (spec.scope === 'row') entry.values[spec.column] = key;
       else entry.groupKey = key;
+      entry.kinds[spec.column] = spec.kind(row.values);
 
-      entry.warnings.push(...shapeWarnings(spec, key));
+      entry.warnings.push(...shapeWarnings(spec, key, row.values));
 
-      // Group images legitimately repeat across a series' rows; only flag reuse
-      // of a row-scoped image, which is nearly always a copy-paste slip.
+      // Group files legitimately repeat across a series' rows; only flag reuse
+      // of a row-scoped file, which is nearly always a copy-paste slip. When the
+      // file IS the row's identity, reuse is not a slip but a second edit of the
+      // same record, so say that instead.
       if (spec.scope === 'row') {
         if (firstSeen.has(key)) {
           const at = firstSeen.get(key);
-          entry.warnings.push(at === row.line
+          if (spec.isKey) entry.warnings.push(`${spec.column}: same file as line ${at} — that record is updated, not duplicated`);
+          else entry.warnings.push(at === row.line
             ? `${spec.column}: same image already used in another column on this row`
             : `${spec.column}: same image also used on line ${at}`);
         } else firstSeen.set(key, row.line);
@@ -294,11 +436,12 @@ async function prepareImages(cfg, rows) {
         entry.warnings.push(`${column}: no such object in S3 ('${key}') — imported anyway`);
         continue;
       }
-      if (probe.content_type && !/^image\//i.test(probe.content_type)) {
-        entry.warnings.push(`${column}: object is '${probe.content_type}', not an image`);
+      const kind = entry.kinds[column] || FILE_KINDS.image;
+      if (probe.content_type && !kind.ct.test(probe.content_type)) {
+        entry.warnings.push(`${column}: object is '${probe.content_type}', not ${kind.label}`);
       }
-      if (probe.size != null && probe.size > MAX_IMAGE_BYTES) {
-        entry.warnings.push(`${column}: object is ${Math.round(probe.size / 1024)} KB (over ${MAX_IMAGE_BYTES / 1024 / 1024} MB)`);
+      if (probe.size != null && probe.size > kind.max) {
+        entry.warnings.push(`${column}: object is ${Math.round(probe.size / 1024)} KB (over ${kind.max / 1024 / 1024} MB)`);
       }
     }
   }
@@ -308,18 +451,24 @@ async function prepareImages(cfg, rows) {
 
 // ---- Template download (import + reference variants), built from `columns`. ----
 
-// Image rules are generated from the entity's own spec so the help can never
+// File rules are generated from the entity's own spec so the help can never
 // drift from what the importer actually accepts.
-function imageHelp(cfg) {
-  const specs = imageSpecs(cfg);
+function fileHelp(cfg) {
+  const specs = fileSpecs(cfg);
   if (!specs.length) return [];
-  const lines = ['# Images: upload the file to S3 first, then paste its KEY here (a full https:// URL is accepted and trimmed to the key).'];
+  const noun = cfg.fileNoun || 'Images';
+  const lines = [`# ${noun}: upload the file to S3 first, then paste its KEY here (a full https:// URL is accepted and trimmed to the key).`];
   for (const spec of specs) {
     const note = spec.scope === 'group' ? '   (only applied when the series has no icon yet)' : '';
-    lines.push(`#   ${spec.column} -> ${spec.prefixes[0]}<filename>.${IMAGE_EXTS.join('|')}${note}`);
+    const exts = spec.helpExts || spec.kind({}).exts.join('|');
+    lines.push(`#   ${spec.column} -> ${spec.helpPrefix}<filename>.${exts}${note}`);
   }
-  lines.push(`#   Blank = keep the current image. ${CLEAR_IMAGE} = remove the current image.`);
-  lines.push('#   Image problems never skip a row: the row imports and the issue is listed under rows[].warnings in the response.');
+  const one = cfg.fileNoun ? 'file' : 'image';
+  const optional = specs.filter((s) => !s.required);
+  if (optional.length) lines.push(`#   Blank = keep the current ${one}. ${CLEAR_IMAGE} = remove the current ${one}.`);
+  const required = specs.filter((s) => s.required).map((s) => s.column);
+  if (required.length) lines.push(`#   ${required.join(', ')} cannot be blank — a row without it is skipped.`);
+  lines.push('#   Other key problems never skip a row: the row imports and the issue is listed under rows[].warnings in the response.');
   lines.push('#   Upload with dry_run=1 first to check every key before anything is written.');
   return lines;
 }
@@ -332,12 +481,12 @@ function buildTemplate(key, { example = false } = {}) {
   if (example) {
     lines.push(`# ${cfg.label} — ${REFERENCE_SENTINEL} — DO NOT IMPORT.`);
     lines.push('# For understanding the format only. Download the import template to add your data.');
-    lines.push(...cfg.help.slice(1), ...imageHelp(cfg));
+    lines.push(...cfg.help.slice(1), ...fileHelp(cfg));
     lines.push(header);
     // Example data rows are #-commented so this file imports nothing even if uploaded.
     for (const row of cfg.example) lines.push(`# ${csvLine(row)}`);
   } else {
-    lines.push(...cfg.help, ...imageHelp(cfg));
+    lines.push(...cfg.help, ...fileHelp(cfg));
     lines.push(header);
   }
 
@@ -346,9 +495,10 @@ function buildTemplate(key, { example = false } = {}) {
 }
 
 // Build the Joi-validatable payload from a row's cells (schema fields only; slug,
-// tags and the parent/group meta columns are handled separately). `images` holds
-// the already-normalized S3 keys for this row (null = clear, absent = unchanged).
-function buildPayload(cfg, values, { parentId, groupId, images }) {
+// tags and the parent/group/ref meta columns are handled separately). `files`
+// holds the already-normalized S3 keys for this row (null = clear, absent =
+// unchanged) and `refs` the ids resolved from lookup columns.
+function buildPayload(cfg, values, { parentId, groupId, files, refs }) {
   const payload = { name: (values.name || '').trim() };
   if (cfg.parentColumn && parentId != null) payload.parent_id = parentId;
   if (cfg.groupModel) payload[cfg.groupIdField || 'group_id'] = groupId;
@@ -365,7 +515,11 @@ function buildPayload(cfg, values, { parentId, groupId, images }) {
     const raw = (values[col] || '').trim();
     if (raw !== '') payload[col] = coerceBool(raw);
   }
-  Object.assign(payload, images || {});
+  for (const col of cfg.statusColumns || []) {
+    const raw = (values[col] || '').trim();
+    if (raw !== '') payload[col] = coerceStatus(raw);
+  }
+  Object.assign(payload, refs || {}, files || {});
   return payload;
 }
 
@@ -390,13 +544,14 @@ async function syncTags(row, tagNames, t) {
  * Import one CSV file for an entity. Skip-bad-rows semantics: valid rows are
  * committed (each in its own transaction) and invalid rows are collected into a
  * per-row report. Parent/child categories are resolved across multiple passes so
- * an in-file parent can precede or follow its child. Image-key problems are
- * advisory only and surface as rows[].warnings.
+ * an in-file parent can precede or follow its child. File-key problems are
+ * advisory only and surface as rows[].warnings, except for a required key column.
  *
  * @returns {{ entity, dry_run, summary, notes, rows }}
  */
 async function runImport(key, rawText, { dryRun = false, req } = {}) {
   const cfg = getEntity(key);
+  const keyColumn = cfg.keyColumn || 'name';
   const text = stripBom(String(rawText || ''));
 
   if (new RegExp(REFERENCE_SENTINEL, 'i').test(text)) {
@@ -406,32 +561,41 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
   const { header, rows } = parse(text);
   if (!header.length) throw new ValidationError('The uploaded file is empty or has no header row.');
 
-  const requiredCols = ['name', ...(cfg.groupColumn ? [cfg.groupColumn] : [])];
+  const refColumns = cfg.refColumns || [];
+  const requiredCols = [...new Set([
+    'name', keyColumn,
+    ...(cfg.groupColumn ? [cfg.groupColumn] : []),
+    ...(cfg.requiredColumns || []),
+    ...refColumns.filter((r) => r.required).map((r) => r.column),
+  ])];
   const missing = requiredCols.filter((c) => !header.includes(c));
   if (missing.length) throw new ValidationError(`Missing required column(s): ${missing.join(', ')}`);
 
-  // Pass 0: normalize + check every image cell up front, so the S3 HEADs run
+  // Pass 0: normalize + check every file cell up front, so the S3 HEADs run
   // once per distinct key with capped concurrency instead of row by row.
-  const { byLine: imagesByLine, notes, missing: missingKeys } = await prepareImages(cfg, rows);
+  const { byLine: filesByLine, notes, missing: missingKeys } = await prepareFiles(cfg, rows);
   const usedKeys = new Set();       // keys this run actually wrote to a record
 
   const model = cfg.model();
   const report = [];
   const summary = { total: rows.length, created: 0, updated: 0, skipped: 0, warnings: 0 };
-  const resolvedByName = new Map(); // lowercased name OR slug -> id
+  // Identity of a record already handled this run: lowercased name (or slug) for
+  // name-keyed entities, the normalized S3 key for assets.
+  const resolvedByName = new Map();
   const skippedNames = new Set();   // lowercased names that failed (for cascade messaging)
   const groupCache = new Map();     // lowercased group name/slug -> id
+  const refCache = new Map();       // 'column:ref' -> id | null (not found)
   let dryCounter = 0;               // negative placeholder ids for dry-run creates
 
   const warn = (line, message) => {
-    const entry = imagesByLine.get(line);
+    const entry = filesByLine.get(line);
     if (entry) entry.warnings.push(message);
   };
 
   const record = (line, name, status, message) => {
-    // Image warnings are attached whatever the row's outcome — an editor fixing a
+    // File warnings are attached whatever the row's outcome — an editor fixing a
     // skipped row wants to see its bad thumbnail in the same pass.
-    const warnings = (imagesByLine.get(line) || {}).warnings || [];
+    const warnings = (filesByLine.get(line) || {}).warnings || [];
     report.push({ line, name: name || null, status, message: message || null, warnings });
     summary[status] += 1;
     if (warnings.length) summary.warnings += 1;
@@ -486,30 +650,84 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
     return id;
   };
 
+  // Resolve a lookup-only reference (an asset's category) by slug, uid or name.
+  // Nothing is created: an unknown value skips the row, so a typo cannot invent a
+  // browse category. Ambiguity is reported rather than silently resolved.
+  const resolveRefColumn = async (spec, ref) => {
+    const cacheKey = `${spec.column}:${ref.toLowerCase()}`;
+    if (refCache.has(cacheKey)) return refCache.get(cacheKey);
+
+    const RefModel = spec.model();
+    const attrs = RefModel.rawAttributes;
+    let id = null;
+    const bySlug = attrs.slug ? await RefModel.findOne({ where: { slug: ref } }) : null;
+    const byUid = !bySlug && attrs.uid && /^[0-9a-f-]{36}$/i.test(ref)
+      ? await RefModel.findOne({ where: { uid: ref } })
+      : null;
+    if (bySlug || byUid) id = (bySlug || byUid).id;
+    else {
+      const byName = await RefModel.findAll({ where: { name: ref }, limit: 2 });
+      if (byName.length > 1) {
+        throw new Error(`${spec.column} '${ref}' matches more than one ${spec.label || spec.column} — use its slug instead`);
+      }
+      if (byName.length) id = byName[0].id;
+    }
+    refCache.set(cacheKey, id);
+    return id;
+  };
+
+  const resolveRefs = async (values) => {
+    const out = {};
+    for (const spec of refColumns) {
+      const ref = (values[spec.column] || '').trim();
+      if (!ref) {
+        if (spec.required) throw new Error(`${spec.column} is required`);
+        continue;
+      }
+      const id = await resolveRefColumn(spec, ref);
+      if (id === null) throw new Error(`${spec.column} '${ref}' not found${spec.hint ? ` — ${spec.hint}` : ''}`);
+      out[spec.field] = id;
+    }
+    return out;
+  };
+
   const processRow = async (row, { parentId }) => {
     const values = row.values;
     const name = (values.name || '').trim();
     if (!name) { record(row.line, '', 'skipped', 'name is required'); return; }
     const lc = name.toLowerCase();
 
-    const images = imagesByLine.get(row.line) || { values: {} };
+    const files = filesByLine.get(row.line) || { values: {}, errors: [] };
 
     try {
-      const groupId = cfg.groupModel ? await resolveGroup(row, images.groupKey) : undefined;
+      // A required file column with nothing usable in it (blank, or NONE) — the
+      // only file problem that stops a row.
+      if (files.errors && files.errors.length) throw new Error(files.errors.join('; '));
+
+      const groupId = cfg.groupModel ? await resolveGroup(row, files.groupKey) : undefined;
+      const refs = await resolveRefs(values);
+
+      // The value this row is matched on: the record's name, or for assets the
+      // normalized S3 key (which prepareFiles has already trimmed out of any URL).
+      const keyValue = keyColumn === 'name' ? name
+        : (files.values[keyColumn] || (values[keyColumn] || '').trim());
+      if (!keyValue) throw new Error(`${keyColumn} is required`);
+      // S3 keys are case-sensitive; names are matched case-insensitively.
+      const identity = keyColumn === 'name' ? lc : keyValue;
 
       // Does this record already exist (either processed earlier this run, or in the DB)?
       let existingRow = null;
       let existingId;
-      if (resolvedByName.has(lc)) {
-        existingId = resolvedByName.get(lc);
+      if (resolvedByName.has(identity)) {
+        existingId = resolvedByName.get(identity);
         if (!dryRun) existingRow = await model.findByPk(existingId);
       } else {
-        existingRow = await model.findOne({ where: { name } });
+        existingRow = await model.findOne({ where: { [keyColumn]: keyValue } });
         existingId = existingRow ? existingRow.id : undefined;
       }
       const isUpdate = existingId !== undefined;
 
-      const payload = buildPayload(cfg, values, { parentId, groupId, images: images.values });
+      const payload = buildPayload(cfg, values, { parentId, groupId, files: files.values, refs });
       const schema = isUpdate ? cfg.updateSchema : cfg.createSchema;
       const { error, value } = schema.validate(payload, { abortEarly: false });
       if (error) throw new Error(error.details.map((d) => d.message.replace(/["']/g, '')).join('; '));
@@ -523,7 +741,7 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
         await sequelize.transaction(async (t) => {
           let inst;
           if (isUpdate) {
-            inst = existingRow || await model.findOne({ where: { name }, transaction: t });
+            inst = existingRow || await model.findOne({ where: { [keyColumn]: keyValue }, transaction: t });
             await inst.update(value, { transaction: t });
           } else {
             const createPayload = { ...value };
@@ -537,11 +755,11 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
           id = inst.id;
           effectiveSlug = inst.slug || null;
         });
-        // Committed — these images are now referenced by a live record.
-        for (const k of Object.values(images.values)) if (k) usedKeys.add(k);
+        // Committed — these files are now referenced by a live record.
+        for (const k of Object.values(files.values)) if (k) usedKeys.add(k);
       }
 
-      resolvedByName.set(lc, id);
+      resolvedByName.set(identity, id);
       if (effectiveSlug) resolvedByName.set(String(effectiveSlug).toLowerCase(), id);
       record(row.line, name, isUpdate ? 'updated' : 'created', dryRun ? 'dry run — not written' : null);
     } catch (err) {

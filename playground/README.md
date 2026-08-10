@@ -19,15 +19,17 @@ otherwise expose a live, token-capturing API client on production. Leave it out 
 
 ## Before exposing this on staging
 
-Staging must be behind basic auth or an IP allowlist first. `NODE_ENV=staging` is in `DEV_ENVS`
-(`src/services/auth.service.js`), so `POST /auth/send-otp` returns the OTP in the response body —
-on an open host that lets anyone sign in as any user in the staging database, playground or not.
-`CORS_ORIGINS` does not help here; CORS is enforced by browsers, not by the server.
+Staging should still be behind basic auth or an IP allowlist. `NODE_ENV=staging` is no longer in
+`DEV_ENVS` (`src/services/auth.service.js`), so `POST /auth/send-otp` no longer returns the OTP in
+the response body and signing in needs the real text — but the playground is a live,
+token-capturing client against real staging data either way. `CORS_ORIGINS` does not help here;
+CORS is enforced by browsers, not by the server.
 
 ## Using it
 
-1. **Auth → Send OTP.** Outside production the OTP comes back in the response body and is captured
-   automatically — no SMS involved (see `src/utils/otpHelper.js`).
+1. **Auth → Send OTP.** In development the OTP comes back in the response body and is captured
+   automatically — no SMS involved (see `src/utils/otpHelper.js`). On staging it is texted for
+   real, so read it off the handset and type it into **Verify OTP** yourself.
 2. **Auth → Verify OTP.** Captures `access_token`; every other request inherits it as a bearer
    token, so you're signed in for the rest of the session.
 3. Anything else, in any order. Ids created along the way (`business_uid`, `project_uid`, …) are

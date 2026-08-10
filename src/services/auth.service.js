@@ -18,7 +18,10 @@ const {
 } = require('../errors');
 
 const OTP_EXPIRY_MINUTES = 10;
-const DEV_ENVS = ['development', 'staging', 'test'];
+// Envs where the OTP is echoed back in the response instead of texted. Must stay in
+// step with the same list in utils/otpHelper.js — an env that echoes but does not send
+// is a bypass, and one that neither echoes nor sends cannot log in at all.
+const DEV_ENVS = ['development', 'test'];
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 // How long after a rotation a replay of the replaced token is still assumed to be
