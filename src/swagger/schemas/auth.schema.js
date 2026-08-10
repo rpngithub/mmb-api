@@ -26,7 +26,13 @@
  *         phone:           { type: string }
  *         otp:             { type: string, minLength: 6, maxLength: 6 }
  *         purpose:         { type: string, enum: [login, reset] }
- *         client_mnemonic: { type: string }
+ *         client_mnemonic:
+ *           type: string
+ *           enum: [android, ios, web, playground]
+ *           description: >-
+ *             Which client is signing in, recorded on the session and carried in the
+ *             access token. Matched exactly, so send it lowercase. `admin_panel` is
+ *             set server-side by admin login and cannot be claimed here.
  *
  *     AuthResponse:
  *       type: object
