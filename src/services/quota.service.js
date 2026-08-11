@@ -71,14 +71,21 @@ async function release(userId, featureKey, by = 1) {
   await quotaRepo.decrement(userId, fieldFor(featureKey), by);
 }
 
+// All three numbers for one feature, in counter units (bytes for storage).
+// `limit` and `remaining` are null when unlimited or unenforced; `used` is always
+// a number, because usage is recorded even for accounts no limit applies to — so
+// a free account can still be shown what it has consumed.
+async function snapshot(userId, featureKey) {
+  const limit = await limitFor(userId, featureKey);
+  const usage = await quotaRepo.findByUserId(userId);
+  const used  = usage ? Number(usage[fieldFor(featureKey)] ?? 0) : 0;
+  return { limit, used, remaining: limit === null ? null : Math.max(limit - used, 0) };
+}
+
 // Remaining headroom in counter units, or null when unlimited/unenforced. Used to
 // tell a client how much room is left before they start an upload.
 async function remaining(userId, featureKey) {
-  const limit = await limitFor(userId, featureKey);
-  if (limit === null) return null;
-  const usage = await quotaRepo.findByUserId(userId);
-  const used  = usage ? Number(usage[fieldFor(featureKey)] ?? 0) : 0;
-  return Math.max(limit - used, 0);
+  return (await snapshot(userId, featureKey)).remaining;
 }
 
 // Boolean plan features (data_type 'boolean', value 1/0) — "may this account do X
@@ -92,4 +99,4 @@ async function hasFeature(userId, featureKey) {
   return (await planFeatureRepo.getFeatureValue(sub.plan_id, featureKey)) === 1;
 }
 
-module.exports = { assertWithinQuota, consume, release, remaining, hasFeature, FIELD, LIMIT_SCALE, fieldFor, scaleFor };
+module.exports = { assertWithinQuota, consume, release, remaining, snapshot, hasFeature, FIELD, LIMIT_SCALE, fieldFor, scaleFor };

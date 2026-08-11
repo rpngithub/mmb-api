@@ -68,7 +68,7 @@
                   "send-otp"
                 ]
               },
-              "description": "purpose: `login` | `reset`. In development the response `data.otp` is returned and auto-saved to the `otp` env var; on staging the OTP is texted instead, so enter it manually.",
+              "description": "purpose: `login` | `reset`. In development/staging the response `data.otp` is returned and auto-saved to the `otp` env var.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"purpose\": \"{{purpose}}\"\n}",
@@ -2176,7 +2176,7 @@
       },
       {
         "name": "Uploads (my files)",
-        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, frame, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `user_frame`, `media_library` (the editor's \"My Uploads\"), `brand_font` (the only non-image slot).\n\nImages are raster only (`image/jpeg|png|webp|gif`) — SVG is deliberately refused for user uploads. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently.\n\nSize is enforced at **confirm** (10 MB) — a presigned PUT cannot carry a size condition — and an oversized object is deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule, so an abandoned upload costs nothing. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
+        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, frame, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\n**Bulk** is the same three calls: send `files: [...]` to presign (max 20) for all the URLs at once, `PUT` them in parallel (4–6 at a time), then confirm every key in one call. Confirm reports each key separately in `results` — a batch is **not** all-or-nothing, so one oversized file does not discard the rest, and a `200` does not mean every key made it. If *every* key fails the request itself fails (400/402), so single-file callers are unaffected.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `user_frame`, `media_library` (the editor's \"My Uploads\"), `brand_font` (the only non-image slot).\n\nImages are raster only (`image/jpeg|png|webp|gif`) — SVG is deliberately refused for user uploads. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently.\n\nSize is enforced at **confirm** (10 MB) — a presigned PUT cannot carry a size condition — and an oversized object is deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule, so an abandoned upload costs nothing. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
         "item": [
           {
             "name": "Presign Upload",
@@ -2198,7 +2198,7 @@
                   "presign"
                 ]
               },
-              "description": "Returns `{ key, upload_url, required_headers, expires_in, max_bytes }`. `filename` is used only for its extension — the stored name is a uuid.",
+              "description": "Returns `{ key, upload_url, required_headers, expires_in, max_bytes, storage_remaining }`. `filename` is used only for its extension — the stored name is a uuid.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"target\": {\n    \"slot\": \"media_library\"\n  },\n  \"filename\": \"photo.jpg\",\n  \"content_type\": \"image/jpeg\"\n}",
@@ -2223,6 +2223,56 @@
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
                     "}",
                     "const d = (pm.response.json() || {}).data || {}; if (d.key) pm.environment.set('my_upload_key', d.key);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Presign Upload (bulk)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/presign",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "presign"
+                ]
+              },
+              "description": "Up to **20** files in one call; slots may be mixed. Returns `{ files: [{ key, upload_url, required_headers }], expires_in, max_bytes, storage_remaining }` — the limits are per ACCOUNT, so they are reported once instead of on every entry.\n\nUnlike confirm, presign IS all-or-nothing: the whole batch is validated before any URL is issued, so one bad entry 400s the request with a `files.3.filename`-style field path. Nothing has been uploaded at that point, so there is nothing to unwind.\n\n`storage_remaining` is the headroom for the whole account, not per file — sum the batch client-side against it before uploading. The cap matches confirm's, so anything presigned together can be confirmed together.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"files\": [\n    {\n      \"target\": {\n        \"slot\": \"media_library\"\n      },\n      \"filename\": \"one.jpg\",\n      \"content_type\": \"image/jpeg\"\n    },\n    {\n      \"target\": {\n        \"slot\": \"media_library\"\n      },\n      \"filename\": \"two.png\",\n      \"content_type\": \"image/png\"\n    }\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {}; const f = d.files || []; if (f[0]) pm.environment.set('my_upload_key', f[0].key); if (f[1]) pm.environment.set('my_upload_key_2', f[1].key);"
                   ]
                 }
               }
@@ -2298,10 +2348,59 @@
                   "confirm"
                 ]
               },
-              "description": "Promotes pending → active. Rejects any key outside your namespace and any key with no object behind it.",
+              "description": "Promotes pending → active, up to 20 keys per call. Rejects any key outside your namespace and any key with no object behind it.\n\nOutcomes come back **per key** in `results` (`confirmed` | `rejected`, with a `reason` and `code`), and `keys` lists the confirmed ones only — so it is always safe to save straight onto records. Read `results`: files that pass are promoted and charged even when others in the same call fail. Only when EVERY key fails does the request itself fail, with the first error (400, or 402 when storage ran out).",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"keys\": [\n    \"{{my_upload_key}}\"\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Confirm Upload (bulk)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/confirm",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "confirm"
+                ]
+              },
+              "description": "One call for the whole batch. Inspect `results` for the per-key outcome — a `200` here can still contain rejected files, and `keys` holds only the ones that were actually promoted.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"keys\": [\n    \"{{my_upload_key}}\",\n    \"{{my_upload_key_2}}\"\n  ]\n}",
                 "options": {
                   "raw": {
                     "language": "json"
@@ -2357,6 +2456,41 @@
                   }
                 }
               }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "My Storage Quota",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/uploads/quota",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "quota"
+                ]
+              },
+              "description": "The same figures presign returns, without having to start an upload: `{ limit_bytes, used_bytes, remaining_bytes, unlimited, max_upload_bytes }`. Read it when sizing a bulk upload, or to render a \"82 MB of 100 MB used\" bar.\n\nEverything is in **bytes**, so it compares directly against a file size. `GET /subscriptions/me` reports the same allowance in MB for the plan's feature list — do not mix the two units.\n\n`limit_bytes` / `remaining_bytes` are `null` when the allowance is unlimited or unenforced (a free account); check `unlimited` rather than testing for null. `used_bytes` is always real, so consumption can be shown either way. `max_upload_bytes` is the per-FILE cap, separate from the allowance."
             },
             "event": [
               {
@@ -4120,6 +4254,12 @@
         "enabled": true
       },
       {
+        "key": "my_upload_key_2",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
         "key": "my_upload_uid",
         "value": "",
         "type": "default",
@@ -4157,6 +4297,12 @@
       },
       {
         "key": "razorpay_signature",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "upload_key_2",
         "value": "",
         "type": "default",
         "enabled": true

@@ -2326,6 +2326,114 @@ test('confirm promotes only your own keys, and deletes anything over the size li
   }, { size: 11 * 1024 * 1024 });
 });
 
+test('batch presign issues one key per file and validates the whole batch before signing any', async () => {
+  const u     = await mkUser('BulkPresign');
+  const token = h.userTokenFor(u.id);
+
+  await withStubbedS3(async () => {
+    const r = await h.request('POST', `${P}/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { slot: 'media_library' }, filename: 'a.png', content_type: 'image/png' },
+        { target: { slot: 'media_library' }, filename: 'b.jpg' },
+        { target: { slot: 'product_image' }, filename: 'c.webp' },   // slots may be mixed
+      ] },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.data.files.length, 3);
+
+    const [a, b, c] = r.body.data.files;
+    assert.ok(a.key.startsWith(`users/${u.uid}/media/`) && a.key.endsWith('.png'));
+    assert.ok(b.key.startsWith(`users/${u.uid}/media/`) && b.key.endsWith('.jpg'));
+    assert.ok(c.key.startsWith(`users/${u.uid}/products/`), 'per-file slot, not one for the batch');
+    assert.equal(new Set(r.body.data.files.map((f) => f.key)).size, 3, 'keys are distinct');
+    assert.ok(r.body.data.files.every((f) => f.upload_url && f.required_headers['x-amz-tagging'] === 'status=pending'));
+
+    // Per-account limits are reported once, not per file.
+    assert.equal(r.body.data.max_bytes, 10 * 1024 * 1024);
+    assert.ok('storage_remaining' in r.body.data);
+    assert.ok(!('key' in r.body.data), 'batch response does not also carry the single-file shape');
+
+    // The single-file shape is untouched, and the two cannot be combined.
+    const single = await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'solo.png' },
+    });
+    assert.equal(single.status, 200);
+    assert.ok(single.body.data.key && !single.body.data.files, 'flat shape preserved');
+    assert.equal((await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'x.png', files: [] },
+    })).status, 400, 'one shape or the other, never both');
+
+    // One bad file fails the batch outright — nothing is uploaded yet, so there is
+    // nothing to unwind, and the error names which entry was wrong.
+    const bad = await h.request('POST', `${P}/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { slot: 'media_library' }, filename: 'ok.png' },
+        { target: { slot: 'media_library' }, filename: 'nope.svg', content_type: 'image/svg+xml' },
+      ] },
+    });
+    assert.equal(bad.status, 400);
+    assert.ok(bad.body.error.details.some((d) => d.field.startsWith('files.1')), 'error points at the offending entry');
+
+    // Same for the per-slot rules the service enforces (a font slot needs a font
+    // extension) — and it reports the index the same way the schema does.
+    const wrongExt = await h.request('POST', `${P}/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { slot: 'media_library' }, filename: 'ok.png' },
+        { target: { slot: 'brand_font' },    filename: 'notafont.png' },
+      ] },
+    });
+    assert.equal(wrongExt.status, 400);
+    assert.equal(wrongExt.body.error.details[0].field, 'files.1.filename');
+
+    // The cap matches confirm's, so a presigned set can always be confirmed together.
+    const tooMany = Array.from({ length: 21 }, (_, i) => ({ target: { slot: 'media_library' }, filename: `f${i}.png` }));
+    assert.equal((await h.request('POST', `${P}/uploads/presign`, { token, body: { files: tooMany } })).status, 400);
+  });
+});
+
+test('confirm reports each key separately and keeps the good files in a partly bad batch', async () => {
+  const mine     = await mkUser('BulkConfirm');
+  const stranger = await mkUser('BulkConfirmOther');
+  const token    = h.userTokenFor(mine.id);
+
+  await withStubbedS3(async (calls) => {
+    const keys = (await h.request('POST', `${P}/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { slot: 'media_library' }, filename: 'good1.png' },
+        { target: { slot: 'media_library' }, filename: 'good2.png' },
+      ] },
+    })).body.data.files.map((f) => f.key);
+
+    const foreign = `users/${stranger.uid}/media/stolen.png`;
+    const r = await h.request('POST', `${P}/uploads/confirm`, {
+      token, body: { keys: [keys[0], foreign, keys[1]] },
+    });
+
+    // One bad key no longer discards the two good uploads.
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.data.results.map((x) => x.status), ['confirmed', 'rejected', 'confirmed']);
+    assert.equal(r.body.data.results[1].code, 'VALIDATION_ERROR');
+    assert.ok(r.body.data.results[1].reason);
+    assert.deepEqual(r.body.data.keys, [keys[0], keys[1]], 'keys lists the confirmed ones only');
+    assert.deepEqual(calls.tagged, [[keys[0], 'active'], [keys[1], 'active']], 'the foreign key was never promoted');
+
+    // Re-confirming is idempotent, not a double charge, and still reads as confirmed.
+    const again = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys } });
+    assert.equal(again.status, 200);
+    assert.deepEqual(again.body.data.results.map((x) => x.status), ['confirmed', 'confirmed']);
+    assert.equal(calls.tagged.length, 2, 'nothing was re-tagged');
+
+    // Every key bad = the request itself fails, as it always did for a single key.
+    const allBad = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [foreign] } });
+    assert.equal(allBad.status, 400);
+    assert.ok(!allBad.body.success);
+  });
+});
+
 test('a user cannot save an s3_key that was not issued to them (logo, product image, frame, photo)', async () => {
   const owner    = await mkUser('KeyOwner');
   const stranger = await mkUser('KeyThief');
@@ -2455,6 +2563,53 @@ test('storage is charged to storage_used_bytes on confirm, once per key', async 
     assert.equal(again.status, 200);
   }, { size: 2 * MB });
   assert.equal(await storageUsed(userId), 2 * MB, 'idempotent');
+});
+
+test('GET /uploads/quota reports the allowance in bytes, and tracks what presign says', async () => {
+  const userId = await userWithActivePlan(1, 9110);          // Free: 100 MB
+  const token  = h.userTokenFor(userId);
+
+  const before = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+  assert.equal(before.limit_bytes, 100 * MB, 'bytes, not the MB the plan stores');
+  assert.equal(before.used_bytes, 0);
+  assert.equal(before.remaining_bytes, 100 * MB);
+  assert.equal(before.unlimited, false);
+  assert.equal(before.max_upload_bytes, 10 * MB, 'per-file cap, separate from the allowance');
+
+  await uploadOf(token, 'media_library', 2 * MB);
+
+  const after = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+  assert.equal(after.used_bytes, 2 * MB);
+  assert.equal(after.remaining_bytes, 98 * MB);
+
+  // The two paths must not drift: this is the same number presign hands back.
+  await withStubbedS3(async () => {
+    const p = await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'x.png' },
+    });
+    assert.equal(p.body.data.storage_remaining, after.remaining_bytes);
+    assert.equal(p.body.data.max_bytes, after.max_upload_bytes);
+  });
+
+  assert.equal((await h.request('GET', `${P}/uploads/quota`)).status, 401);
+});
+
+test('an unenforced account reports its usage with no limit', async () => {
+  const u     = await mkUser('QuotaFree');          // no subscription at all
+  const token = h.userTokenFor(u.id);
+
+  const q = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+  assert.equal(q.unlimited, true);
+  assert.equal(q.limit_bytes, null);
+  assert.equal(q.remaining_bytes, null);
+  assert.equal(q.used_bytes, 0, 'recorded even where it is not enforced');
+  assert.equal(q.max_upload_bytes, 10 * MB, 'the per-file cap still applies');
+
+  // Usage is still counted, so switching enforcement on later needs no backfill.
+  await uploadOf(token, 'media_library', 1 * MB);
+  const after = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+  assert.equal(after.used_bytes, 1 * MB);
+  assert.equal(after.remaining_bytes, null, 'still no ceiling to count down from');
 });
 
 test('deleting the file that used the storage gives the bytes back', async () => {
@@ -3769,6 +3924,88 @@ test('an admin deactivating a user ends their sessions immediately', async () =>
   assert.equal(back.status, 200);
   const fresh = await otpLogin(phone);
   assert.equal((await h.request('GET', `${P}/users/me`, { token: fresh.access_token })).status, 200);
+});
+
+test('admin batch presign signs mixed targets, and refuses the whole batch if one is bad', async () => {
+  const token = h.adminToken(['*']);
+
+  await withStubbedS3(async () => {
+    const r = await h.request('POST', `${P}/admin/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { type: 'image_slot', slot: 'banner' },        filename: 'hero.png' },
+        { target: { type: 'asset', asset_type: 'icon' },         filename: 'star.svg' },   // admins may upload SVG
+        { target: { type: 'image_slot', slot: 'variant_badge_icon' }, filename: 'badge.png' },
+      ] },
+    });
+    assert.equal(r.status, 200);
+
+    const [banner, icon, badge] = r.body.data.files;
+    assert.ok(banner.key.startsWith('banners/') && banner.key.endsWith('.png'));
+    assert.ok(icon.key.startsWith('assets/icon/'), 'targets may be mixed within a batch');
+    assert.ok(badge.key.startsWith('variants/badge-icon/'));
+    assert.equal(new Set(r.body.data.files.map((f) => f.key)).size, 3);
+    assert.ok(r.body.data.files.every((f) => f.upload_url && f.required_headers['x-amz-tagging'] === 'status=pending'));
+    assert.equal(r.body.data.expires_in, 900, 'reported once, not per file');
+
+    // The single-file shape is untouched, and the two cannot be combined.
+    const single = await h.request('POST', `${P}/admin/uploads/presign`, {
+      token, body: { target: { type: 'image_slot', slot: 'banner' }, filename: 'solo.png' },
+    });
+    assert.equal(single.status, 200);
+    assert.ok(single.body.data.key && !single.body.data.files, 'flat shape preserved');
+    assert.equal((await h.request('POST', `${P}/admin/uploads/presign`, {
+      token, body: { target: { type: 'image_slot', slot: 'banner' }, filename: 'x.png', files: [] },
+    })).status, 400);
+
+    // One unknown slot fails the batch before any URL is issued, naming the entry.
+    const bad = await h.request('POST', `${P}/admin/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { type: 'image_slot', slot: 'banner' },  filename: 'ok.png' },
+        { target: { type: 'image_slot', slot: 'nonsense' }, filename: 'no.png' },
+      ] },
+    });
+    assert.equal(bad.status, 400);
+    assert.ok(bad.body.error.details.some((d) => d.field.startsWith('files.1')), 'error points at the offending entry');
+
+    const tooMany = Array.from({ length: 51 }, (_, i) => ({ target: { type: 'image_slot', slot: 'banner' }, filename: `f${i}.png` }));
+    assert.equal((await h.request('POST', `${P}/admin/uploads/presign`, { token, body: { files: tooMany } })).status, 400);
+
+    // Multipart is one key and one upload_id — it must not inherit the batch form.
+    assert.equal((await h.request('POST', `${P}/admin/uploads/multipart/initiate`, {
+      token, body: { files: [{ target: { type: 'image_slot', slot: 'banner' }, filename: 'big.png' }] },
+    })).status, 400);
+  });
+});
+
+test('admin confirm reports each key separately and keeps the good ones', async () => {
+  const token = h.adminToken(['*']);
+
+  await withStubbedS3(async (calls) => {
+    const keys = (await h.request('POST', `${P}/admin/uploads/presign`, {
+      token,
+      body: { files: [
+        { target: { type: 'image_slot', slot: 'banner' }, filename: 'a.png' },
+        { target: { type: 'image_slot', slot: 'banner' }, filename: 'b.png' },
+      ] },
+    })).body.data.files.map((f) => f.key);
+
+    const outside = 'etc/passwd.png';                       // outside every allowed root
+    const r = await h.request('POST', `${P}/admin/uploads/confirm`, {
+      token, body: { keys: [keys[0], outside, keys[1]] },
+    });
+
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.data.results.map((x) => x.status), ['confirmed', 'rejected', 'confirmed']);
+    assert.deepEqual(r.body.data.keys, [keys[0], keys[1]], 'keys lists the confirmed ones only');
+    assert.deepEqual(calls.tagged, [[keys[0], 'active'], [keys[1], 'active']], 'the bad key was never promoted');
+
+    // Every key bad = the request itself fails, as it always did for a single key.
+    assert.equal((await h.request('POST', `${P}/admin/uploads/confirm`, {
+      token, body: { keys: [outside] },
+    })).status, 400);
+  });
 });
 
 test('a font can no longer be filed as an asset â€” fonts belong to the fonts library', async () => {
