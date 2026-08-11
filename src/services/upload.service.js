@@ -79,10 +79,40 @@ function assertAllowedKey(key) {
 }
 
 // ---- Single-PUT (small files) ----
-async function presign({ target, filename, content_type }) {
-  const key = buildKey(target, filename);
-  const upload_url = await s3.getPresignedPutUrl(key, content_type);
-  return { key, upload_url, required_headers: { 'x-amz-tagging': 'status=pending' }, expires_in: 900 };
+//
+// One file (`target` + `filename`) or a batch (`files: [...]`), and the response
+// mirrors whichever was sent — flat for one, a `files` array for a batch. Same
+// shape as the user-side endpoint, so a client that already speaks one speaks
+// both.
+//
+// Targets may be mixed within a batch: uploading a category icon and its
+// thumbnail together is the common case, and they are different slots.
+async function presign(body) {
+  const batch = Array.isArray(body.files);
+  const items = batch ? body.files : [body];
+
+  // buildKey validates as it derives, so mapping it over every item first means a
+  // batch with one bad target is rejected before ANY URL is issued. Nothing has
+  // been uploaded at that point, so there is nothing to unwind.
+  const keys = items.map(({ target, filename }, i) => {
+    try {
+      return buildKey(target, filename);
+    } catch (err) {
+      // Re-point the field at the offending entry, dot-indexed to match Joi.
+      if (batch && err.details) {
+        err.details = err.details.map((d) => ({ ...d, field: `files.${i}.${d.field}` }));
+      }
+      throw err;
+    }
+  });
+
+  const files = await Promise.all(keys.map(async (key, i) => ({
+    key,
+    upload_url:       await s3.getPresignedPutUrl(key, items[i].content_type),
+    required_headers: { 'x-amz-tagging': 'status=pending' },
+  })));
+
+  return batch ? { files, expires_in: 900 } : { ...files[0], expires_in: 900 };
 }
 
 // ---- Multipart (large files) ----
@@ -113,12 +143,36 @@ async function multipartAbort({ key, upload_id }) {
 }
 
 // ---- Promote pending -> active ----
+//
+// Reported PER KEY, matching the user-side endpoint. The tag flip happens as the
+// loop goes, so throwing on the first bad key used to leave the earlier ones
+// promoted with the caller seeing only a 400 — no way to tell which of a
+// twenty-file bundle actually landed.
+//
+// When EVERY key fails the original error is rethrown, so a single-key confirm
+// still gets the same 400 it always did.
 async function confirm({ keys }) {
+  const results  = [];
+  const failures = [];
+
   for (const key of keys) {
-    assertAllowedKey(key);
-    await s3.putObjectTagging(key, 'active');
+    try {
+      assertAllowedKey(key);
+      await s3.putObjectTagging(key, 'active');
+      results.push({ key, status: 'confirmed' });
+    } catch (err) {
+      // Only a bad key is this key's own fault. An S3 or credentials failure is a
+      // fault of ours and must surface as a 500, not as a per-file rejection the
+      // caller would read as "that file was invalid".
+      if (!err.isOperational) throw err;
+      failures.push(err);
+      results.push({ key, status: 'rejected', reason: err.message, code: err.errorCode });
+    }
   }
-  return { keys };
+
+  if (failures.length === keys.length && failures.length > 0) throw failures[0];
+
+  return { keys: results.filter((r) => r.status === 'confirmed').map((r) => r.key), results };
 }
 
 module.exports = {

@@ -94,39 +94,64 @@ async function userUidFor(userId) {
 // No multipart on the user side: every slot here is an image, and a single
 // presigned PUT covers files far larger than MAX_UPLOAD_BYTES. Add multipart when
 // a slot starts taking video.
-async function presign({ target, filename, content_type }, userId) {
-  const slotName = target && target.slot;
-  const slot     = SLOTS[slotName];
-  if (!slot) throw bad('target.slot', `slot must be one of: ${Object.keys(SLOTS).join(', ')}`);
+//
+// Two request shapes, and the response mirrors whichever was sent. The original
+// single-file body returns its fields flat, exactly as it always has; a batch
+// (`files: [...]`) returns a `files` array plus the limits, which are per-account
+// and so are reported once rather than repeated N times.
+//
+// Batching matters beyond the round trips: the quota check and the uid lookup are
+// per-ACCOUNT, and issuing 20 keys one request at a time ran both 20 times.
+async function presign(body, userId) {
+  const batch = Array.isArray(body.files);
+  const items = batch ? body.files : [body];
 
-  // Rules are per slot: an image slot must not accept a font, and vice versa.
-  const rules = rulesFor(slotName);
-  if (content_type && !rules.types.includes(content_type)) {
-    throw bad('content_type', `content_type must be one of: ${rules.types.join(', ')}`);
-  }
-  if (rules.extensions && !rules.extensions.includes(ext(filename))) {
-    throw bad('filename', `file must be one of: ${rules.extensions.map((e) => `.${e}`).join(', ')}`);
-  }
+  // Validate every item BEFORE issuing any URL, so a batch with one bad file is
+  // rejected whole instead of half-signed. Nothing has been uploaded at this
+  // point, so there is nothing to unwind — and the field path names the offender.
+  // Dot-indexed to match the paths Joi produces (`files.3.content_type`), so a
+  // client sees one convention whether the rejection came from the schema or here.
+  const at = (i, field) => (batch ? `files.${i}.${field}` : field);
+  items.forEach(({ target, filename, content_type }, i) => {
+    const slotName = target && target.slot;
+    if (!SLOTS[slotName]) throw bad(at(i, 'target.slot'), `slot must be one of: ${Object.keys(SLOTS).join(', ')}`);
+
+    // Rules are per slot: an image slot must not accept a font, and vice versa.
+    const rules = rulesFor(slotName);
+    if (content_type && !rules.types.includes(content_type)) {
+      throw bad(at(i, 'content_type'), `content_type must be one of: ${rules.types.join(', ')}`);
+    }
+    if (rules.extensions && !rules.extensions.includes(ext(filename))) {
+      throw bad(at(i, 'filename'), `file must be one of: ${rules.extensions.map((e) => `.${e}`).join(', ')}`);
+    }
+  });
 
   // Fail before the client wastes a round trip uploading into a full account.
-  // The real charge happens at confirm, once the byte count is known.
+  // The real charge happens at confirm, once the byte count is known — so this
+  // stays a single "is there any room at all" check even for a batch; the server
+  // cannot know the sizes yet. Summing them client-side against storage_remaining
+  // is the client's job.
   await quota.assertWithinQuota(userId, 'storage');
 
-  const key = `${prefixFor(await userUidFor(userId), slot)}${uuid()}.${ext(filename)}`;
-  const upload_url = await s3.getPresignedPutUrl(key, content_type);
+  const userUid = await userUidFor(userId);
+  const files   = await Promise.all(items.map(async ({ target, filename, content_type }) => {
+    const key = `${prefixFor(userUid, SLOTS[target.slot])}${uuid()}.${ext(filename)}`;
+    return {
+      key,
+      upload_url:       await s3.getPresignedPutUrl(key, content_type),
+      required_headers: { 'x-amz-tagging': 'status=pending' },
+    };
+  }));
 
   // Headroom left in the plan, so the client can reject an oversized file before
   // uploading it. null = unlimited (or an unenforced free account).
-  const storageRemaining = await quota.remaining(userId, 'storage');
-
-  return {
-    key,
-    upload_url,
-    required_headers:  { 'x-amz-tagging': 'status=pending' },
+  const limits = {
     expires_in:        900,
     max_bytes:         MAX_UPLOAD_BYTES,
-    storage_remaining: storageRemaining,
+    storage_remaining: await quota.remaining(userId, 'storage'),
   };
+
+  return batch ? { files, ...limits } : { ...files[0], ...limits };
 }
 
 // ---- Confirm: promote pending -> active, and charge storage ----
@@ -138,6 +163,18 @@ async function presign({ target, filename, content_type }, userId) {
 // the user saying "keep this file". Charging later — when the key is saved onto a
 // record — would leave confirmed-but-unattached objects free AND unswept: the
 // lifecycle rule only collects objects still tagged pending.
+//
+// Reported PER KEY rather than by throwing on the first bad one. That distinction
+// only shows up in a batch, but there it is the whole point: the loop promotes and
+// charges as it goes, so throwing halfway used to leave the earlier keys active,
+// already billed, and invisible to a client that saw nothing but a 400.
+//
+// The all-or-nothing alternative would mean rolling back promotions and quota on
+// failure, and one oversized file in a set of twenty is a routine thing, not an
+// error worth discarding nineteen good uploads over.
+//
+// When EVERY item fails the original error is rethrown, so a single-key confirm —
+// which is every existing caller — still gets the same 400/402 it always did.
 async function confirm(body, userId) {
   // Two accepted shapes. `keys: ["…"]` is the original and still works; `uploads:
   // [{ key, width, height, filename }]` carries the grid metadata the media
@@ -150,60 +187,104 @@ async function confirm(body, userId) {
   const slotOf  = Object.fromEntries(Object.entries(SLOTS).map(([target, slot]) => [slot, target]));
   const userUid = await userUidFor(userId);
   const mine    = `users/${userUid}/`;
-  const keys    = items.map((i) => i.key);
+
+  const results  = [];
+  const failures = [];
 
   for (const item of items) {
-    const key = item.key;
-    if (!key.startsWith(mine)) throw bad('keys', 'key is outside your upload namespace');
-
-    // Already confirmed: promoting again must not charge again. The unique index
-    // on s3_key is the backstop; this keeps a retry from erroring.
-    if (await UserUpload.findOne({ where: { s3_key: key }, attributes: ['id'] })) continue;
-
-    // HEAD returns null when it cannot tell (no bucket wired up, or a 403 that is
-    // indistinguishable from a missing object) — treat that as inconclusive and
-    // let the promotion through rather than rejecting a legitimate upload. The
-    // ledger then records 0 bytes: an unmeasurable object is not charged, which
-    // is the safe direction to be wrong in.
-    const head = await s3.objectExists(key);
-    if (head && head.exists === false) throw bad('keys', `no uploaded object found at ${key}`);
-
-    const bytes = (head && head.size != null) ? Number(head.size) : 0;
-    if (bytes > MAX_UPLOAD_BYTES) {
-      await s3.deleteFile(key);
-      throw bad('keys', `file exceeds the ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB limit`);
-    }
-
-    // Over plan storage: delete rather than promote, so a rejected file leaves
-    // nothing behind to be referenced or paid for.
     try {
-      await quota.assertWithinQuota(userId, 'storage', bytes);
+      await promoteOne(item, { userId, mine, slotOf });
+      results.push({ key: item.key, status: 'confirmed' });
     } catch (err) {
-      await s3.deleteFile(key);
-      throw err;
+      if (!err.isOperational) throw err;      // a real fault, not this file's fault
+      failures.push(err);
+      results.push({ key: item.key, status: 'rejected', reason: err.message, code: err.errorCode });
     }
-
-    await s3.putObjectTagging(key, 'active');
-    await UserUpload.create({
-      uid:          uuid(),
-      user_id:      userId,
-      s3_key:       key,
-      slot:         slotOf[key.slice(mine.length).split('/')[0]] || 'unknown',
-      bytes,
-      content_type: (head && head.content_type) || null,
-      width:             posIntOrNull(item.width),
-      height:            posIntOrNull(item.height),
-      original_filename: item.filename ? String(item.filename).slice(0, 255) : null,
-    });
-    await quota.consume(userId, 'storage', bytes);
   }
-  return { keys };
+
+  // Nothing got through: there is no partial success to report, so fail the
+  // request exactly as before rather than returning a 200 full of rejections.
+  if (failures.length === items.length && failures.length > 0) throw failures[0];
+
+  // `keys` is kept for the clients that read it, but now lists only what was
+  // actually promoted — a rejected key must never reach a record's s3_key column.
+  return { keys: results.filter((r) => r.status === 'confirmed').map((r) => r.key), results };
+}
+
+// Promotes one uploaded object, or throws an operational error describing why it
+// could not be. Split out of confirm so each key's failure is catchable on its own.
+async function promoteOne(item, { userId, mine, slotOf }) {
+  const key = item.key;
+  if (!key.startsWith(mine)) throw bad('keys', 'key is outside your upload namespace');
+
+  // Already confirmed: promoting again must not charge again. The unique index
+  // on s3_key is the backstop; this keeps a retry from erroring.
+  if (await UserUpload.findOne({ where: { s3_key: key }, attributes: ['id'] })) return;
+
+  // HEAD returns null when it cannot tell (no bucket wired up, or a 403 that is
+  // indistinguishable from a missing object) — treat that as inconclusive and
+  // let the promotion through rather than rejecting a legitimate upload. The
+  // ledger then records 0 bytes: an unmeasurable object is not charged, which
+  // is the safe direction to be wrong in.
+  const head = await s3.objectExists(key);
+  if (head && head.exists === false) throw bad('keys', `no uploaded object found at ${key}`);
+
+  const bytes = (head && head.size != null) ? Number(head.size) : 0;
+  if (bytes > MAX_UPLOAD_BYTES) {
+    await s3.deleteFile(key);
+    throw bad('keys', `file exceeds the ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB limit`);
+  }
+
+  // Over plan storage: delete rather than promote, so a rejected file leaves
+  // nothing behind to be referenced or paid for. In a batch this is also what
+  // stops the rest of the set from being abandoned untagged — each file is
+  // charged as it lands, so the first one that does not fit is the only casualty.
+  try {
+    await quota.assertWithinQuota(userId, 'storage', bytes);
+  } catch (err) {
+    await s3.deleteFile(key);
+    throw err;
+  }
+
+  await s3.putObjectTagging(key, 'active');
+  await UserUpload.create({
+    uid:          uuid(),
+    user_id:      userId,
+    s3_key:       key,
+    slot:         slotOf[key.slice(mine.length).split('/')[0]] || 'unknown',
+    bytes,
+    content_type: (head && head.content_type) || null,
+    width:             posIntOrNull(item.width),
+    height:            posIntOrNull(item.height),
+    original_filename: item.filename ? String(item.filename).slice(0, 255) : null,
+  });
+  await quota.consume(userId, 'storage', bytes);
 }
 
 const posIntOrNull = (v) => {
   const n = parseInt(v, 10);
   return Number.isInteger(n) && n > 0 ? n : null;
 };
+
+// ---- Storage allowance ----
+// The same numbers presign returns, without having to start an upload to see
+// them. Everything is in BYTES on purpose: `/subscriptions/me` reports storage in
+// MB (its features list renders against a plan label, and the limit is stored in
+// MB), which is the wrong unit to compare a File.size against. A client sizing a
+// batch should read this, not that.
+//
+// null limit/remaining = unlimited, or a free account where the limit is recorded
+// but not enforced. `used_bytes` is real either way.
+async function storageQuota(userId) {
+  const { limit, used, remaining } = await quota.snapshot(userId, 'storage');
+  return {
+    limit_bytes:      limit,
+    used_bytes:       used,
+    remaining_bytes:  remaining,
+    unlimited:        limit === null,
+    max_upload_bytes: MAX_UPLOAD_BYTES,
+  };
+}
 
 // ---- "My Uploads" library ----
 
@@ -287,6 +368,6 @@ async function assertOwnedKey(key, slotName, userId) {
 }
 
 module.exports = {
-  presign, confirm, assertOwnedKey, release, releaseReplaced, listMine, deleteMine,
+  presign, confirm, assertOwnedKey, release, releaseReplaced, listMine, deleteMine, storageQuota,
   SLOTS, ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES, DEFAULT_LIST_SLOT,
 };

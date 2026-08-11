@@ -579,6 +579,12 @@ router.put('/templates/:uid/relations', authenticate, authorizeAdmin('templates.
  * /admin/uploads/presign:
  *   post:
  *     summary: Presigned single PUT (small files) straight to the final key, tagged pending
+ *     description: >-
+ *       One file (`target` + `filename`) or a batch under `files` (max 50); targets may be
+ *       mixed, so a category icon and its thumbnail can be signed together. The response
+ *       mirrors whichever shape was sent — flat for one file, a `files` array for a batch.
+ *       Unlike confirm, presign is all-or-nothing: the whole batch is validated before any
+ *       URL is issued, and the error names the entry (`files.3.target.slot`).
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -586,17 +592,37 @@ router.put('/templates/:uid/relations', authenticate, authorizeAdmin('templates.
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             required: [target, filename]
- *             properties:
- *               target:       { type: object, description: "{ type: image_slot|asset|template_file, ... }" }
- *               filename:     { type: string }
- *               content_type: { type: string }
+ *             oneOf:
+ *               - type: object
+ *                 title: One file
+ *                 required: [target, filename]
+ *                 properties:
+ *                   target:       { type: object, description: "{ type: image_slot|asset|template_file, ... }" }
+ *                   filename:     { type: string }
+ *                   content_type: { type: string }
+ *               - type: object
+ *                 title: Batch
+ *                 required: [files]
+ *                 properties:
+ *                   files:
+ *                     type: array
+ *                     minItems: 1
+ *                     maxItems: 50
+ *                     items:
+ *                       type: object
+ *                       required: [target, filename]
+ *                       properties:
+ *                         target:       { type: object }
+ *                         filename:     { type: string }
+ *                         content_type: { type: string }
  *     responses:
- *       200: { description: "{ key, upload_url, required_headers: { x-amz-tagging }, expires_in }" }
+ *       200: { description: "One file → { key, upload_url, required_headers: { x-amz-tagging }, expires_in }. Batch → { files: [{ key, upload_url, required_headers }], expires_in }" }
  * /admin/uploads/multipart/initiate:
  *   post:
  *     summary: Begin a multipart upload (large files); returns key + upload_id
+ *     description: >-
+ *       One file only — a multipart upload is one key and one upload_id. There is no
+ *       batch form here; presign several files instead, or initiate one at a time.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  * /admin/uploads/multipart/presign-parts:
@@ -617,6 +643,12 @@ router.put('/templates/:uid/relations', authenticate, authorizeAdmin('templates.
  * /admin/uploads/confirm:
  *   post:
  *     summary: Promote uploaded objects from pending to active (tag flip)
+ *     description: >-
+ *       Outcomes are reported PER KEY in `results` (`confirmed` | `rejected` with a
+ *       `reason`), and the good keys in a batch are promoted even when others are
+ *       rejected — a `200` does not mean every key succeeded, so read `results`. `keys`
+ *       lists the confirmed ones only. If every key fails the request fails with the
+ *       first error (400), so a single-key confirm is unchanged.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -625,7 +657,8 @@ router.put('/templates/:uid/relations', authenticate, authorizeAdmin('templates.
  *         application/json:
  *           schema: { type: object, required: [keys], properties: { keys: { type: array, items: { type: string } } } }
  *     responses:
- *       200: { description: "{ keys }" }
+ *       200: { description: "{ keys, results: [{ key, status, reason?, code? }] } — at least one key was promoted" }
+ *       400: { description: "Every key was rejected (outside the allowed upload roots)" }
  */
 router.post('/uploads/presign',                 authenticate, authorizeAdmin(), validate(presignSchema),          uploadController.presign);
 router.post('/uploads/multipart/initiate',      authenticate, authorizeAdmin(), validate(multipartInitiateSchema), uploadController.multipartInitiate);

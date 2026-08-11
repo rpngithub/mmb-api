@@ -43,6 +43,60 @@
  *               nullable: true
  *               description: Bytes left in the plan's storage allowance; null = unlimited (or an unenforced free account).
  *
+ *     BatchPresignResponse:
+ *       type: object
+ *       description: >-
+ *         What a batch request (`files: [...]`) returns. The per-file fields move into
+ *         `files`, in the order they were sent; the limits are per ACCOUNT, so they are
+ *         reported once rather than repeated on every entry.
+ *       properties:
+ *         success: { type: boolean }
+ *         data:
+ *           type: object
+ *           properties:
+ *             files:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   key:              { type: string }
+ *                   upload_url:       { type: string }
+ *                   required_headers: { type: object, example: { 'x-amz-tagging': 'status=pending' } }
+ *             expires_in: { type: integer, example: 900 }
+ *             max_bytes:  { type: integer, example: 10485760, description: Per FILE, not per batch. }
+ *             storage_remaining:
+ *               type: integer
+ *               nullable: true
+ *               description: >-
+ *                 Bytes left for the whole account, not per file — sum the batch's sizes
+ *                 against it client-side. null = unlimited (or an unenforced free account).
+ *
+ *     StorageQuotaResponse:
+ *       type: object
+ *       properties:
+ *         success: { type: boolean }
+ *         data:
+ *           type: object
+ *           properties:
+ *             limit_bytes:
+ *               type: integer
+ *               nullable: true
+ *               description: The plan's storage allowance in bytes; null = unlimited or unenforced.
+ *             used_bytes:
+ *               type: integer
+ *               description: Bytes currently stored. Always a real figure, even when no limit applies.
+ *             remaining_bytes:
+ *               type: integer
+ *               nullable: true
+ *               description: Headroom in bytes; null when limit_bytes is null. Same value presign reports as storage_remaining.
+ *             unlimited:
+ *               type: boolean
+ *               description: Test this rather than checking the nulls.
+ *             max_upload_bytes:
+ *               type: integer
+ *               example: 10485760
+ *               description: Per-FILE cap, separate from the allowance. A file over this is refused even with room to spare.
+ *
  *     ConfirmUploadResponse:
  *       type: object
  *       properties:
@@ -53,5 +107,27 @@
  *             keys:
  *               type: array
  *               items: { type: string }
- *               description: The keys now tagged active. Re-confirming an already-confirmed key is a no-op, not a double charge.
+ *               description: >-
+ *                 The keys now tagged active — CONFIRMED ONES ONLY, so this is safe to save
+ *                 straight onto records. Re-confirming an already-confirmed key is a no-op,
+ *                 not a double charge, and is reported as confirmed.
+ *             results:
+ *               type: array
+ *               description: >-
+ *                 Per-key outcome, in the order sent. A batch is not all-or-nothing: files
+ *                 that pass are promoted and charged even when others in the same call are
+ *                 rejected. If EVERY key fails the request itself fails instead (400/402),
+ *                 so a single-key confirm behaves exactly as it always has.
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   key:    { type: string }
+ *                   status: { type: string, enum: [confirmed, rejected] }
+ *                   reason: { type: string, description: 'Rejected only — why, in words fit to show the user.' }
+ *                   code:
+ *                     type: string
+ *                     enum: [VALIDATION_ERROR, QUOTA_EXCEEDED]
+ *                     description: >-
+ *                       Rejected only. QUOTA_EXCEEDED means the account ran out of room
+ *                       mid-batch — worth an upgrade prompt rather than a per-file error.
  */
