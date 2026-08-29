@@ -71,7 +71,9 @@ npm run test:only   # run tests without re-preparing the DB
 | Auth (OTP login, admin login, refresh, logout) | `/api/v1/auth` | public / bearer |
 | User profile + billing | `/api/v1/users/me` | bearer |
 | Public catalog (categories, templates, themes, tags, sizes, faqs, testimonials, banners, special-events) | `/api/v1/*` | optional (premium unlock + higher rate limit when logged in) |
-| Businesses, products, frames, projects, project exports | `/api/v1/{businesses,products,frames,projects}` | bearer (owner-scoped) |
+| Businesses, products, projects, project exports | `/api/v1/{businesses,products,projects}` | bearer (owner-scoped) |
+| Frames store (browse, add a free frame, buy a premium one, My Frames) | `/api/v1/frames` | optional to browse, bearer to own |
+| Quota (usage + breakdown, top-up packs, buy more) | `/api/v1/quota` | optional to browse packs, bearer for usage |
 | Subscriptions (plans, coupon verify, initiate, payment verify) | `/api/v1/subscriptions` | bearer |
 | Razorpay webhook | `POST /api/v1/subscriptions/webhook` | HMAC signature |
 | Admin (RBAC-gated CRUD, user admin, audit log) | `/api/v1/admin/*` | bearer + admin permission |

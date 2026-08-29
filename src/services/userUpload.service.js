@@ -30,7 +30,10 @@ const SLOTS = {
   business_logo:  'logo',
   business_cover: 'cover',
   product_image:  'products',
-  user_frame:     'frames',
+  // NOTE: there was a `user_frame` slot here. Frames are now admin-authored
+  // catalogue content that users buy or add (see services/frame.service.js), not
+  // files a user uploads, so the slot is retired — presigning one is rejected.
+  // Migration 20260101000028 refunded the storage the old uploads were holding.
   // "My Uploads" — the images a user brings into the editor. Unlike the slots
   // above, these are not saved onto a record: the upload IS the thing, so the
   // ledger row is what the library lists.
@@ -258,7 +261,7 @@ async function promoteOne(item, { userId, mine, slotOf }) {
     height:            posIntOrNull(item.height),
     original_filename: item.filename ? String(item.filename).slice(0, 255) : null,
   });
-  await quota.consume(userId, 'storage', bytes);
+  await quota.consume(userId, 'storage', bytes, { source: 'upload', ref_type: 'user_upload' });
 }
 
 const posIntOrNull = (v) => {
@@ -276,11 +279,14 @@ const posIntOrNull = (v) => {
 // null limit/remaining = unlimited, or a free account where the limit is recorded
 // but not enforced. `used_bytes` is real either way.
 async function storageQuota(userId) {
-  const { limit, used, remaining } = await quota.snapshot(userId, 'storage');
+  const { limit, used, remaining, topup_granted } = await quota.snapshot(userId, 'storage');
   return {
     limit_bytes:      limit,
     used_bytes:       used,
     remaining_bytes:  remaining,
+    // Purchased capacity, already included in `remaining`. Reported separately so
+    // a client can say "100 MB plan + 500 MB bought" rather than one opaque total.
+    topup_bytes:      topup_granted,
     unlimited:        limit === null,
     max_upload_bytes: MAX_UPLOAD_BYTES,
   };
@@ -336,7 +342,7 @@ async function release(key, userId) {
 
   await s3.deleteFile(key);
   await row.destroy();
-  await quota.release(userId, 'storage', Number(row.bytes));
+  await quota.release(userId, 'storage', Number(row.bytes), { source: 'upload', ref_type: 'user_upload' });
 }
 
 // Convenience for a field swap: release the old file when it is actually being

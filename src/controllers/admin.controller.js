@@ -1,5 +1,7 @@
 const adminService    = require('../services/admin.service');
 const templateService = require('../services/template.service');
+const frameService    = require('../services/frame.service');
+const quotaPackService = require('../services/quotaPack.service');
 const activity        = require('../services/activity.service');
 const uploadService   = require('../services/upload.service');
 const feedbackService = require('../services/feedback.service');
@@ -253,6 +255,35 @@ const listTemplates = async (req, res) => {
   res.json({ success: true, data: result.rows, meta: { total: result.count } });
 };
 
+const listFrames = async (req, res) => {
+  const result = await frameService.listFramesForAdmin(req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+// ---- Quota top-ups ----
+
+const listQuotaPacks = async (req, res) => {
+  const result = await quotaPackService.listForAdmin(req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+const listUserQuotaGrants = async (req, res) => {
+  const grants = await quotaPackService.listGrantsForUser(req.params.uid);
+  res.json({ success: true, data: grants });
+};
+
+const grantUserQuota = async (req, res) => {
+  const grant = await quotaPackService.grantToUser(req.params.uid, req.body);
+  await activity.log(req, { action: 'grant_quota', entityType: 'user_quota_grant', entityId: grant.id });
+  res.status(201).json({ success: true, data: grant });
+};
+
+const revokeQuotaGrant = async (req, res) => {
+  const result = await quotaPackService.revokeGrant(req.params.uid);
+  await activity.log(req, { action: 'revoke_quota', entityType: 'user_quota_grant', entityId: req.params.uid });
+  res.json({ success: true, data: result });
+};
+
 // `Industries` is the current public name for business categories (matching the
 // `industry_ids` key the PUT takes). `BusinessCategories` — the raw Sequelize include
 // key — is kept as a deprecated duplicate so existing clients don't break.
@@ -470,4 +501,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, confirmTemplateBundle, resetTemplateBundle };
+module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

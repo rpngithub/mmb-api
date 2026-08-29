@@ -38,6 +38,8 @@ const {
 } = require('../validators/upload.validator');
 const { bundleConfirmSchema } = require('../validators/templateBundle.validator');
 const templatePublish = require('../services/templatePublish');
+const framePublish    = require('../services/framePublish');
+const quotaPackService = require('../services/quotaPack.service');
 const couponRules     = require('../services/couponRules');
 const { createAppSettingSchema, updateAppSettingSchema } = require('../validators/appSetting.validator');
 const {
@@ -62,6 +64,12 @@ const {
   createTemplateSchema, updateTemplateSchema, setTemplateRelationsSchema,
   createTemplateSizeSchema, updateTemplateSizeSchema,
 } = require('../validators/template.validator');
+const {
+  createFrameSchema, updateFrameSchema, createFrameCategorySchema, updateFrameCategorySchema,
+} = require('../validators/frame.validator');
+const {
+  createQuotaPackSchema, updateQuotaPackSchema, adminGrantSchema,
+} = require('../validators/quotaPack.validator');
 
 /**
  * @swagger
@@ -491,6 +499,155 @@ router.use('/roles', adminCrud({
  *       403: { description: Missing templates.read }
  */
 router.get('/templates', authenticate, authorizeAdmin('templates.read'), controller.listTemplates);
+
+// Same override for frames: the generic factory's list has no paging or search,
+// which a growing store outgrows. Create/update/delete and GET /:uid (full
+// content, any status) still come from the factory below.
+/**
+ * @swagger
+ * /admin/frames:
+ *   get:
+ *     summary: List frames for admin (all statuses, paginated, filterable)
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: status,      schema: { type: string, enum: [active, inactive, draft] }, description: "Omit to list all statuses. `active` IS the published state — only these appear in the public GET /frames." }
+ *       - { in: query, name: search,      schema: { type: string }, description: Name contains }
+ *       - { in: query, name: category_id, schema: { type: integer } }
+ *       - { in: query, name: frame_type,  schema: { type: string, enum: [static, animated] } }
+ *       - { in: query, name: is_premium,  schema: { type: integer, enum: [0, 1] } }
+ *       - { in: query, name: limit,       schema: { type: integer, default: 30, maximum: 100 } }
+ *       - { in: query, name: offset,      schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: >-
+ *           Paged frames (meta.total), ordered by display_order then newest, with `content`
+ *           excluded. Each row carries `has_content`, `has_thumbnail`, `is_publishable` and
+ *           `missing_for_publish` — the very list the publish gate would throw — so an
+ *           "incomplete" column and a publish checklist need no request per row.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FrameAdminListResponse' } } }
+ *       403: { description: Missing frames.read }
+ */
+router.get('/frames', authenticate, authorizeAdmin('frames.read'), controller.listFrames);
+
+// ---- Quota top-ups ----
+// Same override pattern as /frames above: create/update/delete/get-one still come
+// from the adminCrud factory below, but the LIST is hand-written so each row can
+// carry `is_publishable` + `missing_for_publish`.
+/**
+ * @swagger
+ * /admin/quota-packs:
+ *   get:
+ *     summary: List top-up packs (paged, with publish readiness)
+ *     description: >
+ *       Every row carries `is_publishable` and `missing_for_publish` — the very list the
+ *       publish gate would throw — so a checklist needs no request per row.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [draft, active, inactive] }
+ *       - in: query
+ *         name: feature_type_id
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 30, maximum: 100 }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer, default: 0 }
+ *     responses:
+ *       200:
+ *         description: Paged packs (meta.total).
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/QuotaPackAdminListResponse' } } }
+ *       403: { description: Missing quota_packs.read }
+ */
+router.get('/quota-packs', authenticate, authorizeAdmin('quota_packs.read'), controller.listQuotaPacks);
+
+/**
+ * @swagger
+ * /admin/users/{uid}/quota-grants:
+ *   get:
+ *     summary: A user's quota grants (purchased and hand-granted)
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200:
+ *         description: "Grants, newest first. `quantity` is in the feature's own unit; `consumed` only moves for monthly features."
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/UserQuotaGrantListResponse' } } }
+ *       403: { description: Missing quota_packs.update }
+ *       404: { description: User not found }
+ *   post:
+ *     summary: Grant quota to a user directly
+ *     description: >
+ *       For support: a failed generation, a goodwill credit, a refund settled outside
+ *       Razorpay. Recorded as a grant like any purchase, so it spends and reports
+ *       identically — `source` and `note` are what mark it as hand-issued.
+ *
+ *
+ *       Active immediately; there is no payment to wait for.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [feature, quantity, note]
+ *             properties:
+ *               feature:  { type: string, example: ai_credits, description: "feature_types key. Must be marked top-uppable." }
+ *               quantity: { type: integer, example: 100, description: "In the feature's own unit — credits, or MB for storage." }
+ *               note:     { type: string, example: "Ticket 4821 — generation failed, credits refunded", description: "Required. A grant with no reason is indistinguishable from a mistake later." }
+ *     responses:
+ *       201:
+ *         description: The grant.
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/UserQuotaGrantResponse' } } }
+ *       400: { description: "Validation error, or the feature is not enabled for top-ups" }
+ *       403: { description: Missing quota_packs.update }
+ *       404: { description: User or feature not found }
+ */
+router.get('/users/:uid/quota-grants', authenticate, authorizeAdmin('quota_packs.update'), controller.listUserQuotaGrants);
+router.post('/users/:uid/quota-grants', authenticate, authorizeAdmin('quota_packs.update'), validate(adminGrantSchema), controller.grantUserQuota);
+
+/**
+ * @swagger
+ * /admin/quota-grants/{uid}:
+ *   delete:
+ *     summary: Revoke a quota grant
+ *     description: >
+ *       Sets the grant to `revoked`; the row is kept as the audit record. Its quantity
+ *       and its consumed leave the balance together, so revoking a fully-spent grant
+ *       changes nothing rather than clawing back quota already used.
+ *
+ *
+ *       For storage this can leave an account occupying more than its ceiling — further
+ *       uploads are refused, and nothing they already own is deleted.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: "Revoked ({ success: true })" }
+ *       403: { description: Missing quota_packs.delete }
+ *       404: { description: Grant not found }
+ *       409: { description: "Only an active grant can be revoked (a pending purchase should be refunded instead)" }
+ */
+router.delete('/quota-grants/:uid', authenticate, authorizeAdmin('quota_packs.delete'), controller.revokeQuotaGrant);
 
 // ---- Template bundle ingest (Design B; files uploaded direct to templates/<uid>/ via the
 //      generic upload endpoints, then finalized here). Registered before the generic
@@ -1090,6 +1247,16 @@ const COld = (path, successor, opts) => router.use(path, deprecated(successor), 
 // it the admin panel's checklist is bypassable with a direct PATCH.
 C('/templates',           { model: models.Template,         resource: 'template',          permission: 'templates', unique: ['name'], createSchema: createTemplateSchema, updateSchema: updateTemplateSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => templatePublish.assertPublishable(row, payload) });
 C('/template-categories', { model: models.TemplateCategory, resource: 'template_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, reorderable: true, createSchema: createTemplateCategorySchema, updateSchema: updateTemplateCategorySchema });
+// Frames are authored like templates and gated the same way, but paid for per
+// frame rather than by plan — so the publish gate also insists price and
+// is_premium agree (see services/framePublish.js). `frames` is its own permission
+// domain: the store is a storefront, and pricing it is not the same authority as
+// filing a template.
+//
+// `reorderable` drives the store's display_order (the shelf is hand-curated, so
+// the panel needs drag-reorder, not one PATCH per card).
+C('/frames',              { model: models.Frame,            resource: 'frame',            permission: 'frames', unique: ['name'], reorderable: true, filterable: ['status', 'frame_type', 'category_id', 'is_premium'], createSchema: createFrameSchema, updateSchema: updateFrameSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => framePublish.assertPublishable(row, payload), include: [{ model: models.FrameCategory }] });
+C('/frame-categories',    { model: models.FrameCategory,    resource: 'frame_category',   permission: 'frames', unique: ['name', 'slug'], autoSlug: true, reorderable: true, createSchema: createFrameCategorySchema, updateSchema: updateFrameCategorySchema });
 // The moderation queue for user-suggested sub-industries ("Others" at signup) is
 // just `GET /admin/business-categories?status=pending` — `suggestedBy` names who
 // asked for it. `beforeWrite` keeps `status` and `is_active` from drifting apart:
@@ -1144,6 +1311,15 @@ C('/plan-billing-options',{ model: models.PlanBillingOption, resource: 'plan_bil
 C('/plan-features',       { model: models.PlanFeature,      resource: 'plan_feature',     permission: 'plans', idField: 'id', hasUid: false, filterable: ['plan_id', 'feature_type_id'], createSchema: createPlanFeatureSchema, updateSchema: updatePlanFeatureSchema });
 C('/feature-types',       { model: models.FeatureType,      resource: 'feature_type',     permission: 'features', idField: 'id', hasUid: false, createSchema: createFeatureTypeSchema, updateSchema: updateFeatureTypeSchema });
 C('/coupons',             { model: models.Coupon,           resource: 'coupon',           permission: 'coupons', unique: ['code'], filterable: ['status', 'applicable_to', 'target_audience'], createSchema: createCouponSchema, updateSchema: updateCouponSchema, beforeWrite: (payload, row) => couponRules.assertCouponConsistent(payload, row) });
+// Top-up packs sit with plans and coupons, NOT with the content domains: pricing a
+// pack is a commerce decision, so `quota_packs` is deliberately absent from
+// content_admin and only super_admin (`*`) holds it out of the box.
+//
+// `beforeWrite` is the publish gate. It has to resolve the feature type first —
+// the checklist's "is this feature even top-uppable?" lives there, not on the pack
+// — which is why it goes through the service rather than calling the gate directly.
+// `reorderable` drives the shelf order on the buy screen.
+C('/quota-packs',         { model: models.QuotaPack,        resource: 'quota_pack',       permission: 'quota_packs', unique: ['name'], reorderable: true, filterable: ['status', 'feature_type_id'], createSchema: createQuotaPackSchema, updateSchema: updateQuotaPackSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => quotaPackService.assertPackWritable(payload, row), include: [{ model: models.FeatureType }] });
 C('/app-settings',        { model: models.AppSetting,       resource: 'app_setting',      permission: 'settings', idField: 'id', hasUid: false, createSchema: createAppSettingSchema, updateSchema: updateAppSettingSchema });
 
 module.exports = router;

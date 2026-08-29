@@ -16,6 +16,7 @@ const IMAGE_SLOTS = {
   variant_badge_icon:          'variants/badge-icon',
   theme_thumbnail:             'variants/thumbnail',   // deprecated alias of variant_thumbnail
   special_event_thumbnail:     'events/thumbnail',
+  frame_thumbnail:             'frames/thumbnail',
   special_event_banner:        'events/banner',
   banner:                      'banners',
   testimonial:                 'testimonials',
@@ -33,7 +34,7 @@ const { ASSET_TYPES } = require('./../utils/assetTypes');
 // Any final key must live under one of these roots (re-validated on multipart complete/abort).
 // 'themes/' is retained deliberately: thumbnails uploaded before the Brand Series rename
 // still live there, and their stored keys must keep validating on re-save.
-const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/', 'fonts/'];
+const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/', 'fonts/', 'frames/'];
 
 const bad = (field, message) => new ValidationError('Validation failed', [{ field, message }]);
 

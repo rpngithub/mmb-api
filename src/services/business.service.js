@@ -7,6 +7,7 @@ const userUpload      = require('./userUpload.service');
 const quota           = require('./quota.service');
 const productService  = require('./product.service');
 const fontService     = require('./font.service');
+const frameService    = require('./frame.service');
 const variantAccess   = require('./variantAccess.service');
 const { sequelize, Variant, VariantBadge, Plan, Template, Tag, Font, BusinessCategory, BusinessVariant } = require('../models');
 const { resolveRef, pick } = require('../utils/catalogRef');
@@ -203,6 +204,16 @@ async function assertFontsUsable(fields, userId) {
   }
 }
 
+// ---- Active frame ----
+
+// You may only apply a frame that is on your own shelf. Same reasoning as fonts:
+// without this a crafted id would mount any frame in the catalogue, including the
+// premium ones nobody paid for. Clearing it (null) is always allowed.
+async function assertFrameUsable(fields, userId) {
+  if (fields.active_frame_id === undefined) return;
+  await frameService.assertUsable(fields.active_frame_id, userId);
+}
+
 // ---- Watermark ----
 
 // Stamping your own logo on a design is a paid capability, so switching it ON is
@@ -317,6 +328,7 @@ async function createBusiness(userId, data) {
     await assertOwnedImages(fields, userId);
     await assertWatermarkAllowed(fields, userId);
     await assertFontsUsable(fields, userId);
+    await assertFrameUsable(fields, userId);
     if (fields.brand_colors !== undefined) fields.brand_colors = normalizeBrandColors(fields.brand_colors);
     const payload  = await resolveIndustry(fields, userId, t);
     const tagIds   = await resolveKeywords(keywords, t);
@@ -359,6 +371,7 @@ async function updateBusiness(uid, userId, data) {
     await assertOwnedImages(fields, userId);
     await assertWatermarkAllowed(fields, userId);
     await assertFontsUsable(fields, userId);
+    await assertFrameUsable(fields, userId);
     if (fields.brand_colors !== undefined) fields.brand_colors = normalizeBrandColors(fields.brand_colors);
     const payload = await resolveIndustry(fields, userId, t);
     const tagIds  = await resolveKeywords(keywords, t);

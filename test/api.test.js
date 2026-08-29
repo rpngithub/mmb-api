@@ -13,7 +13,7 @@ const { JWT_SECRET } = require('../src/config/jwt');
 
 const P = '/api/v1';
 let startLogId = 0;
-const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [] };
+const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -39,6 +39,12 @@ after(async () => {
   if (track.assetCategories.length)    await models.AssetCategory.destroy({ where: { id: track.assetCategories } });
   if (track.users.length)     await User.destroy({ where: { id: track.users } }); // cascades (incl. subscriptions)
   if (track.fonts.length)     await models.Font.destroy({ where: { id: track.fonts } }); // cascades files + languages
+  // AFTER users: user_frames pins its frame with ON DELETE RESTRICT, so the
+  // ownership rows have to go with their owner before the frame itself can.
+  if (track.frames.length)          await models.Frame.destroy({ where: { id: track.frames } });
+  if (track.frameCategories.length) await models.FrameCategory.destroy({ where: { id: track.frameCategories } });
+  // Also after users: a grant pins its pack, and grants go with their owner.
+  if (track.quotaPacks.length) await models.QuotaPack.destroy({ where: { id: track.quotaPacks } });
   if (track.coupons.length)   await models.Coupon.destroy({ where: { id: track.coupons } }); // cascades plan restrictions
   await ActivityLog.destroy({ where: { id: { [require('sequelize').Op.gt]: startLogId } } });
   await h.stop();
@@ -2122,6 +2128,41 @@ test('custom sub-industry requires an industry, and a rejected name is refused',
   assert.equal(retry.status, 400, 'a previously rejected industry cannot be re-suggested');
 });
 
+// One business per account, so an owner who already finished signup can only reach
+// "Others" by editing — the same path the Postman collection and the playground use,
+// since a second POST /businesses is a 409 for them.
+test('custom sub-industry can also be filed from PATCH /businesses/{uid}', async () => {
+  const stamp    = Date.now() + 5;
+  const { parent } = await mkKeywordFixture(stamp);
+  const owner    = await mkUser('SugPatch');
+  const token    = h.userTokenFor(owner.id);
+  const customName = `TST Patched Kitchen ${stamp}`;
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Sug Patch Biz ${stamp}`, industry: parent.slug },
+  });
+  assert.equal(created.status, 201);
+  const uid = created.body.data.uid;
+
+  const patched = await h.request('PATCH', `${P}/businesses/${uid}`, {
+    token, body: { industry: parent.slug, custom_sub_industry: customName },
+  });
+  assert.equal(patched.status, 200);
+
+  const suggested = await models.BusinessCategory.findOne({ where: { name: customName } });
+  track.businessCategories.push(suggested.id);
+  assert.equal(suggested.status, 'pending');
+  assert.equal(suggested.parent_id, parent.id);
+  assert.equal(suggested.suggested_by_user_id, owner.id);
+  assert.equal(patched.body.data.category_id, suggested.id, 'the business moves onto the suggestion');
+
+  // Still mutually exclusive on the update schema, not just on create.
+  const both = await h.request('PATCH', `${P}/businesses/${uid}`, {
+    token, body: { industry: parent.slug, sub_industry: parent.slug, custom_sub_industry: 'TST Nope' },
+  });
+  assert.equal(both.status, 400);
+});
+
 // ---------- Signup step 2: BUSINESS vs PERSONAL ----------
 test('PATCH /users/me is an allow-list: server-owned columns are not writable', async () => {
   const u     = await mkUser('MassAssign');
@@ -2434,7 +2475,7 @@ test('confirm reports each key separately and keeps the good files in a partly b
   });
 });
 
-test('a user cannot save an s3_key that was not issued to them (logo, product image, frame, photo)', async () => {
+test('a user cannot save an s3_key that was not issued to them (logo, product image, photo)', async () => {
   const owner    = await mkUser('KeyOwner');
   const stranger = await mkUser('KeyThief');
   const token    = h.userTokenFor(owner.id);
@@ -2466,11 +2507,6 @@ test('a user cannot save an s3_key that was not issued to them (logo, product im
     token, body: { s3_key: `users/${stranger.uid}/products/stolen.png` },
   })).status, 400);
 
-  // Frame.
-  assert.equal((await h.request('POST', `${P}/frames`, {
-    token, body: { name: 'TST Key Frame', s3_key: `users/${stranger.uid}/frames/stolen.png` },
-  })).status, 400);
-
   // Profile photo.
   assert.equal((await h.request('PATCH', `${P}/users/me`, {
     token: thiefTok, body: { profile_photo_s3_key: `users/${owner.uid}/profile/stolen.jpg` },
@@ -2497,11 +2533,6 @@ test('own keys save normally across every slot, and null clears', async () => {
   const photo = `users/${owner.uid}/profile/${uuid()}.jpg`;
   assert.equal((await h.request('PATCH', `${P}/users/me`, { token, body: { profile_photo_s3_key: photo } }))
     .body.data.profile_photo_s3_key, photo);
-
-  const frame = await h.request('POST', `${P}/frames`, {
-    token, body: { name: 'TST Own Frame', s3_key: `users/${owner.uid}/frames/${uuid()}.png` },
-  });
-  assert.equal(frame.status, 201);
 
   const product = (await h.request('POST', `${P}/products`, {
     token, body: { business_uid: biz.uid, name: 'TST Own Product' },
@@ -2549,13 +2580,13 @@ test('storage is charged to storage_used_bytes on confirm, once per key', async 
 
   assert.equal(await storageUsed(userId), 0);
 
-  const { key, status } = await uploadOf(token, 'user_frame', 2 * MB);
+  const { key, status } = await uploadOf(token, 'media_library', 2 * MB);
   assert.equal(status, 200);
   assert.equal(await storageUsed(userId), 2 * MB, 'charged to the bytes column, not a phantom storage_count');
 
   const ledger = await models.UserUpload.findOne({ where: { s3_key: key } });
   assert.equal(Number(ledger.bytes), 2 * MB);
-  assert.equal(ledger.slot, 'user_frame');
+  assert.equal(ledger.slot, 'media_library');
 
   // Re-confirming the same key (a client retry) must not charge twice.
   await withStubbedS3(async () => {
@@ -2616,14 +2647,13 @@ test('deleting the file that used the storage gives the bytes back', async () =>
   const userId = await userWithActivePlan(1, 9102);
   const token  = h.userTokenFor(userId);
 
-  const { key } = await uploadOf(token, 'user_frame', 3 * MB);
+  const { key } = await uploadOf(token, 'media_library', 3 * MB);
   assert.equal(await storageUsed(userId), 3 * MB);
 
-  const frame = await h.request('POST', `${P}/frames`, { token, body: { name: 'TST Quota Frame', s3_key: key } });
-  assert.equal(frame.status, 201);
+  const ledger = await models.UserUpload.findOne({ where: { s3_key: key } });
 
   await withStubbedS3(async (calls) => {
-    const del = await h.request('DELETE', `${P}/frames/${frame.body.data.uid}`, { token });
+    const del = await h.request('DELETE', `${P}/uploads/${ledger.uid}`, { token });
     assert.equal(del.status, 200);
     assert.deepEqual(calls.deleted, [key], 'the object is removed, not just the row');
   });
@@ -2664,7 +2694,7 @@ test('an upload over the plan limit is refused and deleted, not stored', async (
 
   await withStorageLimitMb(5, async () => {
     // Fits.
-    const ok = await uploadOf(token, 'user_frame', 4 * MB);
+    const ok = await uploadOf(token, 'media_library', 4 * MB);
     assert.equal(ok.status, 200);
     assert.equal(await storageUsed(userId), 4 * MB);
 
@@ -2672,7 +2702,7 @@ test('an upload over the plan limit is refused and deleted, not stored', async (
     // behind active (it would never be swept: the lifecycle rule only sees pending).
     await withStubbedS3(async (calls) => {
       const key = (await h.request('POST', `${P}/uploads/presign`, {
-        token, body: { target: { slot: 'user_frame' }, filename: 'big.png' },
+        token, body: { target: { slot: 'media_library' }, filename: 'big.png' },
       })).body.data.key;
       const over = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
       assert.equal(over.status, 402, 'QUOTA_EXCEEDED');
@@ -2687,7 +2717,7 @@ test('an upload over the plan limit is refused and deleted, not stored', async (
     // a file that confirm would only throw away.
     await withStorageLimitMb(4, async () => {
       const r = await h.request('POST', `${P}/uploads/presign`, {
-        token, body: { target: { slot: 'user_frame' }, filename: 'x.png' },
+        token, body: { target: { slot: 'media_library' }, filename: 'x.png' },
       });
       assert.equal(r.status, 402);
     });
@@ -2697,7 +2727,7 @@ test('an upload over the plan limit is refused and deleted, not stored', async (
 test('GET /subscriptions/me reports storage in MB, with exact bytes alongside', async () => {
   const userId = await userWithActivePlan(1, 9105);          // Free: 100 MB
   const token  = h.userTokenFor(userId);
-  await uploadOf(token, 'user_frame', Math.round(2.5 * MB));
+  await uploadOf(token, 'media_library', Math.round(2.5 * MB));
 
   const me = await h.request('GET', `${P}/subscriptions/me`, { token });
   assert.equal(me.status, 200);
@@ -2719,7 +2749,7 @@ test('an unlimited plan records storage but never blocks', async () => {
   const userId = await userWithActivePlan(2, 9106);          // Pro: unlimited
   const token  = h.userTokenFor(userId);
 
-  const ok = await uploadOf(token, 'user_frame', 9 * MB);
+  const ok = await uploadOf(token, 'media_library', 9 * MB);
   assert.equal(ok.status, 200);
   assert.equal(await storageUsed(userId), 9 * MB, 'still recorded, so a later policy change needs no backfill');
 
@@ -4036,4 +4066,954 @@ test('a font can no longer be filed as an asset â€” fonts belong to the fon
   const { ASSET_TYPES } = require('../src/utils/assetTypes');
   assert.ok(!ASSET_TYPES.includes('font'));
   assert.deepEqual(require('../src/services/upload.service').ASSET_TYPES, ASSET_TYPES);
+});
+
+// ---------- Frames: the store, ownership and purchase ----------
+// Razorpay has no test double, so order creation is swapped out. Everything after
+// the order — the pending row, the webhook, the grant — is the real code path.
+const withStubbedRazorpay = async (fn) => {
+  const rzp      = require('../src/utils/razorpayHelper');
+  const original = rzp.createOrder;
+  const calls    = [];
+  rzp.createOrder = async (amount, currency, receipt) => {
+    calls.push({ amount, currency, receipt });
+    return { id: `order_frame_${calls.length}_${Date.now()}` };
+  };
+  try { return await fn(calls); } finally { rzp.createOrder = original; }
+};
+
+let frameSeq = 0;
+const mkFrameCategory = async (over = {}) => {
+  const stamp = `${Date.now()}${frameSeq++}`;
+  const c = await models.FrameCategory.create({
+    uid: uuid(), name: `TST Frame Cat ${stamp}`, slug: `tst-frame-cat-${stamp}`, ...over,
+  });
+  track.frameCategories.push(c.id);
+  return c;
+};
+
+// A publishable frame by default — the gate is exercised explicitly below.
+const mkFrame = async (over = {}) => {
+  const stamp = `${Date.now()}${frameSeq++}`;
+  const f = await models.Frame.create({
+    uid: uuid(), name: `TST Frame ${stamp}`, content: '{"layers":[]}',
+    thumbnail_s3_key: 'frames/thumbnail/x.png', status: 'active', ...over,
+  });
+  track.frames.push(f.id);
+  return f;
+};
+
+test('the frames store lists active frames by tab and category, without the design payload', async () => {
+  const branding    = await mkFrameCategory();
+  const promotional = await mkFrameCategory();
+
+  const free     = await mkFrame({ category_id: branding.id, frame_type: 'static' });
+  const animated = await mkFrame({ category_id: branding.id, frame_type: 'animated' });
+  const other    = await mkFrame({ category_id: promotional.id, frame_type: 'static' });
+  const draft    = await mkFrame({ category_id: branding.id, status: 'draft' });
+
+  const all = await h.request('GET', `${P}/frames?category=${branding.slug}`);
+  assert.equal(all.status, 200, 'the store is public — no anchor required, unlike templates');
+  const ids = all.body.data.map((f) => f.id);
+  assert.ok(ids.includes(free.id) && ids.includes(animated.id));
+  assert.ok(!ids.includes(other.id), 'a different category is filtered out');
+  assert.ok(!ids.includes(draft.id), 'drafts never reach the store');
+
+  assert.equal(all.body.data.find((f) => f.id === free.id).content, undefined,
+    'the design payload is never in a list response');
+
+  const animatedTab = await h.request('GET', `${P}/frames?category=${branding.slug}&frame_type=animated`);
+  assert.deepEqual(animatedTab.body.data.map((f) => f.id), [animated.id],
+    'the two tabs are a filter, not two endpoints');
+
+  // A category that does not resolve empties the shelf rather than widening it.
+  const bogus = await h.request('GET', `${P}/frames?category=no-such-frame-category`);
+  assert.deepEqual(bogus.body.data, []);
+
+  const chips = await h.request('GET', `${P}/frames/categories`);
+  assert.equal(chips.status, 200);
+  const chipIds = chips.body.data.map((c) => c.id);
+  assert.ok(chipIds.includes(branding.id) && chipIds.includes(promotional.id));
+});
+
+test('a free frame is added to My Frames, and only then is its content served', async () => {
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id });
+  const u     = await mkUser('FrameFree');
+  const token = h.userTokenFor(u.id);
+
+  // A free frame is never `is_locked` — that flag means "costs money you have not
+  // paid", the same as on a store card. But the payload still waits until it is on
+  // the shelf, so "My Frames" stays an honest record rather than something the
+  // editor bypasses. `owned`, not `is_locked`, is what governs content.
+  const before = await h.request('GET', `${P}/frames/${frame.uid}`, { token });
+  assert.equal(before.body.data.owned, false);
+  assert.equal(before.body.data.is_locked, false, 'free frames are never locked, on a card or in detail');
+  assert.equal(before.body.data.content, undefined, 'but the payload still needs an add');
+
+  const added = await h.request('POST', `${P}/frames/${frame.uid}/add`, { token });
+  assert.equal(added.status, 201);
+  assert.equal(added.body.data.acquired_via, 'free');
+  assert.equal(added.body.data.status, 'active');
+
+  const after = await h.request('GET', `${P}/frames/${frame.uid}`, { token });
+  assert.equal(after.body.data.owned, true);
+  assert.equal(after.body.data.is_locked, false);
+  assert.equal(after.body.data.content, '{"layers":[]}', 'the payload is released to an owner');
+
+  const mine = await h.request('GET', `${P}/frames/mine`, { token });
+  assert.deepEqual(mine.body.data.map((r) => r.Frame.uid), [frame.uid]);
+
+  assert.equal((await h.request('POST', `${P}/frames/${frame.uid}/add`, { token })).status, 409, 'already owned');
+
+  // The store marks it, so the grid needs no per-card request.
+  const store = await h.request('GET', `${P}/frames?category=${cat.slug}`, { token });
+  assert.equal(store.body.data.find((f) => f.id === frame.id).owned, true);
+
+  assert.equal((await h.request('GET', `${P}/frames/mine`)).status, 401);
+});
+
+test('a premium frame cannot be added for free, and buying it grants it on payment', async () => {
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id, is_premium: 1, price: 30 });
+  const u     = await mkUser('FramePaid');
+  const token = h.userTokenFor(u.id);
+
+  assert.equal((await h.request('POST', `${P}/frames/${frame.uid}/add`, { token })).status, 403,
+    'the free path must not hand out a paid frame');
+
+  // `is_locked` reads the same on the card and in detail, so one badge drives both.
+  const card = (await h.request('GET', `${P}/frames?category=${cat.slug}`, { token }))
+    .body.data.find((f) => f.id === frame.id);
+  const detail = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data;
+  assert.equal(card.is_locked, true);
+  assert.equal(detail.is_locked, true, 'a premium frame is locked in both shapes');
+  assert.equal(detail.content, undefined);
+
+  const order = await withStubbedRazorpay(async (calls) => {
+    const r = await h.request('POST', `${P}/frames/${frame.uid}/purchase`, { token });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.data.type, 'one_time');
+    // 30 + 18% GST. The stored price is pre-tax; the gateway is handed the total.
+    assert.equal(r.body.data.amount, 35.4);
+    assert.equal(calls[0].amount, 35.4, 'the order is for the post-tax figure');
+    return r.body.data;
+  });
+
+  // Owned only once payment confirms — until then it is pending and invisible.
+  assert.deepEqual((await h.request('GET', `${P}/frames/mine`, { token })).body.data, []);
+  const pending = await models.UserFrame.findOne({ where: { user_id: u.id, frame_id: frame.id } });
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.acquired_via, 'purchase');
+
+  const payment = await models.Payment.findOne({ where: { uid: order.payment_uid } });
+  const evt = {
+    event: 'payment.captured',
+    payload: { payment: { entity: { id: `pay_frame_${u.id}`, order_id: payment.razorpay_order_id, amount: 3540 } } },
+  };
+  const { raw, sig } = signWebhook(evt);
+  const hook = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal(hook.status, 200);
+
+  const mine = await h.request('GET', `${P}/frames/mine`, { token });
+  assert.deepEqual(mine.body.data.map((r) => r.Frame.uid), [frame.uid],
+    'granted by the same webhook that activates a plan');
+  assert.equal((await models.Payment.findOne({ where: { uid: order.payment_uid } })).status, 'success');
+
+  // Replay changes nothing.
+  const replay = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal(replay.body.idempotent, true);
+  assert.equal((await h.request('GET', `${P}/frames/mine`, { token })).body.data.length, 1);
+
+  assert.equal((await h.request('POST', `${P}/frames/${frame.uid}/purchase`, { token })).status, 409, 'no buying it twice');
+});
+
+test('a purchased frame that was removed comes back free', async () => {
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id, is_premium: 1, price: 100 });
+  const u     = await mkUser('FrameRebuy');
+  const token = h.userTokenFor(u.id);
+
+  // Own it outright, the state the webhook would have left behind.
+  const owned = await models.UserFrame.create({
+    uid: uuid(), user_id: u.id, frame_id: frame.id, acquired_via: 'purchase',
+    status: 'active', acquired_at: new Date(),
+  });
+
+  const removed = await h.request('DELETE', `${P}/frames/mine/${frame.uid}`, { token });
+  assert.equal(removed.status, 200);
+  assert.deepEqual((await h.request('GET', `${P}/frames/mine`, { token })).body.data, []);
+  assert.equal((await models.UserFrame.findByPk(owned.id)).status, 'removed',
+    'the record is kept — it is the proof they already paid');
+
+  // Re-adding is free, through the same endpoint a free frame uses.
+  const back = await h.request('POST', `${P}/frames/${frame.uid}/add`, { token });
+  assert.equal(back.status, 201);
+  assert.equal((await h.request('GET', `${P}/frames/mine`, { token })).body.data.length, 1);
+
+  // And there is still nothing to charge for.
+  await withStubbedRazorpay(async (calls) => {
+    assert.equal((await h.request('POST', `${P}/frames/${frame.uid}/purchase`, { token })).status, 409);
+    assert.deepEqual(calls, [], 'no order is created for a frame already owned');
+  });
+
+  const stranger = await mkUser('FrameStranger');
+  assert.equal((await h.request('DELETE', `${P}/frames/mine/${frame.uid}`, { token: h.userTokenFor(stranger.id) })).status, 404,
+    'someone else cannot remove it');
+});
+
+test('a business can only apply a frame from its owner shelf', async () => {
+  const cat     = await mkFrameCategory();
+  const mine    = await mkFrame({ category_id: cat.id });
+  const unowned = await mkFrame({ category_id: cat.id, is_premium: 1, price: 50 });
+  const u       = await mkUser('FrameApply');
+  const token   = h.userTokenFor(u.id);
+
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Frame Biz ${Date.now()}`, industry: 'restaurant-food' },
+  })).body.data;
+
+  // Not on the shelf yet — a crafted id must not mount a frame nobody paid for.
+  assert.equal((await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: unowned.id } })).status, 400);
+  assert.equal((await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: mine.id } })).status, 400,
+    'owning nothing means applying nothing, even for a free frame');
+
+  await h.request('POST', `${P}/frames/${mine.uid}/add`, { token });
+  const applied = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: mine.id } });
+  assert.equal(applied.status, 200);
+  assert.equal(applied.body.data.active_frame_id, mine.id);
+
+  const cleared = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: null } });
+  assert.equal(cleared.body.data.active_frame_id, null, 'null takes the frame off');
+});
+
+test('the admin publish gate holds a frame back until it is complete and priced coherently', async () => {
+  const token = h.adminToken();
+  const cat   = await mkFrameCategory();
+  const stamp = `${Date.now()}${frameSeq++}`;
+
+  const created = await h.request('POST', `${P}/admin/frames`, { token, body: { name: `TST Gate Frame ${stamp}` } });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.data.status, 'draft', 'a new frame is always a draft');
+  track.frames.push(created.body.data.id);
+  const uid = created.body.data.uid;
+
+  const bare = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { status: 'active' } });
+  assert.equal(bare.status, 400);
+  const fields = bare.body.error.details.map((d) => d.field);
+  assert.ok(['category_id', 'content', 'thumbnail_s3_key'].every((f) => fields.includes(f)), fields.join(','));
+
+  await h.request('PATCH', `${P}/admin/frames/${uid}`, {
+    token, body: { category_id: cat.id, content: '{"layers":[]}', thumbnail_s3_key: 'frames/thumbnail/y.png' },
+  });
+
+  // Priced but not marked premium, and vice versa — both are refused, because the
+  // free path skips checkout entirely and would give away a frame with a price.
+  const priced = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { status: 'active', price: 30 } });
+  assert.equal(priced.status, 400);
+  assert.ok(priced.body.error.details.some((d) => d.field === 'price'));
+
+  const freePremium = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { status: 'active', is_premium: 1 } });
+  assert.equal(freePremium.status, 400, 'a premium frame priced at zero would be bought for nothing');
+
+  const ok = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { status: 'active', is_premium: 1, price: 30 } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.data.status, 'active');
+
+  // Frames are their own permission domain, separate from templates.
+  assert.equal((await h.request('GET', `${P}/admin/frames`, { token: h.adminToken(['templates.*']) })).status, 403);
+  assert.equal((await h.request('GET', `${P}/admin/frames`, { token: h.adminToken(['frames.*']) })).status, 200);
+});
+
+test('the retired user_frame upload slot is gone', async () => {
+  const u     = await mkUser('FrameSlot');
+  const token = h.userTokenFor(u.id);
+  const r = await h.request('POST', `${P}/uploads/presign`, {
+    token, body: { target: { slot: 'user_frame' }, filename: 'x.png' },
+  });
+  assert.equal(r.status, 400, 'frames are catalogue content now, not something a user uploads');
+});
+
+test('the admin frames list pages, searches and reports the publish checklist per row', async () => {
+  const token = h.adminToken();
+  const cat   = await mkFrameCategory();
+  const tag   = `Pg${Date.now()}${frameSeq++}`;
+
+  // Three publishable, one deliberately incomplete.
+  const made = [];
+  // Drafts, so publishing made[0] below actually exercises the gate rather than
+  // hitting the already-active short circuit.
+  for (let i = 0; i < 3; i++) made.push(await mkFrame({ category_id: cat.id, name: `TST ${tag} Frame ${i}`, display_order: i, status: 'draft' }));
+  const incomplete = await mkFrame({ name: `TST ${tag} Incomplete`, content: null, thumbnail_s3_key: null, status: 'draft' });
+
+  const all = await h.request('GET', `${P}/admin/frames?search=${tag}`, { token });
+  assert.equal(all.status, 200);
+  assert.equal(all.body.meta.total, 4, 'meta.total counts the whole match, not the page');
+  assert.equal(all.body.data.length, 4);
+  assert.equal(all.body.data[0].content, undefined, 'the heavy payload stays out of the list');
+  assert.ok(all.body.data.some((f) => f.status === 'draft'), 'admin sees every status, unlike the store');
+
+  const paged = await h.request('GET', `${P}/admin/frames?search=${tag}&limit=2&offset=0`, { token });
+  assert.equal(paged.body.data.length, 2);
+  assert.equal(paged.body.meta.total, 4, 'total is unaffected by the page window');
+  const page2 = await h.request('GET', `${P}/admin/frames?search=${tag}&limit=2&offset=2`, { token });
+  assert.equal(page2.body.data.length, 2);
+  assert.deepEqual(
+    [...new Set([...paged.body.data, ...page2.body.data].map((f) => f.id))].length, 4,
+    'the two pages do not overlap',
+  );
+
+  // The checklist: exactly what the gate would reject, without fetching each row.
+  const bad = all.body.data.find((f) => f.id === incomplete.id);
+  assert.equal(bad.is_publishable, false);
+  assert.equal(Number(bad.has_content), 0);
+  assert.equal(Number(bad.has_thumbnail), 0);
+  const badFields = bad.missing_for_publish.map((m) => m.field);
+  assert.ok(['category_id', 'content', 'thumbnail_s3_key'].every((f) => badFields.includes(f)), badFields.join(','));
+
+  const good = all.body.data.find((f) => f.id === made[0].id);
+  assert.equal(good.is_publishable, true);
+  assert.deepEqual(good.missing_for_publish, []);
+
+  // The list agrees with the gate: what it calls publishable actually publishes.
+  const published = await h.request('PATCH', `${P}/admin/frames/${made[0].uid}`, { token, body: { status: 'active' } });
+  assert.equal(published.status, 200);
+  const refused = await h.request('PATCH', `${P}/admin/frames/${incomplete.uid}`, { token, body: { status: 'active' } });
+  assert.equal(refused.status, 400);
+  assert.deepEqual(
+    refused.body.error.details.map((d) => d.field).sort(),
+    badFields.sort(),
+    'the checklist and the gate are the same list, not two that can drift',
+  );
+
+  // Filters still narrow the paged list.
+  const drafts = await h.request('GET', `${P}/admin/frames?search=${tag}&status=draft`, { token });
+  assert.ok(drafts.body.data.every((f) => f.status === 'draft'));
+  assert.equal((await h.request('GET', `${P}/admin/frames?search=${tag}&category_id=${cat.id}`, { token })).body.meta.total, 3);
+
+  assert.equal((await h.request('GET', `${P}/admin/frames`, { token: h.adminToken(['templates.*']) })).status, 403);
+});
+
+test('publishing is a status flip, and unpublishing is always allowed', async () => {
+  const token = h.adminToken();
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id, status: 'draft' });
+  const u     = await mkUser('FramePublish');
+  const userToken = h.userTokenFor(u.id);
+
+  // A draft is invisible to the store and cannot even be fetched by uid.
+  assert.equal((await h.request('GET', `${P}/frames/${frame.uid}`)).status, 404);
+  assert.ok(!(await h.request('GET', `${P}/frames?category=${cat.slug}`)).body.data.some((f) => f.id === frame.id));
+
+  await h.request('PATCH', `${P}/admin/frames/${frame.uid}`, { token, body: { status: 'active' } });
+  assert.ok((await h.request('GET', `${P}/frames?category=${cat.slug}`)).body.data.some((f) => f.id === frame.id),
+    'published frames, and only those, reach the store');
+
+  // Someone adds it while it is live.
+  assert.equal((await h.request('POST', `${P}/frames/${frame.uid}/add`, { token: userToken })).status, 201);
+
+  // Unpublishing needs no checklist — it is never gated, even when the row would
+  // now fail to publish. Clearing the category is exactly that case.
+  const unpublished = await h.request('PATCH', `${P}/admin/frames/${frame.uid}`, { token, body: { status: 'inactive', category_id: null } });
+  assert.equal(unpublished.status, 200);
+  assert.equal(unpublished.body.data.status, 'inactive');
+  assert.ok(!(await h.request('GET', `${P}/frames?category=${cat.slug}`)).body.data.some((f) => f.id === frame.id),
+    'pulled from the store');
+
+  // It stays with whoever already owns it — retiring a frame is not a clawback.
+  const mine = await h.request('GET', `${P}/frames/mine`, { token: userToken });
+  assert.deepEqual(mine.body.data.map((r) => r.Frame.uid), [frame.uid]);
+
+  // And re-publishing runs the gate again on the now-incomplete row.
+  const rePublish = await h.request('PATCH', `${P}/admin/frames/${frame.uid}`, { token, body: { status: 'active' } });
+  assert.equal(rePublish.status, 400);
+  assert.ok(rePublish.body.error.details.some((d) => d.field === 'category_id'));
+});
+
+test('frames reorder in one transaction, and the store honours the order', async () => {
+  const token = h.adminToken();
+  const cat   = await mkFrameCategory();
+  const tag   = `Ord${Date.now()}${frameSeq++}`;
+  const a = await mkFrame({ category_id: cat.id, name: `TST ${tag} A`, display_order: 0 });
+  const b = await mkFrame({ category_id: cat.id, name: `TST ${tag} B`, display_order: 1 });
+  const c = await mkFrame({ category_id: cat.id, name: `TST ${tag} C`, display_order: 2 });
+
+  const storeOrder = async () => (await h.request('GET', `${P}/frames?category=${cat.slug}`)).body.data.map((f) => f.id);
+  assert.deepEqual(await storeOrder(), [a.id, b.id, c.id]);
+
+  const moved = await h.request('PATCH', `${P}/admin/frames/reorder`, { token, body: { ids: [c.uid, a.uid, b.uid] } });
+  assert.equal(moved.status, 200);
+  assert.deepEqual(await storeOrder(), [c.id, a.id, b.id], 'position in the array becomes display_order');
+
+  // All-or-nothing: one unknown id changes nothing.
+  const bad = await h.request('PATCH', `${P}/admin/frames/reorder`, { token, body: { ids: [a.uid, b.uid, uuid()] } });
+  assert.equal(bad.status, 404);
+  assert.deepEqual(await storeOrder(), [c.id, a.id, b.id], 'the failed batch left the order untouched');
+
+  assert.equal((await h.request('PATCH', `${P}/admin/frames/reorder`, { token: h.adminToken(['frames.read']), body: { ids: [a.uid] } })).status, 403);
+});
+
+// ---------- Quota top-ups ----------
+// The two shapes matter more than any single endpoint here: storage is a LEVEL a
+// top-up raises the ceiling of, AI credits are a monthly TALLY where the plan
+// allowance is spent first and only the overflow comes out of the purchased
+// balance. Get that wrong in either direction and a reset either eats what
+// someone paid for, or hands it back to them every month.
+const quotaSvc = require('../src/services/quota.service');
+
+let packSeq = 0;
+const featureIdFor = async (key) => (await models.FeatureType.findOne({ where: { key } })).id;
+
+// A publishable pack by default — the gate is exercised explicitly below.
+const mkQuotaPack = async (over = {}) => {
+  const stamp = `${Date.now()}${packSeq++}`;
+  const p = await models.QuotaPack.create({
+    uid: uuid(), name: `TST Pack ${stamp}`, feature_type_id: await featureIdFor('ai_credits'),
+    quantity: 500, price: 99, status: 'active', ...over,
+  });
+  track.quotaPacks.push(p.id);
+  return p;
+};
+
+// An active grant, the state a confirmed purchase leaves behind.
+const mkGrant = async (userId, key, quantity, over = {}) => models.UserQuotaGrant.create({
+  uid: uuid(), user_id: userId, feature_type_id: await featureIdFor(key),
+  quantity, source: 'admin_grant', status: 'active', granted_at: new Date(), ...over,
+});
+
+// Temporarily narrow a plan's allowance for one feature, the way withStorageLimitMb
+// does for storage. Restores whatever was there, including "no row at all".
+const withPlanFeature = async (planId, key, value, fn) => {
+  const featureTypeId = await featureIdFor(key);
+  const existing = await models.PlanFeature.findOne({ where: { plan_id: planId, feature_type_id: featureTypeId } });
+  const original = existing ? existing.value : null;
+  if (existing) await existing.update({ value });
+  else await models.PlanFeature.create({ plan_id: planId, feature_type_id: featureTypeId, value });
+
+  try { return await fn(); } finally {
+    if (original === null) await models.PlanFeature.destroy({ where: { plan_id: planId, feature_type_id: featureTypeId } });
+    else await models.PlanFeature.update({ value: original }, { where: { plan_id: planId, feature_type_id: featureTypeId } });
+  }
+};
+
+const creditsUsed = async (userId) => {
+  const row = await models.UserQuotaUsage.findOne({ where: { user_id: userId } });
+  return row ? Number(row.ai_credits_used) : 0;
+};
+
+test('MODE agrees with feature_types.reset_period for every metered feature', async () => {
+  // The map is hardcoded because a column name cannot be read out of a row, so
+  // this is what stops it drifting from the data it is meant to mirror. A feature
+  // that resets is a tally (top-ups debit it); one that never resets is a level
+  // (top-ups raise its ceiling).
+  //
+  // Checked over the keys the map declares, not over every row in the table: a
+  // feature type invented at runtime has no counter column either, so it is not
+  // metered at all and there is nothing for the map to be wrong about.
+  for (const key of Object.keys(quotaSvc.MODE)) {
+    const ft = await models.FeatureType.findOne({ where: { key } });
+    assert.ok(ft, `${key} is in MODE but not in feature_types`);
+    const expected = ft.reset_period === 'never' ? 'gauge' : 'flow';
+    assert.equal(quotaSvc.MODE[key], expected,
+      `${key} resets ${ft.reset_period}, so it must be a ${expected}`);
+  }
+
+  // And every counter the service knows how to write has to declare its shape,
+  // or it would silently default to a tally and be zeroed every month.
+  for (const key of Object.keys(quotaSvc.FIELD)) {
+    assert.ok(quotaSvc.MODE[key], `${key} has a counter column but no MODE entry`);
+  }
+});
+
+test('a storage top-up raises the ceiling, and freeing space returns the purchased headroom', async () => {
+  const userId = await userWithActivePlan(1, 9301);
+  const token  = h.userTokenFor(userId);
+
+  await withStorageLimitMb(5, async () => {
+    // 8 MB against a 5 MB plan: refused outright before any top-up exists.
+    const refused = await uploadOf(token, 'media_library', 8 * MB);
+    assert.equal(refused.status, 402, 'over the plan limit with nothing bought');
+    assert.equal(await storageUsed(userId), 0);
+
+    // Buy 10 MB. Storage is a LEVEL, so the grant simply lifts the ceiling to 15.
+    await mkGrant(userId, 'storage', 10);
+
+    const ok = await uploadOf(token, 'media_library', 8 * MB);
+    assert.equal(ok.status, 200, 'the same file fits once the ceiling is raised');
+    assert.equal(await storageUsed(userId), 8 * MB);
+
+    // A gauge never debits its grant — the counter alone tracks occupancy.
+    const grant = await models.UserQuotaGrant.findOne({ where: { user_id: userId } });
+    assert.equal(Number(grant.consumed), 0, 'nothing is deducted from a storage grant');
+
+    // 8 + 9 > 15 — still enforced, just against the higher ceiling.
+    const over = await uploadOf(token, 'media_library', 9 * MB);
+    assert.equal(over.status, 402, 'a top-up raises the ceiling, it does not remove it');
+
+    // Deleting the file frees the purchased space again, which is the whole point
+    // of buying capacity rather than a one-off allowance.
+    const row = await models.UserUpload.findOne({ where: { s3_key: ok.key } });
+    await withStubbedS3(async () => {
+      await h.request('DELETE', `${P}/uploads/${row.uid}`, { token });
+    });
+    assert.equal(await storageUsed(userId), 0);
+    assert.equal((await uploadOf(token, 'media_library', 9 * MB)).status, 200,
+      'a file that did not fit a moment ago fits again — the purchased capacity came back');
+  });
+});
+
+test('AI credits spend the plan allowance first, then the purchased balance', async () => {
+  const userId = await userWithActivePlan(1, 9302);
+
+  await withPlanFeature(1, 'ai_credits', 5, async () => {
+    // Fill the plan allowance.
+    await quotaSvc.consume(userId, 'ai_credits', 5, { source: 'image_generation' });
+    assert.equal(await creditsUsed(userId), 5);
+
+    // Nothing bought yet -> the wall is real.
+    await assert.rejects(
+      () => quotaSvc.assertWithinQuota(userId, 'ai_credits', 1),
+      (err) => err.errorCode === 'QUOTA_EXCEEDED',
+    );
+
+    const grant = await mkGrant(userId, 'ai_credits', 10);
+
+    // The 6th credit comes out of the grant, NOT the counter. That split is what
+    // lets the counter be zeroed each cycle without giving back paid-for credits.
+    await quotaSvc.consume(userId, 'ai_credits', 1, { source: 'background_removal' });
+    assert.equal(await creditsUsed(userId), 5, 'the counter never exceeds the plan allowance');
+    assert.equal(Number((await grant.reload()).consumed), 1, 'the overflow is debited from the grant');
+
+    // Spanning the boundary in one call splits the same way.
+    await quotaSvc.consume(userId, 'ai_credits', 9, { source: 'logo_generation' });
+    assert.equal(Number((await grant.reload()).consumed), 10, 'grant fully spent');
+
+    await assert.rejects(
+      () => quotaSvc.assertWithinQuota(userId, 'ai_credits', 1),
+      (err) => err.errorCode === 'QUOTA_EXCEEDED',
+      'plan spent and balance spent — back to the wall',
+    );
+  });
+});
+
+test('a spend attributed to another feature tool is rejected as a wiring mistake', async () => {
+  const userId = await userWithActivePlan(1, 9303);
+  await assert.rejects(
+    () => quotaSvc.consume(userId, 'downloads', 1, { source: 'image_generation' }),
+    /belongs to/,
+    'a bad source would make the breakdown lie, so it fails loudly rather than recording',
+  );
+});
+
+test('the cycle reset zeroes the flow counters, and leaves levels and grants alone', async () => {
+  const userId = await userWithActivePlan(1, 9304);
+
+  await withPlanFeature(1, 'ai_credits', 5, async () => {
+    await quotaSvc.consume(userId, 'ai_credits', 5, { source: 'image_generation' });
+    const grant = await mkGrant(userId, 'ai_credits', 10);
+    await quotaSvc.consume(userId, 'ai_credits', 3, { source: 'image_generation' });
+
+    const row = await models.UserQuotaUsage.findOne({ where: { user_id: userId } });
+    await row.update({
+      storage_used_bytes: 4 * MB, template_views_count: 7,
+      period_start: '2026-01-01', period_end: '2026-02-01',   // expired
+    });
+
+    const window = await quotaSvc.ensureCurrentPeriod(userId);
+    assert.ok(window && new Date(window.end) > new Date(), 'rolled onto the current window');
+
+    await row.reload();
+    assert.equal(Number(row.ai_credits_used), 0, 'the monthly tally starts again');
+    assert.equal(Number(row.storage_used_bytes), 4 * MB, 'storage is occupancy, not a tally — zeroing it would hand out free space');
+    assert.equal(Number(row.template_views_count), 7, 'reset_period never — a lifetime total, not a cycle one');
+    assert.equal(Number((await grant.reload()).consumed), 3, 'purchased credits stay spent across the boundary');
+  });
+});
+
+test('the usage window is anchored to the subscription day-of-month, clamped at month ends', async () => {
+  // 31 Jan + 1 month is 3 Mar to a raw setMonth, because February has no 31st.
+  const feb = quotaSvc.addMonthsClamped(new Date(2026, 0, 31), 1);
+  assert.equal(feb.getMonth(), 1, 'lands in February, not March');
+  assert.equal(feb.getDate(), 28, '2026 is not a leap year');
+  assert.equal(quotaSvc.addMonthsClamped(new Date(2024, 0, 31), 1).getDate(), 29, 'leap year keeps the 29th');
+  assert.equal(quotaSvc.addMonthsClamped(new Date(2026, 2, 15), -1).getDate(), 15, 'negative months work the same way');
+
+  const userId = await userWithActivePlan(1, 9305);
+  const sub    = await UserSubscription.findOne({ where: { user_id: userId, status: 'active' } });
+  await sub.update({ starts_at: new Date(2026, 0, 31) });
+
+  const window = await quotaSvc.currentWindow(userId, new Date(2026, 1, 10));
+  assert.equal(window.start, '2026-01-31');
+  assert.equal(window.end, '2026-02-28', 'the reset date the app shows is a real calendar day');
+});
+
+test('an account with no subscription has no window to reset against', async () => {
+  const u = await mkUser('NoCycle');
+  await quotaSvc.consume(u.id, 'downloads', 1, { source: 'download' });
+  // Usage is still RECORDED for the free tier — it just is not enforced, and
+  // there is no anchor to compute an honest reset date from.
+  assert.equal(await quotaSvc.ensureCurrentPeriod(u.id), null);
+  const row = await models.UserQuotaUsage.findOne({ where: { user_id: u.id } });
+  assert.equal(row.period_end, null);
+  assert.equal(Number(row.downloads_count), 1);
+});
+
+test('the top-up store lists active packs for one feature with the tax-inclusive total', async () => {
+  const pack  = await mkQuotaPack({ quantity: 500, price: 99, strike_price: 149, badge: 'Best value' });
+  const draft = await mkQuotaPack({ status: 'draft' });
+  const store = await mkQuotaPack({ feature_type_id: await featureIdFor('storage'), quantity: 1024, price: 49 });
+
+  const r = await h.request('GET', `${P}/quota/packs?feature=ai_credits`);
+  assert.equal(r.status, 200, 'the shelf is public — pricing is not a secret');
+  const ids = r.body.data.map((p) => p.id);
+  assert.ok(ids.includes(pack.id));
+  assert.ok(!ids.includes(draft.id), 'drafts never reach the store');
+  assert.ok(!ids.includes(store.id), 'filtered to the requested feature');
+
+  const card = r.body.data.find((p) => p.id === pack.id);
+  assert.equal(card.feature.key, 'ai_credits');
+  assert.equal(card.feature.unit, 'count');
+  // 99 + 18% GST. The stored price is pre-tax; the card shows what is charged.
+  assert.equal(card.total_price, 116.82);
+  assert.equal(card.gst_amount, 17.82);
+  assert.equal(Number(card.strike_price), 149);
+
+  const mb = await h.request('GET', `${P}/quota/packs?feature=storage`);
+  assert.equal(mb.body.data.find((p) => p.id === store.id).feature.unit, 'MB',
+    'quantity is in the feature own unit, so the card has to say which');
+
+  const bogus = await h.request('GET', `${P}/quota/packs?feature=no-such-feature`);
+  assert.deepEqual(bogus.body.data, [], 'an unknown key empties the shelf rather than widening it');
+});
+
+test('buying a top-up creates a pending grant, and the webhook activates it once', async () => {
+  const userId = await userWithActivePlan(1, 9306);
+  const token  = h.userTokenFor(userId);
+  const pack   = await mkQuotaPack({ quantity: 500, price: 99 });
+
+  const order = await withPlanFeature(1, 'ai_credits', 5, () => withStubbedRazorpay(async (calls) => {
+    const r = await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.data.amount, 116.82);
+    assert.equal(calls[0].amount, 116.82, 'the order is for the post-tax figure');
+    return r.body.data;
+  }));
+
+  // Pending contributes nothing — an abandoned checkout must not credit anyone.
+  let grant = await models.UserQuotaGrant.findOne({ where: { user_id: userId } });
+  assert.equal(grant.status, 'pending');
+  assert.equal(Number(grant.quantity), 500, 'snapshotted, so editing the pack later cannot change it');
+  assert.equal((await quotaSvc.balanceFor(userId, 'ai_credits')).remaining, 0);
+
+  const payment = await models.Payment.findOne({ where: { uid: order.payment_uid } });
+  assert.equal(payment.purchase_type, 'quota_pack', 'fulfilment routes on this, not on the absence of a subscription');
+
+  const evt = {
+    event: 'payment.captured',
+    payload: { payment: { entity: { id: `pay_quota_${userId}`, order_id: payment.razorpay_order_id, amount: 11682 } } },
+  };
+  const { raw, sig } = signWebhook(evt);
+  assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } })).status, 200);
+
+  grant = await grant.reload();
+  assert.equal(grant.status, 'active');
+  assert.equal((await quotaSvc.balanceFor(userId, 'ai_credits')).remaining, 500);
+
+  // Replay changes nothing — the same guard that protects a plan activation.
+  const replay = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal(replay.body.idempotent, true);
+  assert.equal(await models.UserQuotaGrant.count({ where: { user_id: userId } }), 1);
+
+  // Unlike a frame, the same pack can be bought again — this is a balance, not
+  // an ownership record.
+  await withPlanFeature(1, 'ai_credits', 5, () => withStubbedRazorpay(async () => {
+    assert.equal((await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token })).status, 201);
+  }));
+  assert.equal(await models.UserQuotaGrant.count({ where: { user_id: userId } }), 2);
+});
+
+test('a top-up that would buy nothing is refused rather than sold', async () => {
+  const pack = await mkQuotaPack();
+
+  // No subscription: the feature is not metered for this account at all, so extra
+  // headroom would sit on top of nothing.
+  const free = await mkUser('NoPlanTopup');
+  const noPlan = await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token: h.userTokenFor(free.id) });
+  assert.equal(noPlan.status, 409);
+  assert.match(noPlan.body.error.message, /paid plans/);
+
+  // Subscribed, but the plan already grants the feature without limit (seeded Pro
+  // is -1 for AI credits) — there is no ceiling to raise.
+  const proId = await userWithActivePlan(2, 9307);
+  const unlimited = await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token: h.userTokenFor(proId, 'paid') });
+  assert.equal(unlimited.status, 409);
+  assert.match(unlimited.body.error.message, /unlimited/);
+
+  assert.equal(await models.UserQuotaGrant.count({ where: { user_id: [free.id, proId] } }), 0, 'no grant, no order');
+});
+
+test('GET /quota/usage reports plan, top-up and the per-tool breakdown, agreeing with /subscriptions/me', async () => {
+  const userId = await userWithActivePlan(1, 9308);
+  const token  = h.userTokenFor(userId);
+
+  await withPlanFeature(1, 'ai_credits', 1000, async () => {
+    await mkGrant(userId, 'ai_credits', 200);
+    await quotaSvc.consume(userId, 'ai_credits', 120, { source: 'image_generation' });
+    await quotaSvc.consume(userId, 'ai_credits', 40,  { source: 'background_removal' });
+    await quotaSvc.consume(userId, 'ai_credits', 35,  { source: 'logo_generation' });
+    await quotaSvc.consume(userId, 'ai_credits', 80,  { source: 'text_to_audio' });
+
+    const r = await h.request('GET', `${P}/quota/usage`, { token });
+    assert.equal(r.status, 200);
+    const credits = r.body.data.features.find((f) => f.key === 'ai_credits');
+
+    assert.equal(credits.limit, 1000, 'limit stays the PLAN allowance — existing clients read it that way');
+    assert.equal(credits.used, 275);
+    assert.equal(credits.topup_granted, 200);
+    assert.equal(credits.topup_remaining, 200, 'nothing has overflowed into it yet');
+    assert.equal(credits.effective_limit, 1200);
+    assert.equal(credits.remaining, 925, 'plan headroom plus the purchased balance');
+    assert.equal(credits.topupable, true);
+
+    const byTool = Object.fromEntries(credits.breakdown.map((b) => [b.source, b.used]));
+    assert.deepEqual(byTool, { image_generation: 120, background_removal: 40, logo_generation: 35, text_to_audio: 80 });
+    assert.equal(credits.breakdown.find((b) => b.source === 'image_generation').label, 'Image Generation');
+
+    // The two endpoints share one builder precisely so this can never disagree:
+    // the app gates on /subscriptions/me and renders the Usage screen from here.
+    const me = await h.request('GET', `${P}/subscriptions/me`, { token });
+    const mine = me.body.data.features.find((f) => f.key === 'ai_credits');
+    for (const field of ['limit', 'used', 'remaining', 'topup_granted', 'topup_remaining', 'effective_limit']) {
+      assert.equal(mine[field], credits[field], `${field} must match across both endpoints`);
+    }
+    assert.equal(mine.breakdown, undefined, 'the breakdown is extra detail, not carried by the polled endpoint');
+    assert.equal(me.body.data.period.end, r.body.data.period.end);
+  });
+});
+
+test('an admin can grant quota by hand and revoke it, and revoking never claws back what was spent', async () => {
+  const userId = await userWithActivePlan(1, 9309);
+  const user   = await User.findByPk(userId);
+  const admin  = h.adminToken();
+
+  const created = await h.request('POST', `${P}/admin/users/${user.uid}/quota-grants`, {
+    token: admin, body: { feature: 'ai_credits', quantity: 50, note: 'Ticket 4821 — generation failed' },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.data.source, 'admin_grant');
+  assert.equal(created.body.data.status, 'active', 'no payment to wait for');
+  assert.equal((await quotaSvc.balanceFor(userId, 'ai_credits')).remaining, 50);
+
+  // A grant with no reason is indistinguishable from a mistake six months later.
+  const noNote = await h.request('POST', `${P}/admin/users/${user.uid}/quota-grants`, {
+    token: admin, body: { feature: 'ai_credits', quantity: 50 },
+  });
+  assert.equal(noNote.status, 400);
+
+  const listed = await h.request('GET', `${P}/admin/users/${user.uid}/quota-grants`, { token: admin });
+  assert.equal(listed.body.data.length, 1);
+
+  await withPlanFeature(1, 'ai_credits', 0, async () => {
+    await quotaSvc.consume(userId, 'ai_credits', 20, { source: 'image_generation' });
+    assert.equal((await quotaSvc.balanceFor(userId, 'ai_credits')).remaining, 30);
+
+    const revoked = await h.request('DELETE', `${P}/admin/quota-grants/${created.body.data.uid}`, { token: admin });
+    assert.equal(revoked.status, 200);
+    // The row survives as the audit record, and quantity and consumed leave the
+    // balance together — so this is a withdrawal of what is left, not a clawback.
+    const row = await models.UserQuotaGrant.findOne({ where: { uid: created.body.data.uid } });
+    assert.equal(row.status, 'revoked');
+    assert.equal(Number(row.consumed), 20, 'what was spent is still on the record');
+    assert.equal((await quotaSvc.balanceFor(userId, 'ai_credits')).remaining, 0, 'floored, never negative');
+
+    assert.equal((await h.request('DELETE', `${P}/admin/quota-grants/${created.body.data.uid}`, { token: admin })).status, 200,
+      'revoking twice is idempotent');
+  });
+});
+
+test('the pack publish gate refuses to sell quota that could never be spent', async () => {
+  const admin  = h.adminToken();
+  const aiId   = await featureIdFor('ai_credits');
+  const viewId = await featureIdFor('template_views');   // seeded is_topupable = 0
+
+  const create = async (body) => h.request('POST', `${P}/admin/quota-packs`, { token: admin, body });
+
+  const draft = await create({ name: `TST Gate Pack ${Date.now()}`, feature_type_id: aiId, quantity: 0, price: 0 });
+  assert.equal(draft.status, 201, 'an incomplete pack may exist as a draft');
+  track.quotaPacks.push(draft.body.data.id);
+
+  const noQuantity = await h.request('PATCH', `${P}/admin/quota-packs/${draft.body.data.uid}`, {
+    token: admin, body: { status: 'active' },
+  });
+  assert.equal(noQuantity.status, 400);
+  const fields = noQuantity.body.error.details.map((d) => d.field);
+  assert.ok(fields.includes('quantity') && fields.includes('price'), 'the gate names every unmet requirement at once');
+
+  // A pack for a feature nobody may top up is the failure worth guarding: it would
+  // take money and grant a balance no meter will ever read.
+  const notTopupable = await create({
+    name: `TST Gate Pack B ${Date.now()}`, feature_type_id: viewId, quantity: 100, price: 10, status: 'active',
+  });
+  assert.equal(notTopupable.status, 400);
+  assert.match(JSON.stringify(notTopupable.body.error.details), /not enabled for top-ups/);
+
+  const ok = await h.request('PATCH', `${P}/admin/quota-packs/${draft.body.data.uid}`, {
+    token: admin, body: { quantity: 500, price: 99, status: 'active' },
+  });
+  assert.equal(ok.status, 200, 'setting the missing fields and status together publishes in one call');
+
+  // Unpublishing is never gated, and is not a clawback.
+  assert.equal((await h.request('PATCH', `${P}/admin/quota-packs/${draft.body.data.uid}`, {
+    token: admin, body: { status: 'inactive' },
+  })).status, 200);
+});
+
+test('the admin pack list reports the same checklist the gate enforces, and needs its own permission', async () => {
+  const pack = await mkQuotaPack({ status: 'draft', quantity: 0, price: 0 });
+
+  const r = await h.request('GET', `${P}/admin/quota-packs`, { token: h.adminToken() });
+  assert.equal(r.status, 200);
+  const row = r.body.data.find((p) => p.id === pack.id);
+  assert.equal(row.is_publishable, false);
+
+  // The list and the gate come from one function, so a row the list calls
+  // publishable can never be rejected by the gate.
+  const gate = await h.request('PATCH', `${P}/admin/quota-packs/${pack.uid}`, {
+    token: h.adminToken(), body: { status: 'active' },
+  });
+  assert.deepEqual(gate.body.error.details.map((d) => d.field), row.missing_for_publish.map((m) => m.field));
+
+  // Commerce, not content: quota_packs sits with plans and coupons.
+  assert.equal((await h.request('GET', `${P}/admin/quota-packs`, { token: h.adminToken(['templates.*']) })).status, 403);
+  assert.equal((await h.request('GET', `${P}/admin/users/${uuid()}/quota-grants`, { token: h.adminToken(['frames.*']) })).status, 403);
+});
+
+test('a subscription.charged webhook records the renewal payment and extends the term', async () => {
+  // Regression: _onSubCharged reads GST_RATE, which stopped being in scope when
+  // the GST helper moved to utils/gst.js — so every recurring renewal threw a
+  // ReferenceError before writing the payment or extending ends_at.
+  const u = await mkUser('Renewal');
+  const endsAt = new Date(Date.now() + 5 * 864e5);
+  const sub = await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1, sub_type: 'trial', status: 'active',
+    starts_at: new Date(), ends_at: endsAt, auto_renew: 1, amount_paid: 352.82,
+    razorpay_subscription_id: `sub_renew_${u.id}`,
+  });
+
+  const evt = {
+    event: 'subscription.charged',
+    payload: {
+      subscription: { entity: { id: sub.razorpay_subscription_id } },
+      payment:      { entity: { id: `pay_renew_${u.id}`, amount: 35282 } },
+    },
+  };
+  const { raw, sig } = signWebhook(evt);
+  const r = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ok, true);
+
+  const payment = await Payment.findOne({ where: { razorpay_payment_id: `pay_renew_${u.id}` } });
+  assert.ok(payment, 'the renewal is recorded');
+  assert.equal(Number(payment.amount), 352.82);
+  assert.equal(Number(payment.amount_before_tax), 299, 'GST is backed out of the gross charge');
+  assert.equal(payment.purchase_type, 'subscription');
+
+  const after = await sub.reload();
+  assert.equal(after.sub_type, 'regular', 'the first real charge converts a trial');
+  assert.ok(new Date(after.ends_at) > endsAt, 'the term is extended from the old end date');
+
+  const replay = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal(replay.body.idempotent, true);
+});
+
+// ---------- Relaxed quota enforcement ----------
+// A suspended limit has to be suspended EVERYWHERE at once — the upload gate, the
+// numbers the app renders, and the top-up store — or the user gets a red bar and a
+// Buy button for a limit nothing is applying. All of it derives from limitFor,
+// which is the only place the switch is read.
+const withRelaxed = async (features, fn) => {
+  const original = process.env.QUOTA_RELAXED_FEATURES;
+  process.env.QUOTA_RELAXED_FEATURES = features;
+  try { return await fn(); } finally {
+    if (original === undefined) delete process.env.QUOTA_RELAXED_FEATURES;
+    else process.env.QUOTA_RELAXED_FEATURES = original;
+  }
+};
+
+test('relaxing storage stops enforcement but keeps recording usage', async () => {
+  const userId = await userWithActivePlan(1, 9401);
+  const token  = h.userTokenFor(userId);
+
+  await withStorageLimitMb(5, async () => {
+    // Baseline: enforced, so this is refused.
+    assert.equal((await uploadOf(token, 'media_library', 8 * MB)).status, 402);
+
+    await withRelaxed('storage', async () => {
+      const ok = await uploadOf(token, 'media_library', 8 * MB);
+      assert.equal(ok.status, 200, 'the limit is not applied while relaxed');
+
+      // The important half: the counter and the ledger keep running, so turning
+      // enforcement back on needs no backfill.
+      assert.equal(await storageUsed(userId), 8 * MB, 'usage is still recorded');
+      assert.ok(await models.UserUpload.findOne({ where: { s3_key: ok.key } }), 'still on the ledger');
+
+      // Reported the way the account is actually treated — no red bar, no
+      // remaining figure the server would not honour.
+      const q = await h.request('GET', `${P}/uploads/quota`, { token });
+      assert.equal(q.body.data.unlimited, true);
+      assert.equal(q.body.data.limit_bytes, null);
+      assert.equal(q.body.data.remaining_bytes, null);
+      assert.equal(q.body.data.used_bytes, 8 * MB, 'the real figure is still reported');
+      assert.equal(q.body.data.max_upload_bytes, 10 * MB, 'the per-FILE cap is a separate guard and stays on');
+
+      const me = (await h.request('GET', `${P}/subscriptions/me`, { token })).body.data;
+      const storage = me.features.find((f) => f.key === 'storage');
+      assert.equal(storage.unlimited, true);
+      assert.equal(storage.limit, null);
+      assert.equal(storage.remaining, null);
+      assert.equal(storage.enforced, false, 'the plan still says 100 MB — this says it is not being applied');
+      assert.equal(storage.topupable, false, 'nothing to top up, so no Buy button');
+
+      // Other features are untouched by a storage relaxation.
+      const credits = me.features.find((f) => f.key === 'ai_credits');
+      assert.equal(credits.enforced, undefined, 'only relaxed features carry the flag');
+    });
+
+    // Restored the moment the switch goes off — and it enforces against the usage
+    // that accumulated while relaxed, which is why recording mattered. The account
+    // is now over its limit, so presign refuses before the client uploads anything
+    // (uploadOf can't be used here: it assumes presign hands back a key).
+    const blocked = await withStubbedS3(() => h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'x.png' },
+    }));
+    assert.equal(blocked.status, 402, 'already over the 5 MB limit from the relaxed period');
+
+    const restored = await h.request('GET', `${P}/uploads/quota`, { token });
+    assert.equal(restored.body.data.unlimited, false);
+    assert.equal(restored.body.data.remaining_bytes, 0, 'floored, not negative, despite being over');
+  });
+});
+
+test('a top-up for a relaxed feature is refused, and says why honestly', async () => {
+  const userId = await userWithActivePlan(1, 9402);
+  const token  = h.userTokenFor(userId);
+  const pack   = await mkQuotaPack({
+    feature_type_id: await featureIdFor('storage'), quantity: 1024, price: 49,
+  });
+
+  await withRelaxed('storage', async () => {
+    const r = await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token });
+    assert.equal(r.status, 409);
+    // Not "your plan already includes unlimited storage" — the plan says 100 MB.
+    assert.match(r.body.error.message, /not currently limited/);
+    assert.equal(await models.UserQuotaGrant.count({ where: { user_id: userId } }), 0);
+  });
+
+  // Balances bought BEFORE the relaxation are untouched by it — grants never
+  // expire, so they are simply idle until enforcement returns.
+  const grant = await mkGrant(userId, 'storage', 500);
+  await withRelaxed('storage', async () => {
+    assert.equal((await quotaSvc.balanceFor(userId, 'storage')).remaining, 500 * MB);
+  });
+  assert.equal(Number((await grant.reload()).consumed), 0);
 });

@@ -49,7 +49,7 @@ module.exports = {
     add: {
       slot: {
         type: 'string',
-        enum: ['media_library', 'profile_photo', 'business_logo', 'business_cover', 'product_image', 'user_frame', 'brand_font'],
+        enum: ['media_library', 'profile_photo', 'business_logo', 'business_cover', 'product_image', 'brand_font'],
       },
       bytes: { type: 'integer', description: 'Charged against the plan storage quota; refunded on delete' },
     },
@@ -102,6 +102,103 @@ module.exports = {
       },
     },
   },
+
+  // A store frame. `content` is the design payload and is served only to an owner,
+  // so it is absent from every list and from a locked detail response.
+  Frame: {
+    views: {
+      // Public/store shape: hides the admin-only creator, adds the computed flags.
+      Frame: {
+        exclude: ['created_by'],
+        add: {
+          owned:     { type: 'boolean', description: 'true when the frame is in the caller\'s My Frames. Always false for guests. This — not `is_locked` — is what governs whether `content` is returned.' },
+          is_locked: { type: 'boolean', description: 'A premium frame the caller has not bought: "costs money you have not paid". Means the same on a list card and on the detail response, so one padlock badge can be driven from it. A free frame is never locked, but its `content` still arrives only after it has been added. Note frames are bought per frame — a paid PLAN never unlocks one.' },
+          strike_price: { type: 'number', nullable: true, description: 'Display-only "was" price, struck through beside `price`. Nothing is ever charged against it.' },
+        },
+      },
+      // Admin shape: the full row plus the publish-checklist signals the list adds,
+      // so the panel can flag incomplete frames without a request per row.
+      FrameAdmin: {
+        add: {
+          has_content:   { type: 'integer', description: '1 when the design payload is set' },
+          has_thumbnail: { type: 'integer', description: '1 when thumbnail_s3_key is set' },
+          is_publishable: { type: 'boolean', description: 'true when `status` may be set to `active` — i.e. `missing_for_publish` is empty' },
+          missing_for_publish: {
+            type: 'array',
+            description: 'Exactly what the publish gate would reject, one entry per unmet requirement. Empty for a publishable frame.',
+            items: {
+              type: 'object',
+              properties: {
+                field:   { type: 'string', example: 'category_id' },
+                message: { type: 'string', example: 'A frame category is required' },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+
+  // "My Frames" — an ownership record, so it always carries the frame it owns.
+  // `payment_id` is internal plumbing between the purchase and the webhook.
+  UserFrame: {
+    exclude: ['payment_id'],
+    add: { Frame: { $ref: '#/components/schemas/Frame' } },
+  },
+
+  // A top-up pack on the shelf. Prices are stored pre-tax, so the store shape adds
+  // the tax-inclusive figure the buyer is actually charged.
+  QuotaPack: {
+    views: {
+      QuotaPack: {
+        exclude: ['created_by'],
+        add: {
+          feature: {
+            type: 'object',
+            description: 'The feature this pack tops up.',
+            properties: {
+              key:   { type: 'string', example: 'ai_credits' },
+              label: { type: 'string', example: 'AI Credits' },
+              unit:  { type: 'string', enum: ['count', 'MB'], description: 'The unit `quantity` is expressed in.' },
+            },
+          },
+          gst_amount:   { type: 'number', description: 'GST added on top of `price`.' },
+          total_price:  { type: 'number', description: 'What Razorpay is actually asked for. Show THIS on the card — `price` is pre-tax.' },
+          strike_price: { type: 'number', nullable: true, description: 'Display-only "was" price, struck through beside `price`. Nothing is ever charged against it.' },
+        },
+      },
+      // Admin shape: the full row plus the publish-checklist signals the list adds.
+      QuotaPackAdmin: {
+        add: {
+          is_publishable: { type: 'boolean', description: 'true when `status` may be set to `active` — i.e. `missing_for_publish` is empty' },
+          missing_for_publish: {
+            type: 'array',
+            description: 'Exactly what the publish gate would reject, one entry per unmet requirement. Empty for a publishable pack.',
+            items: {
+              type: 'object',
+              properties: {
+                field:   { type: 'string', example: 'quantity' },
+                message: { type: 'string', example: 'Quantity must be above zero' },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+
+  // A purchased or hand-granted block of quota — the balance itself, not a cache
+  // of it. `consumed` only moves for monthly features (AI credits): storage is a
+  // level, so its grant just raises the ceiling and freeing space returns it.
+  //
+  // `payment_id` is kept, unlike UserFrame's: grants are only ever served on
+  // admin routes, and an admin investigating a disputed balance wants the link to
+  // the payment that funded it.
+  UserQuotaGrant: {},
+
+  // Internal ledger behind the usage breakdown; surfaced only in aggregate, as the
+  // `breakdown` array on GET /quota/usage.
+  QuotaUsageEvent: { skip: true },
 
   // Variant detail carries a computed lock flag (premium templates are plan-gated) and
   // the template tally shown on its card.

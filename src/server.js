@@ -9,6 +9,7 @@ const trendingJob     = require('./jobs/trendingScore.job');
 const renewalJob      = require('./jobs/subscriptionRenewal.job');
 const tokenCleanupJob = require('./jobs/tokenCleanup.job');
 const otpCleanupJob   = require('./jobs/otpCleanup.job');
+const quotaEventCleanupJob = require('./jobs/quotaEventCleanup.job');
 
 const PORT = process.env.PORT || 3000;
 
@@ -30,6 +31,14 @@ async function start() {
     console.log('[Migrate] Schema up to date.');
   }
 
+  // Announced loudly on purpose. A suspended limit is meant to be temporary, and
+  // the way that goes wrong is nobody remembering it is still off months later —
+  // so it says so on every boot, with the variable to unset.
+  const relaxed = [...require('./config/quota').relaxedFeatures()];
+  if (relaxed.length) {
+    console.warn(`[Quota] ENFORCEMENT SUSPENDED for: ${relaxed.join(', ')} — usage is still being recorded. Unset QUOTA_RELAXED_FEATURES to restore limits.`);
+  }
+
   // Redis is optional: if it's not reachable we continue with an in-memory rate
   // limiter (fine for a single instance; use Redis when running multiple).
   const redisOk = await redis.tryConnect();
@@ -46,6 +55,7 @@ async function start() {
   renewalJob.job.start();
   tokenCleanupJob.job.start();
   otpCleanupJob.job.start();
+  quotaEventCleanupJob.job.start();
   console.log('[Jobs] All cron jobs started');
 
   server.listen(PORT, () => {
