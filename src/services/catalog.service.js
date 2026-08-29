@@ -209,22 +209,39 @@ function listLanguages() {
 // the generic food keywords alongside the bakery-specific ones, and curating them
 // twice is how the two lists drift apart. Merged and de-duped, the industry's own
 // keywords first so the most specific suggestions lead.
+//
+// UNLIKE every other catalogue read here, this one applies NO is_active/status
+// gate and never 404s. It is a suggestion helper, not a catalogue listing: it
+// returns tags and nothing else, so a hidden industry row leaks neither its name
+// nor its existence through it.
+//
+// Both of those matter for the "Others" flow. A user who types a sub-industry at
+// signup gets a row that is status='pending', is_active=0 by design, and it is
+// immediately their business's industry — asking the picker about the industry
+// they were just made to choose must not answer "not found". Their own suggestion
+// has no curated keywords yet, so what they actually need is the PARENT's, which
+// is exactly what this returns. The same reasoning applies to the parent lookup:
+// an industry retired after a business attached to it should not empty the picker.
+//
+// An unresolvable ref yields [] for the same reason — an empty picker is already a
+// valid answer (an industry with nothing curated returns []), and it is the honest
+// one to show a user mid-signup.
 async function listIndustryKeywords(ref) {
   const id = await resolveRef(BusinessCategory, ref);
-  if (!id) throw new NotFoundError('industry not found');
+  if (!id) return [];
 
   const industry = await BusinessCategory.findOne({
-    where:      { id, is_active: 1 },
+    where:      { id },
     attributes: ['id', 'parent_id'],
     include:    [{ model: Tag, attributes: ['id', 'name', 'slug'], through: { attributes: [] } }],
   });
-  if (!industry) throw new NotFoundError('industry not found');
+  if (!industry) return [];
 
   const own = industry.Tags || [];
   if (!industry.parent_id) return own;
 
   const parent = await BusinessCategory.findOne({
-    where:      { id: industry.parent_id, is_active: 1 },
+    where:      { id: industry.parent_id },
     attributes: ['id'],
     include:    [{ model: Tag, attributes: ['id', 'name', 'slug'], through: { attributes: [] } }],
   });

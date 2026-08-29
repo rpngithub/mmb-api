@@ -18,6 +18,12 @@ const IMAGE_SLOTS = {
   special_event_thumbnail:     'events/thumbnail',
   frame_thumbnail:             'frames/thumbnail',
   special_event_banner:        'events/banner',
+  // An asset's browse image. An image slot rather than a second `asset` target,
+  // because the thumbnail is a PNG/JPG whatever the asset is — an audio clip and
+  // a Lottie both need something to show — and it must not land in the
+  // `assets/<asset_type>/` folder the deliverables live in. It is served to
+  // viewers who have not paid for the asset, so upload a degraded copy.
+  asset_thumbnail:             'assets/thumbnail',
   banner:                      'banners',
   testimonial:                 'testimonials',
   // Not an image — a library font file (.woff2/.ttf/…). It shares this registry

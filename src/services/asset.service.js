@@ -11,6 +11,16 @@ const MAX_LIMIT     = 100;
 // Paid viewers get the asset file (s3_key); guests/free see premium assets locked.
 const isPaidViewer = (viewer) => viewer?.tier === 'paid';
 
+// What a locked row keeps. `s3_key` is the deliverable and goes; `thumbnail_s3_key`
+// is the browse image and STAYS — the lock is meant to stop the file being used,
+// not to stop the asset being seen. A locked card with nothing to draw is the
+// reason this column exists, so withholding it here would defeat it.
+//
+// This only holds because the thumbnail is a degraded copy by construction (see
+// the migration and upload.service's `asset_thumbnail` slot). Store the original's
+// key in that column and the delete below stops protecting anything.
+const lock = (a) => { delete a.s3_key; return a; };
+
 // Tag membership via the asset_tags join. EXISTS keeps pagination correct and
 // avoids duplicate rows; tag ids are resolved to ints below (injection-safe).
 const existsTags = (ids) =>
@@ -18,17 +28,41 @@ const existsTags = (ids) =>
           `AND j.\`tag_id\` IN (${ids.join(',')}))`);
 
 async function listAssets(filters = {}, viewer = null) {
-  // Category is the required anchor — assets are browsed within a category. `category`
-  // accepts a slug / uid / legacy int id; legacy `category_id` still honoured. A
-  // supplied-but-unresolved ref yields an empty page (id 0), not a 400.
+  // EITHER `category` OR `asset_type` anchors the browse — at least one is required.
+  // Neither is individually mandatory, but an unanchored call would list the whole
+  // library, so it is refused. Two anchors instead of one because assets with no
+  // category exist (the column is nullable, and both the admin create and the CSV
+  // import leave it optional) and a category-only endpoint could never reach them.
   const categoryRef = pick(filters.category, filters.category_id);
-  if (categoryRef === undefined) throw new ValidationError('category is required');
+  const hasCategory = categoryRef !== undefined;
+  const hasType     = filters.asset_type !== undefined && filters.asset_type !== '';
+  if (!hasCategory && !hasType) {
+    throw new ValidationError('at least one of category or asset_type is required');
+  }
 
-  const resolved = await resolveRef(AssetCategory, categoryRef);
-  const categoryId = (typeof resolved === 'number' && resolved > 0) ? resolved : 0;
+  const where = { status: 'active' };
 
-  const where = { status: 'active', category_id: categoryId };
-  if (ASSET_TYPES.includes(filters.asset_type)) where.asset_type = filters.asset_type;
+  // `category` accepts a slug / uid / legacy int id; legacy `category_id` still
+  // honoured. A supplied-but-unresolved ref filters to the empty set (id 0) rather
+  // than being dropped — a typo'd slug must not silently widen the results. Since
+  // the filter is now optional, absent and unresolved must stay distinguishable:
+  // collapsing them would turn `?category=typo` into "every asset".
+  if (hasCategory) {
+    const resolved = await resolveRef(AssetCategory, categoryRef);
+    // `null` is resolveRef's literal-'null' form, and here means "uncategorized".
+    where.category_id = (resolved === null || (typeof resolved === 'number' && resolved > 0))
+      ? resolved
+      : 0;
+  }
+
+  // Validated strictly rather than ignored-if-unknown: as an anchor, a silently
+  // dropped `?asset_type=icons` would return the entire library.
+  if (hasType) {
+    if (!ASSET_TYPES.includes(filters.asset_type)) {
+      throw new ValidationError(`asset_type must be one of: ${ASSET_TYPES.join(', ')}`);
+    }
+    where.asset_type = filters.asset_type;
+  }
 
   // `tags` — each a slug / uid / legacy id; matches assets carrying ANY of them.
   const tagIds = await resolveRefList(Tag, filters.tags, { hasUid: false });
@@ -48,8 +82,7 @@ async function listAssets(filters = {}, viewer = null) {
   return rows.map((row) => {
     const a = row.toJSON();
     a.is_locked = Boolean(a.is_premium) && !paid;
-    if (a.is_locked) delete a.s3_key; // withhold the file until upgrade
-    return a;
+    return a.is_locked ? lock(a) : a;   // withhold the file until upgrade
   });
 }
 

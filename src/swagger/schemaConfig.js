@@ -78,6 +78,43 @@ module.exports = {
     },
   },
 
+  // An editor asset. The two S3 keys are NOT interchangeable: `s3_key` is the file
+  // the design consumes and is withheld from anyone who has not paid for it;
+  // `thumbnail_s3_key` is the browse image and is always served.
+  Asset: {
+    add: {
+      is_locked: {
+        type: 'boolean',
+        description: 'A premium asset the caller\'s plan does not include. The row is still listed — with its thumbnail — so the user can see what they would get, but `s3_key` is withheld until they upgrade.',
+      },
+      s3_key: {
+        type: 'string',
+        description: 'The asset file itself. ABSENT when `is_locked` — do not build a URL for a locked asset, there is nothing to build it from.',
+      },
+      thumbnail_s3_key: {
+        type: 'string',
+        nullable: true,
+        description: 'Preview image for the browse grid, always present regardless of `is_locked`. Render `thumbnail_s3_key || s3_key` — a free asset usually has no separate thumbnail and falls back to its own file. Null on a locked asset means no preview has been uploaded yet; show a placeholder.',
+      },
+    },
+  },
+
+  // Industries are a two-level tree and a business attaches to the leaf, so the
+  // owner-facing business reads expand the parent inline rather than leaving the
+  // client to resolve `parent_id` itself. Self-referential: the parent is the same
+  // shape, though only one level up is ever populated.
+  BusinessCategory: {
+    add: {
+      // `allOf` rather than a bare `$ref`: this is OpenAPI 3.0, where a sibling
+      // `description` next to `$ref` is discarded.
+      parent: {
+        description: 'The parent industry, expanded. Null on a top-level industry. Populated on the owner business reads (GET/POST/PATCH /businesses); absent elsewhere.',
+        nullable:    true,
+        allOf:       [{ $ref: '#/components/schemas/BusinessCategory' }],
+      },
+    },
+  },
+
   // Feedback is read-only for admins and always carries its submitter — there is
   // nobody to follow up with otherwise.
   Feedback: {

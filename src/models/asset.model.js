@@ -7,6 +7,11 @@ module.exports = (sequelize) => {
     category_id: { type: DataTypes.INTEGER, allowNull: true },
     name:        { type: DataTypes.STRING(200), allowNull: false },
     s3_key:      { type: DataTypes.STRING(500), allowNull: false },
+    // The browse image, kept apart from the deliverable so a premium asset can be
+    // SHOWN to someone who may not have it. `s3_key` is withheld from a viewer who
+    // has not paid; this is not. It must therefore be a degraded copy (small,
+    // watermarked) and never the original under a second name.
+    thumbnail_s3_key: { type: DataTypes.STRING(500), allowNull: true },
     // 'font' is retained in the enum but is NO LONGER ACCEPTED by the API — see
     // utils/assetTypes.js, which is the list every write and filter validates
     // against. A font family is several files plus script coverage, which this

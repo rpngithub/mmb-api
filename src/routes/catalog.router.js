@@ -148,16 +148,21 @@ router.get('/industries/:ref', controller.industryDetail);
  *       offers the bakery keywords ahead of the generic food ones. `ref` is a slug, a uid,
  *       or a numeric id. These are the values `POST /businesses` and
  *       `PUT /businesses/{uid}/keywords` accept.
+ *
+ *
+ *       NEVER 404s, and applies no active/moderation gate — an unknown or hidden `ref`
+ *       returns `[]`. A sub-industry a user suggested via "Others" is `pending` until an
+ *       admin approves it, yet it is already their business's industry: the picker must
+ *       answer for it, and what it returns is the parent's keywords (a fresh suggestion has
+ *       none of its own). An empty array is a normal answer here — a real industry with
+ *       nothing curated returns one too.
  *     tags: [Catalog]
  *     security: []
  *     parameters: [{ in: path, name: ref, required: true, schema: { type: string } }]
  *     responses:
  *       200:
- *         description: Array of keywords ({ id, name, slug })
+ *         description: Array of keywords ({ id, name, slug }) — empty when the ref is unknown or nothing is curated
  *         content: { application/json: { schema: { $ref: '#/components/schemas/TagListResponse' } } }
- *       404:
- *         description: Industry not found
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.get('/industries/:ref/keywords', controller.industryKeywords);
 

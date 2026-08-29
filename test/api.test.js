@@ -1144,6 +1144,54 @@ test('import assets: resolves the category, upserts by s3_key, links tags, tags 
   assert.equal(await models.Asset.count({ where: { category_id: cat.id } }), 2, 'no duplicates');
 });
 
+test('import assets: stores the thumbnail alongside the file, clears it with NONE, warns on a bad prefix', async () => {
+  const token = h.adminToken(['assets.*']);
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `IMP Thumb Cat ${stamp}`, slug: `imp-thumb-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const iconKey  = `assets/icon/thumb-${stamp}.svg`;
+  const thumbKey = `assets/thumbnail/thumb-${stamp}.png`;
+  const strayKey = `assets/icon/stray-thumb-${stamp}.png`;   // a thumbnail filed with the deliverables
+  const audioKey = `assets/audio/thumb-${stamp}.mp3`;
+
+  const present = {
+    [iconKey]: { content_type: 'image/svg+xml' }, [thumbKey]: { content_type: 'image/png' },
+    [strayKey]: { content_type: 'image/png' }, [audioKey]: { content_type: 'audio/mpeg' },
+  };
+  const rows = (thumbCell) => [
+    'category,name,asset_type,s3_key,thumbnail_s3_key,is_premium,status,tags',
+    `${cat.slug},IMP Premium ${stamp},icon,${iconKey},${thumbCell},1,active,`,
+    // an mp3 has no preview of its own, so its thumbnail is an image either way
+    `${cat.slug},IMP Chime ${stamp},audio,${audioKey},${strayKey},1,active,`,
+  ].join('\n');
+
+  const { result: res, tagged } = await withS3Objects(present, () => importCsv('assets', rows(thumbKey), { token }));
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.summary.created, 2);
+
+  const assets = await models.Asset.findAll({ where: { category_id: cat.id } });
+  track.assets.push(...assets.map((a) => a.id));
+  const icon = assets.find((a) => a.asset_type === 'icon');
+  assert.equal(icon.thumbnail_s3_key, thumbKey, 'thumbnail saved next to the file');
+  assert.ok(tagged.some(([k]) => k === thumbKey), 'the thumbnail is flipped to status=active too');
+
+  // The audio row's thumbnail sits under assets/audio-adjacent icon space — advisory only.
+  const strayWarnings = res.body.data.rows.flatMap((r) => r.warnings).join(' | ');
+  assert.match(strayWarnings, /thumbnail_s3_key: expected a key under 'assets\/thumbnail\/'/);
+  const audio = assets.find((a) => a.asset_type === 'audio');
+  assert.equal(audio.thumbnail_s3_key, strayKey, 'still imported — a misfiled key is a warning, not a skip');
+
+  // Blank keeps what is stored; NONE clears it.
+  await withS3Objects(present, () => importCsv('assets', rows(''), { token }));
+  await icon.reload();
+  assert.equal(icon.thumbnail_s3_key, thumbKey, 'blank cell leaves the thumbnail alone');
+
+  await withS3Objects(present, () => importCsv('assets', rows('NONE'), { token }));
+  await icon.reload();
+  assert.equal(icon.thumbnail_s3_key, null, 'NONE removes the thumbnail');
+  assert.equal(icon.s3_key, iconKey, 'the deliverable is untouched');
+});
+
 test('import assets: skips unknown category, blank s3_key and bad asset_type; warns on key problems', async () => {
   const token = h.adminToken(['assets.*']);
   const stamp = Date.now();
@@ -1387,13 +1435,102 @@ test('public /assets filters by category slug/uid/id and tag slug (anchor requir
   assert.ok(has(await h.request('GET', `${P}/assets?category=${cat.uid}`)),        'found via category uid');
   assert.ok(has(await h.request('GET', `${P}/assets?category_id=${cat.id}`)),       'found via legacy category_id');
 
-  // supplied-but-unresolved anchor => empty page, not 400
+  // supplied-but-unresolved anchor => empty page, not 400. Still true now that
+  // category is optional: absent and unresolved must not collapse together, or a
+  // typo'd slug would return the whole library instead of nothing.
   const bad = await h.request('GET', `${P}/assets?category=no-such-asset-cat`);
   assert.equal(bad.status, 200);
   assert.equal(bad.body.data.length, 0, 'bad category slug yields empty');
 
-  // no anchor => 400
+  // neither anchor => 400
   assert.equal((await h.request('GET', `${P}/assets`)).status, 400);
+});
+
+test('public /assets: asset_type anchors the browse on its own', async () => {
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ uid: uuid(), name: `TST Type Cat ${stamp}`, slug: `tst-type-cat-${stamp}`, is_active: 1 });
+  track.assetCategories.push(cat.id);
+
+  const inCat = await models.Asset.create({ uid: uuid(), category_id: cat.id, name: `TST Typed ${stamp}`, s3_key: 'k/typed.mp3', asset_type: 'audio', status: 'active', is_premium: 0 });
+  track.assets.push(inCat.id);
+  // Category is nullable and both the admin create and the CSV import leave it
+  // optional, so orphans like this one exist. Reaching them is the point of the
+  // second anchor — a category-only endpoint never could.
+  const orphan = await models.Asset.create({ uid: uuid(), category_id: null, name: `TST Orphan ${stamp}`, s3_key: 'k/orphan.mp3', asset_type: 'audio', status: 'active', is_premium: 0 });
+  track.assets.push(orphan.id);
+
+  const has = (r, a) => r.body.data.some((x) => x.uid === a.uid);
+
+  // Type alone spans categories, including the orphan. The shared test DB holds
+  // other audio assets, so assert membership rather than an exact page.
+  const byType = await h.request('GET', `${P}/assets?asset_type=audio&limit=100`);
+  assert.equal(byType.status, 200);
+  assert.ok(has(byType, inCat),  'type anchor finds the categorized asset');
+  assert.ok(has(byType, orphan), 'type anchor reaches the uncategorized asset');
+
+  // Both anchors combine.
+  const both = await h.request('GET', `${P}/assets?category=${cat.slug}&asset_type=audio`);
+  assert.ok(has(both, inCat),   'category + type finds the categorized asset');
+  assert.ok(!has(both, orphan), 'category + type excludes the other category');
+
+  // A mismatched type narrows to nothing rather than falling back to the category.
+  const mismatch = await h.request('GET', `${P}/assets?category=${cat.slug}&asset_type=video`);
+  assert.equal(mismatch.status, 200);
+  assert.ok(!has(mismatch, inCat), 'non-matching type excludes the asset');
+
+  // 'null' is the uncategorized anchor.
+  const uncategorized = await h.request('GET', `${P}/assets?category=null&asset_type=audio&limit=100`);
+  assert.equal(uncategorized.status, 200);
+  assert.ok(has(uncategorized, orphan),  'category=null lists uncategorized assets');
+  assert.ok(!has(uncategorized, inCat),  'category=null excludes categorized assets');
+
+  // An unknown type is a 400, NOT a silently dropped filter: as an anchor, a
+  // dropped `asset_type=icons` would hand back the entire library.
+  assert.equal((await h.request('GET', `${P}/assets?asset_type=icons`)).status, 400);
+  // 'font' is in the DB enum but not an accepted asset type (fonts live in `fonts`).
+  assert.equal((await h.request('GET', `${P}/assets?asset_type=font`)).status, 400);
+});
+
+test('public /assets: a locked premium asset keeps its thumbnail but loses its file', async () => {
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ uid: uuid(), name: `TST Lock Cat ${stamp}`, slug: `tst-lock-cat-${stamp}`, is_active: 1 });
+  track.assetCategories.push(cat.id);
+
+  const thumb = `assets/thumbnail/prem-${stamp}.png`;
+  const premium = await models.Asset.create({
+    uid: uuid(), category_id: cat.id, name: `TST Premium ${stamp}`, asset_type: 'icon',
+    s3_key: `assets/icon/prem-${stamp}.svg`, thumbnail_s3_key: thumb, status: 'active', is_premium: 1,
+  });
+  // A free asset with no thumbnail of its own — the client falls back to s3_key.
+  const free = await models.Asset.create({
+    uid: uuid(), category_id: cat.id, name: `TST Free ${stamp}`, asset_type: 'icon',
+    s3_key: `assets/icon/free-${stamp}.svg`, status: 'active', is_premium: 0,
+  });
+  track.assets.push(premium.id, free.id);
+
+  const find = (r, uid) => r.body.data.find((a) => a.uid === uid);
+
+  for (const [label, opts] of [['guest', {}], ['free user', { token: h.userTokenFor(1, 'free') }]]) {
+    const res = await h.request('GET', `${P}/assets?category=${cat.slug}`, opts);
+    assert.equal(res.status, 200);
+
+    const p = find(res, premium.uid);
+    assert.equal(p.is_locked, true, `${label}: premium asset is locked`);
+    assert.equal(p.s3_key, undefined, `${label}: the file is withheld`);
+    assert.equal(p.thumbnail_s3_key, thumb, `${label}: the thumbnail is still served, so the card can be drawn`);
+
+    const f = find(res, free.uid);
+    assert.equal(f.is_locked, false, `${label}: free asset is not locked`);
+    assert.equal(f.s3_key, free.s3_key, `${label}: free asset keeps its file`);
+    assert.equal(f.thumbnail_s3_key, null, `${label}: no separate thumbnail — client falls back to s3_key`);
+  }
+
+  // A paid viewer gets both keys on the premium row.
+  const paid = await h.request('GET', `${P}/assets?category=${cat.slug}`, { token: h.userTokenFor(1, 'paid') });
+  const unlocked = find(paid, premium.uid);
+  assert.equal(unlocked.is_locked, false, 'paid viewer: not locked');
+  assert.equal(unlocked.s3_key, premium.s3_key, 'paid viewer: gets the file');
+  assert.equal(unlocked.thumbnail_s3_key, thumb, 'paid viewer: still gets the thumbnail');
 });
 
 // ---------- Ownership ----------
@@ -1964,7 +2101,49 @@ test('industry keywords: a sub-industry inherits its parent keywords, own ones f
   const top = await h.request('GET', `${P}/industries/${parent.slug}/keywords`);
   assert.deepEqual(top.body.data.map((t) => t.name), [tags[2].name]);
 
-  assert.equal((await h.request('GET', `${P}/industries/no-such-industry/keywords`)).status, 404);
+  // An unknown ref is an empty picker, not a 404: the user was just made to pick an
+  // industry, and answering "not found" about their own choice reads as a bug.
+  const unknown = await h.request('GET', `${P}/industries/no-such-industry/keywords`);
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(unknown.body.data, []);
+});
+
+test('industry keywords: a pending "Others" sub-industry falls back to its parent keywords', async () => {
+  const stamp = Date.now() + 12;
+  const { parent, child, tags } = await mkKeywordFixture(stamp);
+  const u     = await mkUser('PendingKw');
+  const token = h.userTokenFor(u.id);
+
+  // The "Others" path: the owner types a sub-industry that is not in the catalogue.
+  // It lands as status='pending', is_active=0 — and is immediately their industry.
+  const customName = `TST Pending Kw ${stamp}`;
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Pending Biz ${stamp}`, industry: parent.slug, custom_sub_industry: customName },
+  });
+  assert.equal(created.status, 201);
+
+  const suggested = await models.BusinessCategory.findOne({ where: { name: customName } });
+  track.businessCategories.push(suggested.id);
+  assert.equal(suggested.status, 'pending');
+  assert.equal(suggested.is_active, 0);
+  assert.equal(suggested.parent_id, parent.id);
+
+  // The picker must answer for it — with the parent's keywords, since a fresh
+  // suggestion has none of its own.
+  const r = await h.request('GET', `${P}/industries/${suggested.slug}/keywords`);
+  assert.equal(r.status, 200, 'a pending industry is not a 404 here');
+  assert.deepEqual(r.body.data.map((t) => t.name), [tags[2].name], 'inherits the parent keyword');
+
+  // Sanity: the same row is still hidden from the catalogue reads that DO gate.
+  assert.equal((await h.request('GET', `${P}/industries/${suggested.slug}`)).status, 404, 'no public landing page');
+  const list = await h.request('GET', `${P}/industries?parent=${parent.slug}`);
+  assert.ok(!list.body.data.some((c) => c.id === suggested.id), 'not listed in the catalogue');
+
+  // A retired parent must not empty the picker of a business already attached below it.
+  await models.BusinessCategory.update({ is_active: 0 }, { where: { id: parent.id } });
+  const afterRetire = await h.request('GET', `${P}/industries/${child.slug}/keywords`);
+  assert.equal(afterRetire.body.data.length, 3, 'still own 2 + inherited 1');
+  await models.BusinessCategory.update({ is_active: 1 }, { where: { id: parent.id } });
 });
 
 test('create business with sub_industry + keywords (id / slug / name all resolve)', async () => {
@@ -2013,6 +2192,41 @@ test('create business with sub_industry + keywords (id / slug / name all resolve
     body:  { name: `TST Kw Both ${stamp}`, industry: parent.slug, sub_industry: child.slug, custom_sub_industry: 'Whatever' },
   });
   assert.equal(both.status, 400);
+});
+
+test('owner business reads expand BusinessCategory.parent', async () => {
+  const stamp = Date.now() + 11;
+  const { parent, child } = await mkKeywordFixture(stamp);
+  const u     = await mkUser('ParentExp');
+  const token = h.userTokenFor(u.id);
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Parent Exp ${stamp}`, industry: parent.slug, sub_industry: child.slug },
+  });
+  assert.equal(created.status, 201);
+
+  // Every owner-facing read shares one include, so create and list must agree.
+  for (const [label, cat] of [
+    ['create', created.body.data.BusinessCategory],
+    ['list',   (await h.request('GET', `${P}/businesses`, { token })).body.data[0].BusinessCategory],
+    ['get',    (await h.request('GET', `${P}/businesses/${created.body.data.uid}`, { token })).body.data.BusinessCategory],
+  ]) {
+    assert.equal(cat.id, child.id, `${label}: attached to the leaf industry`);
+    assert.ok(cat.parent, `${label}: parent expanded`);
+    assert.equal(cat.parent.id, parent.id, `${label}: parent id`);
+    assert.equal(cat.parent.slug, parent.slug, `${label}: parent slug`);
+    assert.equal(cat.parent.name, parent.name, `${label}: parent name`);
+  }
+
+  // A top-level pick has no parent — the row must still come back, not be dropped
+  // by the join.
+  const u2  = await mkUser('ParentExpTop');
+  const top = await h.request('POST', `${P}/businesses`, {
+    token: h.userTokenFor(u2.id), body: { name: `TST Parent Top ${stamp}`, industry: parent.slug },
+  });
+  assert.equal(top.status, 201);
+  assert.equal(top.body.data.BusinessCategory.id, parent.id, 'attached to the top-level industry');
+  assert.equal(top.body.data.BusinessCategory.parent, null, 'top-level industry has parent: null');
 });
 
 test('PUT /businesses/{uid}/keywords replaces the set and is owner-only', async () => {
@@ -3966,15 +4180,19 @@ test('admin batch presign signs mixed targets, and refuses the whole batch if on
         { target: { type: 'image_slot', slot: 'banner' },        filename: 'hero.png' },
         { target: { type: 'asset', asset_type: 'icon' },         filename: 'star.svg' },   // admins may upload SVG
         { target: { type: 'image_slot', slot: 'variant_badge_icon' }, filename: 'badge.png' },
+        { target: { type: 'image_slot', slot: 'asset_thumbnail' },    filename: 'star-preview.png' },
       ] },
     });
     assert.equal(r.status, 200);
 
-    const [banner, icon, badge] = r.body.data.files;
+    const [banner, icon, badge, thumb] = r.body.data.files;
     assert.ok(banner.key.startsWith('banners/') && banner.key.endsWith('.png'));
     assert.ok(icon.key.startsWith('assets/icon/'), 'targets may be mixed within a batch');
     assert.ok(badge.key.startsWith('variants/badge-icon/'));
-    assert.equal(new Set(r.body.data.files.map((f) => f.key)).size, 3);
+    // The preview is kept out of the asset_type folders the deliverables live in,
+    // since it is the one asset file served to people who have not paid.
+    assert.ok(thumb.key.startsWith('assets/thumbnail/'), 'asset thumbnails get their own prefix');
+    assert.equal(new Set(r.body.data.files.map((f) => f.key)).size, 4);
     assert.ok(r.body.data.files.every((f) => f.upload_url && f.required_headers['x-amz-tagging'] === 'status=pending'));
     assert.equal(r.body.data.expires_in, 900, 'reported once, not per file');
 

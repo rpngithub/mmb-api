@@ -3047,7 +3047,7 @@
       },
       {
         "name": "Assets (public)",
-        "description": "`category` (the anchor) is required. Premium assets return `is_locked=true` and omit `s3_key` for guests/free users.",
+        "description": "At least one of `category` or `asset_type` is required — either anchors the browse and they combine; `category=null` lists uncategorized assets. A `category` that matches nothing returns an empty page, while an unknown `asset_type` is a 400. Premium assets return `is_locked=true` and omit `s3_key` for guests/free users, but always carry `thumbnail_s3_key` so the locked card can still be drawn. Render `thumbnail_s3_key || s3_key`.",
         "item": [
           {
             "name": "List Assets",
@@ -3289,7 +3289,7 @@
                   "keywords"
                 ]
               },
-              "description": "The curated keywords for one industry. A sub-industry ALSO inherits its parent's keywords — merged and de-duped, its own first — so a bakery's picker offers the bakery keywords ahead of the generic food ones. `ref` is a slug, uid or numeric id. These are exactly the values `POST /businesses` and `PUT /businesses/{uid}/keywords` accept.",
+              "description": "The curated keywords for one industry. A sub-industry ALSO inherits its parent's keywords — merged and de-duped, its own first — so a bakery's picker offers the bakery keywords ahead of the generic food ones. `ref` is a slug, uid or numeric id. These are exactly the values `POST /businesses` and `PUT /businesses/{uid}/keywords` accept.\n\nThis endpoint never 404s and applies no active/moderation gate: an unknown or hidden `ref` returns `[]`. A sub-industry filed through the \"Others\" path is `pending` until an admin approves it, but it is already the owner's industry — so the picker answers for it with the PARENT's keywords, since a fresh suggestion has none of its own. An empty array is a normal answer here.",
               "auth": {
                 "type": "noauth"
               }

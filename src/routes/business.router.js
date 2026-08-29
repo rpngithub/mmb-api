@@ -70,7 +70,11 @@ const deprecated = require('../middlewares/deprecated');
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   get:
  *     summary: List my businesses
- *     description: Array for forward compatibility, but an account currently holds at most one business.
+ *     description: >-
+ *       Array for forward compatibility, but an account currently holds at most one business.
+ *       The business attaches to a LEAF industry; `BusinessCategory.parent` carries the parent
+ *       industry expanded (null when the pick is itself top-level), so the client can render
+ *       "Restaurant & Food › Bakery & Sweets" without a second call.
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     responses:
