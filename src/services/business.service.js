@@ -31,8 +31,20 @@ const MAX_BUSINESSES_PER_USER = 1;
 // the picked families without a second call.
 const FONT_ATTRS = ['id', 'uid', 'family', 'is_premium'];
 
+// Industries are a two-level tree ("Restaurant & Food" > "Bakery & Sweets") and
+// the business is always attached to the LEAF. The owner-facing screens want to
+// label the parent too, so it is expanded inline as `BusinessCategory.parent`
+// rather than left as a bare `parent_id` the client has to resolve with a second
+// call. Same attribute set at both levels; `required: false` so a business
+// attached to a top-level industry still lists, with `parent: null`.
+const INDUSTRY_ATTRS = ['id', 'uid', 'slug', 'name', 'parent_id', 'status', 'is_active'];
+
 const OWNER_INCLUDE = [
-  { model: BusinessCategory, attributes: ['id', 'uid', 'slug', 'name', 'parent_id', 'status', 'is_active'] },
+  {
+    model:      BusinessCategory,
+    attributes: INDUSTRY_ATTRS,
+    include:    [{ model: BusinessCategory, as: 'parent', attributes: INDUSTRY_ATTRS, required: false }],
+  },
   { model: Tag, attributes: ['id', 'name', 'slug'], through: { attributes: [] } },
   { model: Font, as: 'headingFont', attributes: FONT_ATTRS },
   { model: Font, as: 'bodyFont',    attributes: FONT_ATTRS },

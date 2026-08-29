@@ -217,7 +217,7 @@ const ENTITIES = {
         hint: 'create it in Asset Categories, or import asset-categories before this file',
       },
     ],
-    columns: ['category', 'name', 'asset_type', 's3_key', 'is_premium', 'status', 'tags'],
+    columns: ['category', 'name', 'asset_type', 's3_key', 'thumbnail_s3_key', 'is_premium', 'status', 'tags'],
     intColumns: [],
     boolColumns: ['is_premium'],
     textColumns: ['asset_type'],
@@ -233,6 +233,10 @@ const ENTITIES = {
         help: 'assets/<asset_type>/',
         helpExts: '<ext>',
       },
+      // Always an image, whatever the asset is — an mp3 and a Lottie both need
+      // something to show on the card — so no `kind` function here. Optional, and
+      // NONE clears it; only a premium row really needs one (see the help below).
+      thumbnail_s3_key: 'assets/thumbnail/',
     },
     help: [
       '# Assets import. Lines starting with # are ignored.',
@@ -241,13 +245,16 @@ const ENTITIES = {
       `# asset_type (required): one of ${ASSET_TYPES.join(', ')}.`,
       '# s3_key (required): rows are matched on it — re-importing the same key UPDATES that asset instead of adding a second one.',
       '#   File by asset_type: icon/emoji/shape/bg -> png, jpg, webp, svg · audio -> mp3, wav, m4a · video -> mp4, webm · animated -> json (Lottie), gif, webp, mp4',
+      '# thumbnail_s3_key: the preview image shown while browsing, always a png/jpg/webp/svg whatever the asset_type is.',
+      '#   It is shown to users who have NOT paid, so on a premium row upload a small/watermarked copy — never the real file again.',
+      '#   Optional on a free row (the app falls back to s3_key), but a premium row without one shows an empty card.',
       '# is_premium: 1 or 0 (1 = paid plans only). status: active or inactive (1/0 accepted). tags: pipe-separated, e.g. diwali|festival|lamp',
     ],
     example: [
-      ['Festive Icons', 'Diya', 'icon', 'assets/icon/diya.svg', '0', 'active', 'diwali|festival'],
-      ['Festive Icons', 'Firecracker', 'icon', 'assets/icon/firecracker.svg', '1', 'active', 'diwali'],
-      ['Backgrounds', 'Gold Bokeh', 'bg', 'assets/bg/gold-bokeh.jpg', '1', 'active', 'festive|gold'],
-      ['Sound Effects', 'Chime', 'audio', 'assets/audio/chime.mp3', '0', 'inactive', ''],
+      ['Festive Icons', 'Diya', 'icon', 'assets/icon/diya.svg', '', '0', 'active', 'diwali|festival'],
+      ['Festive Icons', 'Firecracker', 'icon', 'assets/icon/firecracker.svg', 'assets/thumbnail/firecracker.png', '1', 'active', 'diwali'],
+      ['Backgrounds', 'Gold Bokeh', 'bg', 'assets/bg/gold-bokeh.jpg', 'assets/thumbnail/gold-bokeh.jpg', '1', 'active', 'festive|gold'],
+      ['Sound Effects', 'Chime', 'audio', 'assets/audio/chime.mp3', 'assets/thumbnail/chime-waveform.png', '0', 'inactive', ''],
     ],
   },
 };
