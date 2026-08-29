@@ -49,12 +49,17 @@ const updateBillingOptionSchema = Joi.object({
 }).min(1);
 
 // ---- Feature types (the feature catalog) ----
+// `is_topupable` opens the feature up to top-up packs. Editable here so enabling
+// one later is an admin action rather than a deploy — but it only decides whether
+// a pack MAY be sold; the meter itself still has to exist in code for the granted
+// quota to ever be spent.
 const createFeatureTypeSchema = Joi.object({
   key:          Joi.string().min(1).max(100).required(),
   label:        Joi.string().min(1).max(200).required(),
   description:  Joi.string().allow('', null).optional(),
   reset_period: Joi.string().valid('monthly', 'annual', 'never').optional(),
   data_type:    Joi.string().valid('integer', 'boolean').optional(),
+  is_topupable: Joi.number().valid(0, 1).optional(),
 });
 
 const updateFeatureTypeSchema = Joi.object({
@@ -63,6 +68,7 @@ const updateFeatureTypeSchema = Joi.object({
   description:  Joi.string().allow('', null).optional(),
   reset_period: Joi.string().valid('monthly', 'annual', 'never').optional(),
   data_type:    Joi.string().valid('integer', 'boolean').optional(),
+  is_topupable: Joi.number().valid(0, 1).optional(),
 }).min(1);
 
 // ---- Plan features (per-plan feature values) ----

@@ -24,6 +24,11 @@ module.exports = (sequelize) => {
     // nothing to a renderer.
     heading_font_id: { type: DataTypes.INTEGER, allowNull: true },
     body_font_id:    { type: DataTypes.INTEGER, allowNull: true },
+    // "Active Frames" — the one frame from the owner's shelf applied to this
+    // business's designs. Points at `frames` (not `user_frames`) so the editor
+    // resolves the design payload in one hop; the service refuses to set it to
+    // anything the owner does not own.
+    active_frame_id: { type: DataTypes.INTEGER, allowNull: true },
     latitude:      { type: DataTypes.DECIMAL(10, 8), allowNull: true },
     longitude:     { type: DataTypes.DECIMAL(11, 8), allowNull: true },
     geohash:       { type: DataTypes.STRING(12), allowNull: true },
@@ -49,6 +54,7 @@ module.exports = (sequelize) => {
     Business.belongsToMany(models.Tag,          { through: models.BusinessTag, foreignKey: 'business_id' });
     Business.belongsTo(models.Font,             { as: 'headingFont', foreignKey: 'heading_font_id' });
     Business.belongsTo(models.Font,             { as: 'bodyFont',    foreignKey: 'body_font_id' });
+    Business.belongsTo(models.Frame,            { as: 'activeFrame', foreignKey: 'active_frame_id' });
   };
 
   return Business;

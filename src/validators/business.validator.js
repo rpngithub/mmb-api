@@ -55,6 +55,9 @@ const createBusinessSchema = Joi.object({
   // uploaded; a premium library font needs a paid plan. null clears the role.
   heading_font_id: Joi.number().integer().positive().allow(null).optional(),
   body_font_id:    Joi.number().integer().positive().allow(null).optional(),
+  // "Active Frames" — the frame applied to this business's designs. Must be one
+  // the owner has in My Frames (GET /frames/mine); null takes the frame off.
+  active_frame_id: Joi.number().integer().positive().allow(null).optional(),
   city:        Joi.string().max(100).optional(),
   state:       Joi.string().max(100).optional(),
   address:     Joi.string().optional(),

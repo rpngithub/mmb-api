@@ -88,7 +88,14 @@
  *             remaining_bytes:
  *               type: integer
  *               nullable: true
- *               description: Headroom in bytes; null when limit_bytes is null. Same value presign reports as storage_remaining.
+ *               description: Headroom in bytes; null when limit_bytes is null. Same value presign reports as storage_remaining. Includes any purchased top-up.
+ *             topup_bytes:
+ *               type: integer
+ *               description: >-
+ *                 Capacity bought through a storage top-up, already counted in remaining_bytes.
+ *                 Reported separately so a client can say "100 MB plan + 500 MB bought" rather
+ *                 than one opaque total. Storage is a level, so freeing a file returns this
+ *                 capacity — it is a permanently raised ceiling, not a one-off allowance.
  *             unlimited:
  *               type: boolean
  *               description: Test this rather than checking the nulls.

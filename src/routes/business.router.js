@@ -34,9 +34,11 @@ const deprecated = require('../middlewares/deprecated');
  *             properties:
  *               name:        { type: string }
  *               industry:    { type: string, description: "Industry (business category) — slug, uid, or numeric id" }
- *               sub_industry: { type: string, description: "Child industry under `industry` — slug, uid, or numeric id. Mutually exclusive with custom_sub_industry." }
+ *               sub_industry: { type: string, description: "Child industry under `industry` — slug, uid, or numeric id. Mutually exclusive with custom_sub_industry. List the choices with GET /industries?parent={industry}; an empty list is the \"Others\" case." }
  *               custom_sub_industry:
  *                 type: string
+ *                 minLength: 2
+ *                 maxLength: 100
  *                 description: >-
  *                   The "Others" path — free text typed when the owner can't find their
  *                   sub-industry. Files it as a PENDING industry under `industry` (which is
@@ -163,13 +165,44 @@ router.get('/:uid/products', optionalAuth, rateLimiter.publicTiered, controller.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   patch:
  *     summary: Update a business (owner only)
+ *     description: >-
+ *       Partial update — every field of POST /businesses is patchable, including the industry
+ *       pick. Because an account holds at most one business, this is the ONLY route left to an
+ *       owner who has already finished signup: a second POST /businesses is a 409, so changing
+ *       industry or suggesting an "Others" sub-industry happens here.
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       description: Any subset of the create fields. Only the industry trio is spelled out here.
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:        { type: string }
+ *               description: { type: string }
+ *               industry:    { type: string, description: "Industry (business category) — slug, uid, or numeric id" }
+ *               sub_industry: { type: string, description: "Child industry under `industry` — slug, uid, or numeric id. Mutually exclusive with custom_sub_industry. List the choices with GET /industries?parent={industry}." }
+ *               custom_sub_industry:
+ *                 type: string
+ *                 minLength: 2
+ *                 maxLength: 100
+ *                 description: >-
+ *                   The "Others" path, exactly as on create — free text for a sub-industry the
+ *                   catalogue does not offer. `industry` is required alongside it. Files a PENDING
+ *                   child of that industry and moves this business onto it immediately; the label
+ *                   stays hidden from GET /industries and from the public storefront until an admin
+ *                   approves it, while the owner's own read shows BusinessCategory.status = pending.
+ *                   An existing name (case-insensitive) resolves to that row rather than filing a
+ *                   duplicate; a previously rejected name is a 400.
  *     responses:
  *       200:
  *         description: Updated business
  *         content: { application/json: { schema: { $ref: '#/components/schemas/BusinessResponse' } } }
+ *       400:
+ *         description: Unknown industry, a sub_industry that is not a child of it, both sub_industry and custom_sub_industry, or custom_sub_industry with no industry
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *       403:
  *         description: Access denied
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }

@@ -7,6 +7,12 @@ module.exports = (sequelize) => {
     user_id:               { type: DataTypes.INTEGER, allowNull: false },
     subscription_id:       { type: DataTypes.INTEGER, allowNull: true },
     order_type:            { type: DataTypes.ENUM('subscription', 'one_time'), defaultValue: 'subscription' },
+    // WHAT was bought. `order_type` only says how it was billed, and fulfilment
+    // used to infer the purchasable from absence ("no subscription_id means a
+    // frame") — an inference that stops being true the moment there is a third
+    // kind. Nullable because rows predating the discriminator still exist; the
+    // router treats NULL as 'frame', which is what they all were.
+    purchase_type:         { type: DataTypes.ENUM('subscription', 'frame', 'quota_pack'), allowNull: true },
     amount:                { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     amount_before_tax:     { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     gst_rate:              { type: DataTypes.DECIMAL(5, 2), defaultValue: 18 },

@@ -38,6 +38,22 @@ CORS is enforced by browsers, not by the server.
 **Run folder** sends every request in a group in order and stops at the first non-2xx. That is the
 fastest way to find where a journey breaks — the first red row is the gap.
 
+### The "Others" industry
+
+The signup picker is **Catalog → Industries** (`parent=null`) then **Catalog → Sub-Industries**
+(`parent={{industry_slug}}`). When nothing there fits — and most seeded industries have no children
+at all — that is the "Others" case: send `custom_sub_industry` instead of `sub_industry`.
+
+Use **Businesses → Set Sub-Industry / Others**. It is a PATCH rather than a create because one
+business per account means a signed-up user gets a 409 out of `POST /businesses` forever; the same
+two fields go on the create at signup. Edit `custom_sub_industry` in **Variables** to file a
+different name — the default is reused deliberately, so re-running joins the row it filed last time
+instead of stacking entries in the admin moderation queue.
+
+The suggestion comes back as `BusinessCategory.status: "pending"` on your own business (that is the
+"pending approval" chip) and is invisible on `GET /industries` and on the public storefront until an
+admin approves it.
+
 Variables persist in `localStorage` per browser. **reset** restores the seed values.
 
 ### Reading the screen
@@ -62,6 +78,6 @@ playground and the collections never disagree.
 
 ## Scope
 
-App endpoints only — 88 requests across Auth, Users, Businesses, Projects, Products, Frames,
+App endpoints only — 93 requests across Auth, Users, Businesses, Projects, Products, Frames,
 Uploads, Fonts, Feedback, Templates, Assets, Catalog, Config and Subscriptions. Admin endpoints are
 excluded by design; use the full Postman collection for those.

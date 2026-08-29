@@ -28,7 +28,11 @@ async function createExport(projectUid, userId, { export_type, platform, s3_key 
     status:      'success',
   });
 
-  await quota.consume(userId, feature);
+  await quota.consume(userId, feature, 1, {
+    source:   export_type === 'share' ? 'share' : 'download',
+    ref_type: 'project_export',
+    ref_id:   record.id,
+  });
   return record;
 }
 

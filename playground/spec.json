@@ -743,7 +743,7 @@
                   "businesses"
                 ]
               },
-              "description": "`industry` is the public name for the business category and accepts a **slug**, uid, or numeric id. `category_id` is the deprecated legacy form (still accepted).\n\n`sub_industry` is the child pick under `industry`; `custom_sub_industry` is the \"Others\" path — free text that files a PENDING industry for admin approval and links the business to it right away (the chip stays hidden publicly until approved). The two are mutually exclusive.\n\n`keywords` must already exist in the tag catalogue — see `GET /industries/{ref}/keywords` for the suggestions; an unknown keyword is a 400 naming it.\n\n`logo_s3_key` / `cover_s3_key` must be keys **you** were issued by `POST /uploads/presign` for slots `business_logo` / `business_cover`; a key from another namespace or slot is rejected.\n\n`heading_font_id` / `body_font_id` come from `GET /fonts` (a premium library font needs a paid plan). `watermark_enabled: 1` needs the `custom_watermark` plan feature (403 otherwise) — turning it off is always allowed.\n\nOne business per account: a second create is a **409**.",
+              "description": "`industry` is the public name for the business category and accepts a **slug**, uid, or numeric id. `category_id` is the deprecated legacy form (still accepted).\n\n`sub_industry` is the child pick under `industry` (list them with **Catalog → Sub-Industries**); `custom_sub_industry` is the \"Others\" path — free text typed when the owner's trade is not in that list. It files a PENDING industry for admin approval and links the business to it right away (the chip stays hidden publicly until approved). The two are mutually exclusive — sending both is a 400.\n\nThe \"Others\" body is the sample below plus:\n\n```json\n{ \"industry\": \"{{industry_slug}}\", \"custom_sub_industry\": \"{{custom_sub_industry}}\" }\n```\n\n`industry` is **required** alongside it — a suggestion with no parent has no context for the admin reviewing it (400). A name that already exists converges on that row instead of filing a duplicate (case-insensitive), and a name an admin previously rejected is refused.\n\n`keywords` must already exist in the tag catalogue — see `GET /industries/{ref}/keywords` for the suggestions; an unknown keyword is a 400 naming it.\n\n`logo_s3_key` / `cover_s3_key` must be keys **you** were issued by `POST /uploads/presign` for slots `business_logo` / `business_cover`; a key from another namespace or slot is rejected.\n\n`heading_font_id` / `body_font_id` come from `GET /fonts` (a premium library font needs a paid plan). `watermark_enabled: 1` needs the `custom_watermark` plan feature (403 otherwise) — turning it off is always allowed.\n\nOne business per account: a second create is a **409**, so once you are signed up the industry pick (including \"Others\") moves to **Set Sub-Industry / Others** below.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"name\": \"My Coffee Shop\",\n  \"industry\": \"{{industry_slug}}\",\n  \"description\": \"Best coffee in town\",\n  \"logo_s3_key\": \"\",\n  \"cover_s3_key\": \"\",\n  \"brand_colors\": [\n    {\n      \"hex\": \"#1A2B3C\",\n      \"label\": \"Brand Blue\"\n    },\n    {\n      \"hex\": \"#F5A623\"\n    }\n  ],\n  \"watermark_enabled\": 0,\n  \"heading_font_id\": null,\n  \"body_font_id\": null,\n  \"city\": \"Bengaluru\",\n  \"state\": \"Karnataka\",\n  \"address\": \"12 MG Road\",\n  \"latitude\": 12.9716,\n  \"longitude\": 77.5946,\n  \"phone\": \"+919876543210\",\n  \"whatsapp\": \"+919876543210\",\n  \"email\": \"hello@coffee.com\",\n  \"website\": \"https://coffee.com\",\n  \"social_links\": {\n    \"instagram\": \"https://instagram.com/coffee\"\n  },\n  \"operating_hours\": {\n    \"mon\": {\n      \"open\": \"09:00\",\n      \"close\": \"21:00\"\n    },\n    \"sun\": null\n  }\n}",
@@ -861,7 +861,7 @@
                   "{{business_uid}}"
                 ]
               },
-              "description": "Every create field is patchable. `watermark_enabled: 1` is plan-gated (`custom_watermark`) and 403s on a free plan; `heading_font_id` / `body_font_id` need ids from `GET /fonts`.",
+              "description": "Every create field is patchable, `industry` / `sub_industry` / `custom_sub_industry` included (see **Set Sub-Industry / Others** for that trio). `watermark_enabled: 1` is plan-gated (`custom_watermark`) and 403s on a free plan; `heading_font_id` / `body_font_id` need ids from `GET /fonts`.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"description\": \"Updated description\",\n  \"industry\": \"{{industry_slug}}\"\n}",
@@ -885,6 +885,59 @@
                     "  const body = pm.response.json();",
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
                     "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Set Sub-Industry / Others",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/businesses/{{business_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "businesses",
+                  "{{business_uid}}"
+                ]
+              },
+              "description": "The **\"Others\" industry** flow — the owner cannot find their trade in `GET /industries?parent={{industry_slug}}` and types it instead.\n\nWhat happens: the text is filed as a **pending** child of `industry` (`status: pending`, `is_active: 0`), the business is linked to it immediately, and the label stays hidden from the public catalogue and storefront until an admin approves it in **Admin → Business Categories** (`?status=pending`). Your own `GET /businesses/{uid}` shows it right away with `BusinessCategory.status: \"pending\"`, which is what renders the \"pending approval\" chip.\n\nRules worth knowing:\n- `industry` is **required** with it — no parent, no review context, 400.\n- `custom_sub_industry` and `sub_industry` are mutually exclusive; sending both is a 400.\n- 2–100 characters.\n- Names are globally unique and case-insensitive, so re-sending an existing name joins that row rather than filing a duplicate — an already-approved name simply becomes a normal pick.\n- A name an admin has **rejected** is refused with a 400.\n\nPicking an existing child instead? Swap the key for `sub_industry` (slug, uid or numeric id of a child of `industry`).\n\nAt signup the same two fields go on `POST /businesses` — see **Create Business**.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"industry\": \"{{industry_slug}}\",\n  \"custom_sub_industry\": \"{{custom_sub_industry}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const c = d.BusinessCategory || {};",
+                    "pm.test('linked to the suggested industry', () => pm.expect(d.category_id).to.be.a('number'));",
+                    "if (c.status) console.log('industry:', c.name, '->', c.status);"
                   ]
                 }
               }
@@ -1971,37 +2024,36 @@
       },
       {
         "name": "Frames",
-        "description": "User-uploaded frames/overlays.",
+        "description": "The frames store. Frames are admin-authored catalogue content — categorised, and either free or bought outright for a per-frame price. Note a paid PLAN never unlocks one: what you own is exactly what is in My Frames, and it survives a lapsed subscription.\n\nBrowsing is public; owning needs a token. Run **List Frames** first to fill `{{frame_uid}}`.",
         "item": [
           {
-            "name": "Create Frame",
+            "name": "List Frames (store)",
             "request": {
-              "method": "POST",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
+              "method": "GET",
+              "header": [],
               "url": {
-                "raw": "{{base_url}}/frames",
+                "raw": "{{base_url}}/frames?frame_type=static",
                 "host": [
                   "{{base_url}}"
                 ],
                 "path": [
                   "frames"
+                ],
+                "query": [
+                  {
+                    "key": "frame_type",
+                    "value": "static",
+                    "description": "static | animated — the two tabs"
+                  },
+                  {
+                    "key": "category",
+                    "value": "",
+                    "description": "Category slug, uid or legacy id. An unknown value returns an empty page, not the whole store.",
+                    "disabled": true
+                  }
                 ]
               },
-              "description": "frame_type: `image` | `animated`.",
-              "body": {
-                "mode": "raw",
-                "raw": "{\n  \"name\": \"Festive Frame\",\n  \"s3_key\": \"frames/example.png\",\n  \"frame_type\": \"image\"\n}",
-                "options": {
-                  "raw": {
-                    "language": "json"
-                  }
-                }
-              }
+              "description": "Active frames only. The design payload (`content`) is never in a list response."
             },
             "event": [
               {
@@ -2016,27 +2068,29 @@
                     "  const body = pm.response.json();",
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
                     "}",
-                    "const d = (pm.response.json() || {}).data || {};",
-                    "const _id = d.uid || d.id; if (_id) pm.environment.set('frame_uid', _id);"
+                    "const list = ((pm.response.json() || {}).data || []);",
+                    "if (list.length) pm.environment.set('frame_uid', list[0].uid);"
                   ]
                 }
               }
             ]
           },
           {
-            "name": "List Frames",
+            "name": "List Frame Categories",
             "request": {
               "method": "GET",
               "header": [],
               "url": {
-                "raw": "{{base_url}}/frames",
+                "raw": "{{base_url}}/frames/categories",
                 "host": [
                   "{{base_url}}"
                 ],
                 "path": [
-                  "frames"
+                  "frames",
+                  "categories"
                 ]
-              }
+              },
+              "description": "The store's filter chips, in display order."
             },
             "event": [
               {
@@ -2070,7 +2124,8 @@
                   "frames",
                   "{{frame_uid}}"
                 ]
-              }
+              },
+              "description": "`content` is served only once you own the frame — a free frame still has to be added first."
             },
             "event": [
               {
@@ -2091,34 +2146,22 @@
             ]
           },
           {
-            "name": "Update Frame",
+            "name": "Add Free Frame",
             "request": {
-              "method": "PATCH",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                }
-              ],
+              "method": "POST",
+              "header": [],
               "url": {
-                "raw": "{{base_url}}/frames/{{frame_uid}}",
+                "raw": "{{base_url}}/frames/{{frame_uid}}/add",
                 "host": [
                   "{{base_url}}"
                 ],
                 "path": [
                   "frames",
-                  "{{frame_uid}}"
+                  "{{frame_uid}}",
+                  "add"
                 ]
               },
-              "body": {
-                "mode": "raw",
-                "raw": "{\n  \"name\": \"Festive Frame v2\",\n  \"is_active\": 1\n}",
-                "options": {
-                  "raw": {
-                    "language": "json"
-                  }
-                }
-              }
+              "description": "Free frames only — a premium one is refused with 403. This is also the re-add path for a frame you bought and later removed, which costs nothing the second time."
             },
             "event": [
               {
@@ -2139,20 +2182,96 @@
             ]
           },
           {
-            "name": "Delete Frame",
+            "name": "Buy Premium Frame",
+            "request": {
+              "method": "POST",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/frames/{{frame_uid}}/purchase",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "{{frame_uid}}",
+                  "purchase"
+                ]
+              },
+              "description": "Creates a Razorpay order for the price plus GST and records the purchase as pending. Confirm it with **Subscriptions > Verify Payment** — frames reuse that endpoint rather than adding a second one — or let the webhook do it."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.order_id) pm.environment.set('frame_order_id', d.order_id);",
+                    "if (d.payment_uid) pm.environment.set('payment_uid', d.payment_uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List My Frames",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/frames/mine",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "mine"
+                ]
+              },
+              "description": "What you own. Pending purchases and removed frames are excluded."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Remove From My Frames",
             "request": {
               "method": "DELETE",
               "header": [],
               "url": {
-                "raw": "{{base_url}}/frames/{{frame_uid}}",
+                "raw": "{{base_url}}/frames/mine/{{frame_uid}}",
                 "host": [
                   "{{base_url}}"
                 ],
                 "path": [
                   "frames",
+                  "mine",
                   "{{frame_uid}}"
                 ]
-              }
+              },
+              "description": "Takes it off the shelf. A paid frame stays re-addable for free. No refund."
             },
             "event": [
               {
@@ -2176,7 +2295,7 @@
       },
       {
         "name": "Uploads (my files)",
-        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, frame, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\n**Bulk** is the same three calls: send `files: [...]` to presign (max 20) for all the URLs at once, `PUT` them in parallel (4–6 at a time), then confirm every key in one call. Confirm reports each key separately in `results` — a batch is **not** all-or-nothing, so one oversized file does not discard the rest, and a `200` does not mean every key made it. If *every* key fails the request itself fails (400/402), so single-file callers are unaffected.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `user_frame`, `media_library` (the editor's \"My Uploads\"), `brand_font` (the only non-image slot).\n\nImages are raster only (`image/jpeg|png|webp|gif`) — SVG is deliberately refused for user uploads. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently.\n\nSize is enforced at **confirm** (10 MB) — a presigned PUT cannot carry a size condition — and an oversized object is deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule, so an abandoned upload costs nothing. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
+        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\n**Bulk** is the same three calls: send `files: [...]` to presign (max 20) for all the URLs at once, `PUT` them in parallel (4–6 at a time), then confirm every key in one call. Confirm reports each key separately in `results` — a batch is **not** all-or-nothing, so one oversized file does not discard the rest, and a `200` does not mean every key made it. If *every* key fails the request itself fails (400/402), so single-file callers are unaffected.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `media_library` (the editor's \"My Uploads\"), `brand_font` (the only non-image slot). There is no frame slot — frames are catalogue content you add or buy, not something you upload.\n\nImages are raster only (`image/jpeg|png|webp|gif`) — SVG is deliberately refused for user uploads. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently.\n\nSize is enforced at **confirm** (10 MB) — a presigned PUT cannot carry a size condition — and an oversized object is deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule, so an abandoned upload costs nothing. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
         "item": [
           {
             "name": "Presign Upload",
@@ -2541,7 +2660,7 @@
                   }
                 ]
               },
-              "description": "Newest first. Defaults to the `media_library` slot — logos, covers, product images and frames are managed on their own screens, so nobody can delete their logo from a media grid by accident. Prepend `cdn_base_url` to `s3_key`."
+              "description": "Newest first. Defaults to the `media_library` slot — logos, covers and product images are managed on their own screens, so nobody can delete their logo from a media grid by accident. Prepend `cdn_base_url` to `s3_key`."
             },
             "event": [
               {
@@ -3028,13 +3147,72 @@
                     "disabled": true
                   },
                   {
+                    "key": "tree",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "hierarchy",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "q",
+                    "value": "coffee",
+                    "disabled": true
+                  },
+                  {
                     "key": "with_related",
                     "value": "1",
                     "disabled": true
                   }
                 ]
               },
-              "description": "The public \"industry\" catalogue (business categories). Use `parent=null` for top-level industries. `with_related=1` attaches each row's curated SEO cross-link block (`RelatedIndustries`).",
+              "description": "The public \"industry\" catalogue (business categories). Use `parent=null` for top-level industries, `tree=1` for the whole forest nested parent→child, `hierarchy=1` for the top level only, and `q=` to substring-match a name (`q` applies to the flat and `parent`-filtered shapes; `tree`/`hierarchy` ignore it). `with_related=1` attaches each row's curated SEO cross-link block (`RelatedIndustries`).\n\nOnly APPROVED, active rows are listed here, so a sub-industry a user filed through `custom_sub_industry` is absent until an admin approves it.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Sub-Industries (children of one industry)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/industries?parent={{industry_slug}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "industries"
+                ],
+                "query": [
+                  {
+                    "key": "parent",
+                    "value": "{{industry_slug}}",
+                    "disabled": false
+                  }
+                ]
+              },
+              "description": "Step 2 of the signup industry picker: the children of the industry chosen in step 1. `parent` takes a slug, uid or numeric id.\n\nThese are exactly the values `sub_industry` accepts on `POST /businesses`. When nothing here fits — including the common case of an empty array, since most seeded industries have no children yet — that is the **\"Others\"** path: the app shows a free-text box and sends `custom_sub_industry` instead (Businesses → **Set Sub-Industry / Others**).",
               "auth": {
                 "type": "noauth"
               }
@@ -4176,6 +4354,12 @@
         "enabled": true
       },
       {
+        "key": "custom_sub_industry",
+        "value": "Cloud Kitchen",
+        "type": "default",
+        "enabled": true
+      },
+      {
         "key": "template_category_slug",
         "value": "festival",
         "type": "default",
@@ -4225,6 +4409,12 @@
       },
       {
         "key": "frame_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "frame_order_id",
         "value": "",
         "type": "default",
         "enabled": true

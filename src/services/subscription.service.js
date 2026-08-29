@@ -4,16 +4,16 @@ const planRepo          = require('../repositories/plan.repository');
 const subRepo           = require('../repositories/userSubscription.repository');
 const couponRepo        = require('../repositories/coupon.repository');
 const paymentRepo       = require('../repositories/payment.repository');
-const quotaRepo         = require('../repositories/userQuotaUsage.repository');
 const quota             = require('./quota.service');
 const catalogService    = require('./catalog.service');
+const frameService      = require('./frame.service');
+const quotaPackService  = require('./quotaPack.service');
 const {
   createOrder, createSubscription, verifyWebhookSignature, verifyPaymentSignature,
 } = require('../utils/razorpayHelper');
+const { withGst, GST_RATE } = require('../utils/gst');
 const { NotFoundError, AuthError, ForbiddenError, ConflictError } = require('../errors');
 const { PlanBillingOption, Plan } = require('../models');
-
-const GST_RATE = 0.18;
 
 function addCycle(date, cycle) {
   const d = new Date(date);
@@ -26,12 +26,6 @@ function addDays(date, days) {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
   return d;
-}
-
-function withGst(amountBeforeTax) {
-  const gstAmount   = parseFloat((amountBeforeTax * GST_RATE).toFixed(2));
-  const totalAmount = parseFloat((amountBeforeTax + gstAmount).toFixed(2));
-  return { gstAmount, totalAmount };
 }
 
 // The deprecated /subscriptions/plans alias. Delegates so it can never drift
@@ -92,59 +86,30 @@ async function verifyCoupon(code, planId, userId) {
   };
 }
 
-// Turns one plan_feature row into an FE-friendly entitlement. Booleans expose
-// `enabled`; counters expose limit/used/remaining (value -1 = unlimited).
-//
-// limit/used/remaining are all reported in the FEATURE's own unit — MB for
-// storage, a plain count for everything else — so they can be compared and
-// rendered against the label directly. That conversion is the fix for a real bug:
-// the plan limit is stored in MB while the counter is in bytes, and the two used
-// to be subtracted from each other, which made `remaining` on a 100 MB plan go to
-// zero after the first 100 bytes. `used_bytes` carries the exact figure for
-// storage, since MB is rounded for display.
-const round2 = (n) => Math.round(n * 100) / 100;
-
-function buildFeature(pf, usage) {
-  const ft   = pf.FeatureType;
-  const base = { key: ft.key, label: ft.label, reset_period: ft.reset_period, data_type: ft.data_type };
-  if (ft.data_type === 'boolean') return { ...base, enabled: pf.value === 1 };
-
-  const unlimited = pf.value === -1;
-  const scale     = quota.scaleFor(ft.key);                      // bytes per unit (1 for counts)
-  const rawUsed   = usage ? Number(usage[quota.fieldFor(ft.key)] ?? 0) : 0;
-  const used      = scale === 1 ? rawUsed : round2(rawUsed / scale);
-
-  return {
-    ...base,
-    unit:      scale === 1 ? 'count' : 'MB',
-    limit:     unlimited ? null : pf.value,
-    unlimited,
-    used,
-    remaining: unlimited ? null : round2(Math.max(pf.value - used, 0)),
-    ...(scale === 1 ? {} : { used_bytes: rawUsed }),
-  };
-}
-
 // The signed-in user's current subscription state — the endpoint the FE polls
 // after checkout and reads to gate premium features. Only the ACTIVE row is
 // returned (pending/expired/overridden are not); no active row = free tier.
+//
+// The per-feature entitlements come from `quota.service.usageSummary`, which also
+// backs `GET /quota/usage`. Building them here as well is how the gate the app
+// enforces and the numbers the Usage screen shows would come to disagree, and a
+// user shown headroom they do not have is the worst version of that bug.
 async function getMySubscription(userId) {
   const sub = await subRepo.findActiveDetailed(userId);
   if (!sub) {
     return { has_active_subscription: false, is_on_trial: false, subscription: null, plan: null, billing: null, features: [] };
   }
 
-  const usage    = await quotaRepo.findByUserId(userId);
   const plan     = sub.Plan;
   const option   = sub.PlanBillingOption;
-  const features = (plan?.PlanFeatures || [])
-    .filter((pf) => pf.FeatureType)
-    .sort((a, b) => (a.display_order || 0) - (b.display_order || 0))
-    .map((pf) => buildFeature(pf, usage));
+  const { features, period } = await quota.usageSummary(userId, { sub });
 
   return {
     has_active_subscription: true,
     is_on_trial:             sub.sub_type === 'trial',
+    // The current usage window — the "resets on" date the Usage screen shows.
+    // Null when the account has recorded nothing yet.
+    period,
     subscription: {
       uid:         sub.uid,
       status:      sub.status,
@@ -247,6 +212,7 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
     user_id:           userId,
     subscription_id:   sub.id,
     order_type:        'one_time',
+    purchase_type:     'subscription',
     amount:            totalAmount,
     amount_before_tax: amountBeforeTax,
     gst_amount:        gstAmount,
@@ -297,6 +263,7 @@ async function initiateAccessPass(userId) {
     user_id:           userId,
     subscription_id:   sub.id,
     order_type:        'one_time',
+    purchase_type:     'subscription',
     amount:            totalAmount,
     amount_before_tax: amountBeforeTax,
     gst_amount:        gstAmount,
@@ -342,6 +309,22 @@ async function _activate(subId) {
   if (!wasActive && sub.coupon_id) await couponRepo.incrementUsage(sub.coupon_id);
 }
 
+// Deliver whatever a successful payment bought. Both callers below (client
+// callback and webhook) route through here so a new purchasable never has to be
+// wired into two places — and both are already guarded by the
+// `status !== 'success'` check above, which is what makes this idempotent.
+//
+// This used to infer the purchasable from absence: "no subscription_id means a
+// frame". That held only while frames were the sole standalone purchase, so
+// `payments.purchase_type` now records what was bought instead. NULL still routes
+// to frames — every pre-discriminator standalone payment was one — which is what
+// lets an order created before the migration still fulfil after it.
+async function _fulfil(payment) {
+  if (payment.subscription_id) return _activate(payment.subscription_id);
+  if (payment.purchase_type === 'quota_pack') return quotaPackService.fulfilPayment(payment);
+  return frameService.fulfilPayment(payment);
+}
+
 // Synchronous client callback after Checkout. Verifies the payment signature
 // and activates idempotently. The webhook remains the source of truth.
 async function verifyPayment(userId, { razorpay_order_id, razorpay_payment_id, razorpay_signature }) {
@@ -356,7 +339,7 @@ async function verifyPayment(userId, { razorpay_order_id, razorpay_payment_id, r
     await paymentRepo.update(payment.id, {
       status: 'success', razorpay_payment_id, razorpay_signature, paid_at: new Date(),
     });
-    if (payment.subscription_id) await _activate(payment.subscription_id);
+    await _fulfil(payment);
   }
   return { verified: true, payment_uid: payment.uid };
 }
@@ -386,7 +369,7 @@ async function _onOneTimePaid(event) {
   if (payment.status === 'success') return { ok: true, idempotent: true };
 
   await paymentRepo.update(payment.id, { status: 'success', razorpay_payment_id: p.id, paid_at: new Date() });
-  if (payment.subscription_id) await _activate(payment.subscription_id);
+  await _fulfil(payment);
   return { ok: true };
 }
 
@@ -414,7 +397,7 @@ async function _onSubCharged(event) {
   const beforeTax = parseFloat((amount / (1 + GST_RATE)).toFixed(2));
   const gstAmount = parseFloat((amount - beforeTax).toFixed(2));
   await paymentRepo.create({
-    uid: uuid(), user_id: sub.user_id, subscription_id: sub.id, order_type: 'subscription',
+    uid: uuid(), user_id: sub.user_id, subscription_id: sub.id, order_type: 'subscription', purchase_type: 'subscription',
     amount, amount_before_tax: beforeTax, gst_amount: gstAmount,
     status: 'success', razorpay_payment_id: p?.id, paid_at: new Date(),
   });
