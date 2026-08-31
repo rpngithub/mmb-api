@@ -10,6 +10,10 @@ const renewalJob      = require('./jobs/subscriptionRenewal.job');
 const tokenCleanupJob = require('./jobs/tokenCleanup.job');
 const otpCleanupJob   = require('./jobs/otpCleanup.job');
 const quotaEventCleanupJob = require('./jobs/quotaEventCleanup.job');
+const notifyDispatchJob    = require('./jobs/notificationDispatch.job');
+const notifyScheduledJob   = require('./jobs/notificationScheduled.job');
+const notifyBehavioralJob  = require('./jobs/notificationBehavioral.job');
+const notifyCleanupJob     = require('./jobs/notificationCleanup.job');
 
 const PORT = process.env.PORT || 3000;
 
@@ -56,6 +60,21 @@ async function start() {
   tokenCleanupJob.job.start();
   otpCleanupJob.job.start();
   quotaEventCleanupJob.job.start();
+
+  // The notification jobs. Unlike the five above they are pinned to Asia/Kolkata,
+  // because a user-visible notification has to land at 09:00 local regardless of
+  // the container's clock, and they coordinate across instances with a MySQL
+  // advisory lock (see services/notificationJobRunner.js). NOTIFY_JOBS_ENABLED=false
+  // is the kill switch — the jobs still tick, and each one immediately stands down.
+  notifyDispatchJob.job.start();
+  notifyScheduledJob.job.start();
+  notifyBehavioralJob.job.start();
+  notifyCleanupJob.job.start();
+
+  if (!require('./config/notifications').jobsEnabled()) {
+    console.warn('[Notify] NOTIFY_JOBS_ENABLED=false — scheduled and behavioural notifications are SUSPENDED. Event-triggered notifications still send.');
+  }
+
   console.log('[Jobs] All cron jobs started');
 
   server.listen(PORT, () => {

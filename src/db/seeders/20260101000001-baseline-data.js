@@ -16,7 +16,12 @@ module.exports = {
         // NOTE: no `feedback.*` — feedback carries the submitter's name, phone and
         // email, and curating the catalogue needs none of that. It stays with
         // super_admin until there is a role that actually handles support.
-        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*', 'frames.*']), is_system: 1 },
+        // NOTE: `notifications.*` covers the notification catalogue (categories,
+        // templates, delivery log). `notification_campaigns.*` is deliberately
+        // absent — sending an unsolicited message to every user is a different
+        // authority from editing copy, so it stays with super_admin, the same call
+        // `quota_packs` makes about pricing.
+        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*', 'frames.*', 'notifications.*']), is_system: 1 },
     ]);
 
     // --- admin user ---

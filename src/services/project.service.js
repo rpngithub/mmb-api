@@ -3,6 +3,8 @@ const projectRepo    = require('../repositories/project.repository');
 const businessRepo   = require('../repositories/business.repository');
 const templateRepo   = require('../repositories/template.repository');
 const variantAccess  = require('./variantAccess.service');
+const notify         = require('./notification.service');
+const dedupe         = require('../utils/dedupeKey');
 const { TemplateSize } = require('../models');
 const { NotFoundError, ForbiddenError, ValidationError } = require('../errors');
 
@@ -34,7 +36,20 @@ async function validateProjectRefs(userId, data) {
 
 async function createProject(userId, data) {
   await validateProjectRefs(userId, data);
-  return projectRepo.create({ ...data, uid: uuid(), user_id: userId, status: 'draft' });
+  const project = await projectRepo.create({ ...data, uid: uuid(), user_id: userId, status: 'draft' });
+
+  // "Congratulations! You created your first design." The dedupe key has no scope
+  // beyond the code, so this is a genuine once-per-lifetime notification and the
+  // count below is only an optimisation — the unique index is what guarantees it.
+  const total = await projectRepo.model.count({ where: { user_id: userId } });
+  if (total === 1) {
+    notify.notify({
+      code: 'first_design_created', userId,
+      dedupeKey: dedupe.once('first_design_created'),
+    });
+  }
+
+  return project;
 }
 
 async function getMyProjects(userId) {

@@ -8,6 +8,8 @@ const quota             = require('./quota.service');
 const catalogService    = require('./catalog.service');
 const frameService      = require('./frame.service');
 const quotaPackService  = require('./quotaPack.service');
+const notify            = require('./notification.service');
+const dedupe            = require('../utils/dedupeKey');
 const {
   createOrder, createSubscription, verifyWebhookSignature, verifyPaymentSignature,
 } = require('../utils/razorpayHelper');
@@ -307,6 +309,26 @@ async function _activate(subId) {
   // webhook and the client callback (either may land first, and the webhook may
   // be redelivered) from double-counting the same subscription.
   if (!wasActive && sub.coupon_id) await couponRepo.incrementUsage(sub.coupon_id);
+
+  // Tell the user. Rides the same `wasActive` guard, and the dedupe key is scoped
+  // to the subscription row, so a redelivered webhook cannot produce a second
+  // "your plan is active" a day later. Fire-and-forget on purpose — see notify().
+  if (!wasActive) {
+    const planName = sub.Plan?.name || 'Premium';
+    if (sub.sub_type === 'trial') {
+      notify.notify({
+        code: 'trial_activated', userId: sub.user_id,
+        variables: { trial_days: sub.Plan?.trial_days || 7, plan_name: planName },
+        dedupeKey: dedupe.forEntity('trial_activated', 'sub', sub.id),
+      });
+    } else {
+      notify.notify({
+        code: 'payment_successful', userId: sub.user_id,
+        variables: { plan_name: planName },
+        dedupeKey: dedupe.forEntity('payment_successful', 'sub', sub.id),
+      });
+    }
+  }
 }
 
 // Deliver whatever a successful payment bought. Both callers below (client
@@ -352,6 +374,7 @@ async function handleWebhook(rawBody, signature) {
   switch (event.event) {
     case 'payment.captured':
     case 'order.paid':          return _onOneTimePaid(event);
+    case 'payment.failed':      return _onPaymentFailed(event);
     case 'subscription.activated': return _onSubActivated(event);
     case 'subscription.charged':   return _onSubCharged(event);
     case 'subscription.halted':
@@ -370,6 +393,27 @@ async function _onOneTimePaid(event) {
 
   await paymentRepo.update(payment.id, { status: 'success', razorpay_payment_id: p.id, paid_at: new Date() });
   await _fulfil(payment);
+  return { ok: true };
+}
+
+// `payment.failed` was previously unhandled and fell through to `ignored`. It is
+// handled now purely to tell the user — the payment row is deliberately NOT marked
+// failed here, because Razorpay can retry the same order and a later
+// `payment.captured` for it must still fulfil. Notifying is safe either way: the
+// dedupe key is the razorpay payment id, so a redelivered failure is silent, and a
+// subsequent success sends its own "plan is active" notification.
+async function _onPaymentFailed(event) {
+  const p = event.payload?.payment?.entity;
+  if (!p?.order_id) return { ignored: 'no order_id' };
+
+  const payment = await paymentRepo.findByRazorpayOrderId(p.order_id);
+  if (!payment) return { ignored: 'unknown order' };
+  if (payment.status === 'success') return { ok: true, ignored: 'already paid' };
+
+  notify.notify({
+    code: 'payment_failed', userId: payment.user_id,
+    dedupeKey: dedupe.forEntity('payment_failed', 'pay', p.id || payment.id),
+  });
   return { ok: true };
 }
 
@@ -407,6 +451,13 @@ async function _onSubCharged(event) {
   // First real charge converts a trial into a regular recurring subscription;
   // ends_at extends from the trial end so no paid days are lost.
   await subRepo.update(sub.id, { status: 'active', sub_type: 'regular', ends_at: addCycle(base, cycle) });
+
+  // Keyed on the razorpay payment id so each CHARGE notifies once — the
+  // subscription id would only ever fire on the first renewal.
+  notify.notify({
+    code: 'subscription_renewed', userId: sub.user_id,
+    dedupeKey: dedupe.forEntity('subscription_renewed', 'pay', p?.id || `${sub.id}-${Date.now()}`),
+  });
   return { ok: true };
 }
 

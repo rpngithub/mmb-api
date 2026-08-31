@@ -20,6 +20,7 @@ const assetRouter        = require('./routes/asset.router');
 const uploadRouter       = require('./routes/upload.router');
 const feedbackRouter     = require('./routes/feedback.router');
 const fontRouter         = require('./routes/font.router');
+const notificationRouter = require('./routes/notification.router');
 const adminRouter        = require('./routes/admin.router');
 
 const app = express();
@@ -68,6 +69,7 @@ app.use(`${API_PREFIX}/assets`,        assetRouter);
 app.use(`${API_PREFIX}/uploads`,       uploadRouter);
 app.use(`${API_PREFIX}/feedback`,      feedbackRouter);
 app.use(`${API_PREFIX}/fonts`,         fontRouter);
+app.use(`${API_PREFIX}/notifications`, notificationRouter);
 app.use(`${API_PREFIX}/admin`,         adminRouter);
 app.use(`${API_PREFIX}`,               catalogRouter);
 
@@ -76,9 +78,21 @@ app.use(`${API_PREFIX}`,               catalogRouter);
 // is not production. The opt-in alone would not be enough — an unset NODE_ENV falls
 // back to .env.development, so a copied env file could switch it on where it must
 // never exist. Keep ENABLE_SMS_TEST out of .env.staging and .env.production.
-if (process.env.ENABLE_SMS_TEST === 'true' && process.env.NODE_ENV !== 'production') {
+// The router itself is mounted outside production only. The SMS endpoint inside it
+// keeps its own ENABLE_SMS_TEST opt-in (see dev.router.js) because it is
+// unauthenticated and spends real SMS credits — the opt-in alone would not be
+// enough, since an unset NODE_ENV falls back to .env.development and a copied env
+// file could switch it on where it must never exist. Keep ENABLE_SMS_TEST out of
+// .env.staging and .env.production.
+//
+// The notification tester needs no opt-in: it is authenticated and can only write to
+// the caller's own inbox.
+if (process.env.NODE_ENV !== 'production') {
   app.use(`${API_PREFIX}/dev`, require('./routes/dev.router'));
-  console.log('[Dev] SMS test endpoint mounted at POST ' + `${API_PREFIX}/dev/test-sms`);
+  console.log('[Dev] Notification test endpoint mounted at POST ' + `${API_PREFIX}/dev/test-notification`);
+  if (process.env.ENABLE_SMS_TEST === 'true') {
+    console.log('[Dev] SMS test endpoint mounted at POST ' + `${API_PREFIX}/dev/test-sms`);
+  }
 }
 
 if (process.env.NODE_ENV !== 'production') {

@@ -19,6 +19,12 @@ module.exports = (sequelize) => {
     razorpay_customer_id: { type: DataTypes.STRING(100), allowNull: true },
     is_active:            { type: DataTypes.TINYINT, defaultValue: 1 },
     last_login_at:        { type: DataTypes.DATE, allowNull: true },
+    // Distinct from `last_login_at`, which moves once per sign-in — and a refresh
+    // token lives 30 days, so someone who opens the app daily logs in about once a
+    // month. Dormancy measured off login would call a daily-active user dormant,
+    // which is exactly what the retention notifications must not do. Stamped by
+    // middlewares/touchActivity, throttled to one write per user per 15 minutes.
+    last_active_at:       { type: DataTypes.DATE, allowNull: true },
   }, { tableName: 'users' });
 
   User.associate = (models) => {
@@ -30,6 +36,8 @@ module.exports = (sequelize) => {
     User.hasMany(models.UserSubscription, { foreignKey: 'user_id' });
     User.hasMany(models.Project,          { foreignKey: 'user_id' });
     User.hasOne(models.UserPreference,    { foreignKey: 'user_id' });
+    User.hasMany(models.UserNotification, { foreignKey: 'user_id' });
+    User.hasMany(models.UserNotificationSetting, { foreignKey: 'user_id' });
     // "Preferred Languages" — which templates this user is shown.
     User.belongsToMany(models.Language,   { through: models.UserLanguage, foreignKey: 'user_id' });
   };

@@ -16,6 +16,11 @@ module.exports = (sequelize) => {
     notify_push:     { type: DataTypes.TINYINT, allowNull: false, defaultValue: 1 },
     notify_email:    { type: DataTypes.TINYINT, allowNull: false, defaultValue: 1 },
     notify_whatsapp: { type: DataTypes.TINYINT, allowNull: false, defaultValue: 1 },
+    // The marketing consent the comment above reserved. It is a PURPOSE, not a
+    // channel: every promotional notification and every campaign ANDs it, while
+    // transactional sends (payment failed, trial ending) ignore it entirely, so
+    // muting promos can never cost someone a receipt.
+    notify_marketing: { type: DataTypes.TINYINT, allowNull: false, defaultValue: 1 },
   }, { tableName: 'user_preferences' });
 
   UserPreference.associate = (models) => {
