@@ -1,5 +1,6 @@
 const { verifyToken } = require('../utils/jwtHelper');
 const tokenBlacklistRepo = require('../repositories/tokenBlacklist.repository');
+const touchActivity = require('./touchActivity');
 const { AuthError } = require('../errors');
 
 async function authenticate(req, res, next) {
@@ -21,6 +22,11 @@ async function authenticate(req, res, next) {
 
   req.user = payload;
   next();
+
+  // AFTER next(), deliberately: this is a throttled, fire-and-forget stamp of
+  // users.last_active_at that the retention notifications read. It must never add
+  // latency to the request or be able to fail it. See middlewares/touchActivity.js.
+  touchActivity(payload);
 }
 
 module.exports = authenticate;

@@ -72,6 +72,12 @@ const modelFiles = [
   'appBanner.model',
   'appSetting.model',
   'feedback.model',
+  'notificationCategory.model',
+  'notificationTemplate.model',
+  'notificationCampaign.model',
+  'userNotification.model',
+  'userNotificationSetting.model',
+  'notificationJobRun.model',
 ];
 
 const db = { sequelize };

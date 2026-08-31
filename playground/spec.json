@@ -2908,6 +2908,387 @@
         ]
       },
       {
+        "name": "Notifications",
+        "description": "The signed-in user's notification inbox: read / unread / dismiss, plus per-category mute.\n\n**In-app only** — there is no push and no email, so the inbox is the only surface.\n\n**Start with `Send Test Notification`.** A fresh account has an empty inbox, and the things that fill it are real events (a failed payment) or nightly scans. That request is a non-production endpoint that puts one in your OWN inbox so the rest of this folder has something to act on. Run it a few times.\n\nThe list is already filtered server-side: dismissed, expired and quiet-hours-held notifications never appear, so nothing needs filtering client-side.",
+        "item": [
+          {
+            "name": "Send Test Notification (dev)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/dev/test-notification",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "dev",
+                  "test-notification"
+                ]
+              },
+              "description": "Non-production only. Puts a notification in **your own** inbox — there is no recipient field, deliberately.\n\nIt goes through the real send path, so it also answers \"why did nothing appear?\": if a rule stopped it, `data.skipped_reason` names which one (`daily_cap`, `min_gap`, `marketing_opt_out`, `category_muted`, `render_failed`). A `status` of `scheduled` means quiet hours (9pm–9am IST) deferred it to `deliver_at`.\n\n`code` is any active template — try `welcome_to_mmb`, `inactive_7d`, or `credits_running_low` with `{ \"variables\": { \"credits_count\": 12 } }`. The default has no placeholders, so an empty body works.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"code\": \"payment_failed\",\n  \"variables\": {}\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "pm.test('reports delivery outcome', () => pm.expect(d).to.have.property('delivered'));",
+                    "if (!d.delivered) console.log('Not delivered — reason:', d.skipped_reason);",
+                    "if (d.notification && d.notification.uid) pm.environment.set('notification_uid', d.notification.uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Notifications",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications"
+                ],
+                "query": [
+                  {
+                    "key": "status",
+                    "value": "unread",
+                    "disabled": true
+                  },
+                  {
+                    "key": "category",
+                    "value": "billing",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "20",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Newest first. `status=unread` narrows to unread; `category` takes a category slug or uid (an unknown one returns an empty page, not a 404). `limit` defaults to 20, max 50.\n\nCaptures the first row into `notification_uid` so the read/dismiss requests below chain off this one."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const rows = (pm.response.json() || {}).data || [];",
+                    "if (rows.length) pm.environment.set('notification_uid', rows[0].uid);",
+                    "pm.test('rows carry no internal ids', () => { if (rows.length) pm.expect(rows[0]).to.not.have.property('user_id'); });"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Unread Summary (badge)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications/summary",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "summary"
+                ]
+              },
+              "description": "The badge endpoint: `unread_count` plus a per-category breakdown. Served by an index and never reads rows.\n\nPoll it on app foreground and after leaving the inbox — not on a timer. There is no push channel, so nothing changes in the background."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Mark One Read",
+            "request": {
+              "method": "PATCH",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications/{{notification_uid}}/read",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "{{notification_uid}}",
+                  "read"
+                ]
+              },
+              "description": "Idempotent — repeat calls keep the ORIGINAL `read_at`. A uid belonging to another account returns 404, not 403."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Mark All Read",
+            "request": {
+              "method": "PATCH",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications/read-all",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "read-all"
+                ]
+              },
+              "description": "Marks every currently visible notification read. Returns how many rows changed."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Dismiss One",
+            "request": {
+              "method": "PATCH",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications/{{notification_uid}}/dismiss",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "{{notification_uid}}",
+                  "dismiss"
+                ]
+              },
+              "description": "Removes it from the inbox. Returns **403** when the notification is not dismissible.\n\nDismiss is SOFT: the row is retained server-side (it still counts toward send throttling and answers \"did we tell them?\") until the retention job prunes it 30 days later. It is not a data deletion — \"clear\" is the honest word for the UI."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Dismiss All",
+            "request": {
+              "method": "POST",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications/dismiss-all",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "dismiss-all"
+                ]
+              },
+              "description": "Clears the inbox of every visible, dismissible notification."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get My Notification Settings",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/notifications/settings",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "settings"
+                ]
+              },
+              "description": "Every active category with the user's choice. Categories never touched come back `in_app: true` — a stored row exists only where something was switched OFF.\n\nCaptures the first category uid into `notification_category_uid`."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const cats = (pm.response.json() || {}).data || [];",
+                    "if (cats.length) pm.environment.set('notification_category_uid', cats[0].uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Update My Notification Settings",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/notifications/settings",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "notifications",
+                  "settings"
+                ]
+              },
+              "description": "Send only what changed; returns the full updated list. An unknown `category_uid` is a 404.\n\nMuting a category stops EVERYTHING in it, transactional messages included — it is the user asking directly. Channel-level consent (marketing vs receipts) is a different setting: `notify_marketing` on **Users → Update Preferences**.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"settings\": [\n    {\n      \"category_uid\": \"{{notification_category_uid}}\",\n      \"in_app\": false\n    }\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
         "name": "Templates (public)",
         "description": "Optional auth — send `access_token` to unlock premium content and raise the rate-limit tier, or none for anonymous.\n\nThe browse view **must be anchored**: at least one of `category` or `industry` is required (400 otherwise). All taxonomy filters accept a friendly slug, a uid, or a legacy numeric id.\n\nVariant templates are NOT browsable here — they are premium and plan-gated, served only via `GET /variants/{uid}`.",
         "item": [
@@ -3047,7 +3428,7 @@
       },
       {
         "name": "Assets (public)",
-        "description": "At least one of `category` or `asset_type` is required — either anchors the browse and they combine; `category=null` lists uncategorized assets. A `category` that matches nothing returns an empty page, while an unknown `asset_type` is a 400. Premium assets return `is_locked=true` and omit `s3_key` for guests/free users, but always carry `thumbnail_s3_key` so the locked card can still be drawn. Render `thumbnail_s3_key || s3_key`.",
+        "description": "`category` (the anchor) is required. Premium assets return `is_locked=true` and omit `s3_key` for guests/free users, but always carry `thumbnail_s3_key` so the locked card can still be drawn. Render `thumbnail_s3_key || s3_key`.",
         "item": [
           {
             "name": "List Assets",
@@ -3289,7 +3670,7 @@
                   "keywords"
                 ]
               },
-              "description": "The curated keywords for one industry. A sub-industry ALSO inherits its parent's keywords — merged and de-duped, its own first — so a bakery's picker offers the bakery keywords ahead of the generic food ones. `ref` is a slug, uid or numeric id. These are exactly the values `POST /businesses` and `PUT /businesses/{uid}/keywords` accept.\n\nThis endpoint never 404s and applies no active/moderation gate: an unknown or hidden `ref` returns `[]`. A sub-industry filed through the \"Others\" path is `pending` until an admin approves it, but it is already the owner's industry — so the picker answers for it with the PARENT's keywords, since a fresh suggestion has none of its own. An empty array is a normal answer here.",
+              "description": "The curated keywords for one industry. A sub-industry ALSO inherits its parent's keywords — merged and de-duped, its own first — so a bakery's picker offers the bakery keywords ahead of the generic food ones. `ref` is a slug, uid or numeric id. These are exactly the values `POST /businesses` and `PUT /businesses/{uid}/keywords` accept.",
               "auth": {
                 "type": "noauth"
               }
@@ -4493,6 +4874,18 @@
       },
       {
         "key": "upload_key_2",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "notification_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "notification_category_uid",
         "value": "",
         "type": "default",
         "enabled": true

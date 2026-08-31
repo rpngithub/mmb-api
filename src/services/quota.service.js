@@ -6,6 +6,8 @@ const userSubRepo     = require('../repositories/userSubscription.repository');
 const quotaRepo       = require('../repositories/userQuotaUsage.repository');
 const grantRepo       = require('../repositories/userQuotaGrant.repository');
 const eventRepo       = require('../repositories/quotaUsageEvent.repository');
+const notify          = require('./notification.service');
+const dedupe          = require('../utils/dedupeKey');
 const { SOURCES, FALLBACK, labelFor } = require('../constants/quotaSources');
 const { isRelaxed }   = require('../config/quota');
 const { QuotaError }  = require('../errors');
@@ -189,6 +191,21 @@ async function ensureCurrentPeriod(userId) {
 
   if (usage.period_end) {
     await quotaRepo.resetPeriodCounters(userId, window.start, window.end);
+
+    // The window just rolled. This is where the "your credits have been refreshed"
+    // notification belongs — there is no monthly cron to hang it off, because the
+    // reset itself is lazy (see the comment above). A dormant user is told the
+    // moment they come back, which is exactly when it is useful.
+    //
+    // Free and paid get different copy, per the sheet; the dedupe key is the new
+    // period start, so the many callers of this function in one request produce
+    // one notification.
+    const paid = await userSubRepo.findActiveByUser(userId);
+    notify.notify({
+      code: paid ? 'credits_reset' : 'free_credits_refreshed',
+      userId,
+      dedupeKey: dedupe.forPeriod(paid ? 'credits_reset' : 'free_credits_refreshed', window.start),
+    });
   } else {
     // First window this account has ever had. Its counters were accumulated with
     // no period at all, so adopt them as this period's usage rather than zeroing:
@@ -326,6 +343,41 @@ async function consume(userId, featureKey, by = 1, opts = {}) {
       }, transaction);
     }
   });
+
+  // "Only N AI credits remaining." Deliberately AFTER the transaction: a
+  // notification must never be able to roll back a spend, or hold locks while it
+  // runs its own queries.
+  await _maybeWarnLowBalance(userId, featureKey);
+}
+
+// Fires `credits_running_low` once per billing period, not once per spend — the
+// dedupe key is the period start, so the twentieth AI call after crossing the
+// threshold is silent. Only metered flows can run low; a gauge (storage) has its
+// own upload-time errors and an unmetered account has nothing to warn about.
+const LOW_BALANCE_RATIO = 0.15;
+
+async function _maybeWarnLowBalance(userId, featureKey) {
+  try {
+    if (featureKey !== 'ai_credits') return;
+
+    const limit = await limitFor(userId, featureKey);
+    if (limit === null || limit <= 0) return;      // unmetered — nothing to warn about
+
+    const left = await remaining(userId, featureKey);
+    if (left === null || left <= 0) return;        // already exhausted; the 402 says so
+    if (left > Math.ceil(limit * LOW_BALANCE_RATIO)) return;
+
+    const window = await currentWindow(userId);
+    await notify.notify({
+      code: 'credits_running_low', userId,
+      variables: { credits_count: left },
+      dedupeKey: dedupe.forPeriod('credits_running_low', window?.start || new Date()),
+    });
+  } catch (err) {
+    // Best-effort, like activity.log: a warning must never fail the spend that
+    // triggered it.
+    console.error('[quota] low-balance notify failed:', err.message);
+  }
 }
 
 // Gives usage back — storage freed when a file is deleted. Floored at zero in the

@@ -36,6 +36,14 @@ const {
   presignSchema, multipartInitiateSchema, presignPartsSchema,
   completeSchema, abortSchema, confirmSchema,
 } = require('../validators/upload.validator');
+const {
+  createNotificationCategorySchema, updateNotificationCategorySchema,
+  createNotificationTemplateSchema, updateNotificationTemplateSchema,
+  createNotificationCampaignSchema, updateNotificationCampaignSchema,
+  scheduleCampaignSchema,
+} = require('../validators/notificationAdmin.validator');
+const notificationTemplateGate = require('../services/notificationTemplateGate');
+const notificationCampaigns    = require('../services/notificationCampaign.service');
 const { bundleConfirmSchema } = require('../validators/templateBundle.validator');
 const templatePublish = require('../services/templatePublish');
 const framePublish    = require('../services/framePublish');
@@ -97,7 +105,20 @@ const {
  *       `/admin/special-events` (events) · `/admin/banners` (banners) ·
  *       `/admin/faqs` & `/admin/faq-categories` (faqs) · `/admin/testimonials` (testimonials) ·
  *       `/admin/plans`, `/admin/plan-billing-options` & `/admin/plan-features` (plans) · `/admin/feature-types` (features) ·
- *       `/admin/coupons` (coupons) · `/admin/app-settings` (settings).
+ *       `/admin/coupons` (coupons) · `/admin/app-settings` (settings) ·
+ *       `/admin/notification-categories` & `/admin/notification-templates` (notifications) ·
+ *       `/admin/notification-campaigns` (notification_campaigns).
+ *
+ *
+ *       **Notifications** — `/admin/notification-templates` uses a SOFT delete:
+ *       `DELETE` sets `is_active = 0` rather than destroying the row, because the
+ *       43 seeded system templates are referenced by application code and by every
+ *       notification already sent. On a system template `code` and `trigger_type`
+ *       are immutable (403); everything else — copy, CTA, audience, throttle — is
+ *       editable. `/admin/notification-campaigns` additionally exposes
+ *       `GET /:uid/preview`, `POST /:uid/schedule`, `POST /:uid/send-now` and
+ *       `POST /:uid/cancel`; its `status` moves only through those, never by PATCH.
+ *       `/admin/user-notifications` is a read-only delivery log.
  *
  *
  *       **Bulk reorder** — `/admin/template-categories`, `/admin/languages` and
@@ -397,6 +418,105 @@ router.put('/fonts/:uid/languages', authenticate, authorizeAdmin('fonts.update')
 
 router.get('/feedback', authenticate, authorizeAdmin('feedback.read'), controller.listFeedback);
 router.delete('/feedback/:uid', authenticate, authorizeAdmin('feedback.delete'), controller.deleteFeedback);
+
+// ---- Notification campaigns: the lifecycle actions ----
+//
+// Hand-written and registered HERE, above the C() table at the bottom, because
+// `C()` mounts with router.use() and would swallow every sub-path of
+// /notification-campaigns. Same reason /templates/:uid/bundle/confirm sits above
+// C('/templates', ...).
+//
+// These are a state machine, not CRUD: status moves only through these endpoints,
+// never by a direct PATCH (the update schema has no `status` field).
+
+/**
+ * @swagger
+ * /admin/notification-campaigns/{uid}/preview:
+ *   get:
+ *     summary: Preview a campaign's audience and rendered copy
+ *     description: >-
+ *       Returns how many users the segment currently reaches, a few real examples,
+ *       and the message exactly as it will be sent. The count comes from the same
+ *       query builder the fan-out pages through, so the number shown here is the
+ *       number that ships.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *     responses:
+ *       200: { description: Audience count, sample recipients and rendered preview }
+ */
+router.get('/notification-campaigns/:uid/preview',
+  authenticate, authorizeAdmin('notification_campaigns.read'),
+  async (req, res) => res.json({ success: true, data: await notificationCampaigns.preview(req.params.uid) }));
+
+/**
+ * @swagger
+ * /admin/notification-campaigns/{uid}/schedule:
+ *   post:
+ *     summary: Schedule a campaign to send later
+ *     description: >-
+ *       Snapshots the audience count so the panel shows a stable figure, and
+ *       refuses to schedule a campaign whose copy cannot render.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [scheduled_at]
+ *             properties:
+ *               scheduled_at: { type: string, format: date-time }
+ *     responses:
+ *       200: { description: The scheduled campaign }
+ *       403: { description: "Campaign is not in a schedulable state" }
+ */
+router.post('/notification-campaigns/:uid/schedule',
+  authenticate, authorizeAdmin('notification_campaigns.update'), validate(scheduleCampaignSchema),
+  async (req, res) => res.json({
+    success: true,
+    data: await notificationCampaigns.schedule(req.params.uid, req.body.scheduled_at, req.user.userId),
+  }));
+
+/**
+ * @swagger
+ * /admin/notification-campaigns/{uid}/send-now:
+ *   post:
+ *     summary: Start sending a campaign immediately
+ *     description: >-
+ *       Moves it to `sending`; the dispatcher drains it in batches from there, so
+ *       this returns as soon as the campaign is queued rather than when every
+ *       recipient has been written.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: The campaign, now sending }
+ */
+router.post('/notification-campaigns/:uid/send-now',
+  authenticate, authorizeAdmin('notification_campaigns.update'),
+  async (req, res) => res.json({ success: true, data: await notificationCampaigns.sendNow(req.params.uid) }));
+
+/**
+ * @swagger
+ * /admin/notification-campaigns/{uid}/cancel:
+ *   post:
+ *     summary: Cancel a campaign
+ *     description: >-
+ *       Stops further batches. Notifications already delivered are NOT withdrawn —
+ *       recipients have seen them.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: The cancelled campaign }
+ */
+router.post('/notification-campaigns/:uid/cancel',
+  authenticate, authorizeAdmin('notification_campaigns.update'),
+  async (req, res) => res.json({ success: true, data: await notificationCampaigns.cancel(req.params.uid) }));
 
 // ---- Roles (RBAC) ----
 router.use('/roles', adminCrud({
@@ -1321,5 +1441,53 @@ C('/coupons',             { model: models.Coupon,           resource: 'coupon', 
 // `reorderable` drives the shelf order on the buy screen.
 C('/quota-packs',         { model: models.QuotaPack,        resource: 'quota_pack',       permission: 'quota_packs', unique: ['name'], reorderable: true, filterable: ['status', 'feature_type_id'], createSchema: createQuotaPackSchema, updateSchema: updateQuotaPackSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => quotaPackService.assertPackWritable(payload, row), include: [{ model: models.FeatureType }] });
 C('/app-settings',        { model: models.AppSetting,       resource: 'app_setting',      permission: 'settings', idField: 'id', hasUid: false, createSchema: createAppSettingSchema, updateSchema: updateAppSettingSchema });
+
+// ---- Notifications ----
+//
+// `softDelete: 'is_active'` rather than `protect` on templates. The requirement is
+// that the 43 seeded rows cannot be DELETED but must stay EDITABLE — `protect`
+// blocks update and delete indistinguishably, so it would freeze the copy the
+// admin panel exists to change. softDelete gives exactly the right semantics for
+// free, and deactivating is what "remove this notification" should mean anyway:
+// a hard delete would orphan every inbox row that references it.
+//
+// Identity (`code`, `trigger_type`) is frozen on system rows by the beforeWrite
+// gate, which also enforces the {{token}} <-> variables contract.
+C('/notification-categories', { model: models.NotificationCategory, resource: 'notification_category', permission: 'notifications', unique: ['name', 'slug'], autoSlug: true, reorderable: true, filterable: ['is_active'], createSchema: createNotificationCategorySchema, updateSchema: updateNotificationCategorySchema });
+C('/notification-templates',  { model: models.NotificationTemplate, resource: 'notification_template', permission: 'notifications', unique: ['code'], softDelete: 'is_active', filterable: ['category_id', 'trigger_type', 'is_active', 'is_system', 'is_promotional'], createSchema: createNotificationTemplateSchema, updateSchema: updateNotificationTemplateSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => notificationTemplateGate.assertTemplateWritable(payload, row), include: [{ model: models.NotificationCategory }] });
+// Campaigns sit in their OWN permission domain, not with the notification
+// catalogue — the same call quota_packs makes about pricing. Editing the wording
+// of an existing notification and blasting an unsolicited message to every user on
+// the platform are different authorities, so `notification_campaigns` is absent
+// from content_admin and only super_admin (`*`) holds it out of the box.
+//
+// `status` is absent from both schemas on purpose: a campaign moves through its
+// lifecycle via the four endpoints above, never by a direct PATCH.
+C('/notification-campaigns',  { model: models.NotificationCampaign, resource: 'notification_campaign', permission: 'notification_campaigns', filterable: ['status', 'template_id'], createSchema: createNotificationCampaignSchema, updateSchema: updateNotificationCampaignSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => notificationCampaigns.assertCampaignWritable(payload, row), include: [{ model: models.NotificationTemplate }] });
+
+// Read-only delivery log, so support can answer "did this user actually get it?".
+// No create/update/delete: an inbox row is a record of something that happened,
+// and hand-editing one would make the audit trail worthless.
+router.get('/user-notifications', authenticate, authorizeAdmin('notifications.read'), async (req, res) => {
+  const limit  = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const where  = {};
+  for (const f of ['user_id', 'template_id', 'campaign_id']) {
+    if (req.query[f]) where[f] = req.query[f];
+  }
+  if (req.query.dedupe_key) where.dedupe_key = req.query.dedupe_key;
+
+  const { rows, count } = await models.UserNotification.findAndCountAll({
+    where,
+    include: [
+      { model: models.NotificationTemplate, attributes: ['uid', 'code'] },
+      { model: models.User, attributes: ['uid', 'name', 'phone'] },
+    ],
+    order: [['id', 'DESC']],
+    limit,
+    offset,
+  });
+  res.json({ success: true, data: rows, meta: { total: count } });
+});
 
 module.exports = router;

@@ -54,6 +54,35 @@ The suggestion comes back as `BusinessCategory.status: "pending"` on your own bu
 "pending approval" chip) and is invisible on `GET /industries` and on the public storefront until an
 admin approves it.
 
+### Notifications
+
+A fresh account's inbox is **empty**, and the things that fill it are real events (a payment
+failing) or the nightly scans — neither of which you can wait for. So the folder opens with
+**Notifications → Send Test Notification (dev)**, which puts one in your *own* inbox. Run it a few
+times, then work down the folder.
+
+It goes through the real send path rather than inserting a row, so it also answers the question you
+will actually have — *why did nothing show up?* Check `data.skipped_reason`:
+
+| Reason | What happened |
+|---|---|
+| `daily_cap` / `weekly_cap` | You have had 3 promotional notifications today (10 this week) |
+| `min_gap` | Another one landed less than 45 minutes ago |
+| `marketing_opt_out` | `notify_marketing` is off — see **Users → Update Preferences** |
+| `category_muted` | You switched that category off in **Get/Update My Notification Settings** |
+| `render_failed` | The template has `{{placeholders}}` and you sent no values for them |
+
+`delivered: true` with `status: "scheduled"` is not a failure: quiet hours (9pm–9am IST) deferred
+it, and it appears in the inbox at `deliver_at`.
+
+Two things about the endpoint that are deliberate: it always targets **you** — there is no
+recipient field, because this is reachable on staging — and it exists outside production only. The
+body is optional; `{}` sends a transactional notification with no placeholders. To exercise
+rendering, send `{ "code": "credits_running_low", "variables": { "credits_count": 12 } }`.
+
+`GET /notifications` is already filtered server-side — dismissed, expired and quiet-hours-held rows
+never appear — so an empty list after **Dismiss All** is correct, not a bug.
+
 Variables persist in `localStorage` per browser. **reset** restores the seed values.
 
 ### Reading the screen

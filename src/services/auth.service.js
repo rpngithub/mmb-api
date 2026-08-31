@@ -9,6 +9,8 @@ const subRepo       = require('../repositories/userSubscription.repository');
 const userService   = require('./user.service');
 const sessionService = require('./session.service');
 const activityService = require('./activity.service');
+const notify          = require('./notification.service');
+const dedupe          = require('../utils/dedupeKey');
 const { signAccessToken, signRefreshToken, verifyToken } = require('../utils/jwtHelper');
 const { generateOtp, hashOtp, verifyOtp, sendOtp }       = require('../utils/otpHelper');
 const { hashToken, verifyTokenHash }                     = require('../utils/tokenHash');
@@ -82,6 +84,13 @@ async function verifyOtpService({ phone, otp, purpose, client_mnemonic }) {
   // no name (every PERSONAL account) and so reported every login as a first login.
   // `onboarding` carries the detail needed to resume on the right screen.
   const onboarding = await userService.onboardingState(user);
+
+  // "Welcome to Make My Brand!" — once per account, ever. Keyed on nothing but the
+  // code, so the unique index makes every subsequent login silent; the
+  // `last_login_at` check would be the obvious guard but it has already been
+  // stamped by _issueTokens by this point.
+  notify.notify({ code: 'welcome_to_mmb', userId: user.id, dedupeKey: dedupe.once('welcome_to_mmb') });
+
   return { ...tokens, is_new_user: !onboarding.completed, onboarding };
 }
 

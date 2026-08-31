@@ -13,7 +13,7 @@ const { JWT_SECRET } = require('../src/config/jwt');
 
 const P = '/api/v1';
 let startLogId = 0;
-const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [] };
+const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -46,6 +46,20 @@ after(async () => {
   // Also after users: a grant pins its pack, and grants go with their owner.
   if (track.quotaPacks.length) await models.QuotaPack.destroy({ where: { id: track.quotaPacks } });
   if (track.coupons.length)   await models.Coupon.destroy({ where: { id: track.coupons } }); // cascades plan restrictions
+  // Notifications go AFTER users (user_notifications cascades with its owner) and
+  // in dependency order: an inbox row pins its template with ON DELETE RESTRICT,
+  // so campaigns and templates can only go once their rows are gone.
+  if (track.notificationCampaigns.length) {
+    await models.UserNotification.destroy({ where: { campaign_id: track.notificationCampaigns } });
+    await models.NotificationCampaign.destroy({ where: { id: track.notificationCampaigns } });
+  }
+  if (track.notificationTemplates.length) {
+    await models.UserNotification.destroy({ where: { template_id: track.notificationTemplates } });
+    await models.NotificationTemplate.destroy({ where: { id: track.notificationTemplates } });
+  }
+  if (track.notificationCategories.length) {
+    await models.NotificationCategory.destroy({ where: { id: track.notificationCategories } });
+  }
   await ActivityLog.destroy({ where: { id: { [require('sequelize').Op.gt]: startLogId } } });
   await h.stop();
   await models.sequelize.close();
@@ -5234,4 +5248,425 @@ test('a top-up for a relaxed feature is refused, and says why honestly', async (
     assert.equal((await quotaSvc.balanceFor(userId, 'storage')).remaining, 500 * MB);
   });
   assert.equal(Number((await grant.reload()).consumed), 0);
+});
+
+// ---------- Notifications ----------
+//
+// The properties worth defending here are the ones whose failure is SILENT: a
+// dedupe key that stops re-firing (users quietly never hear from us again), one
+// that fires every night (spam), a consent check a promo can slip past, and a
+// system template whose code an admin can rename out from under the code that
+// dispatches it.
+
+const notifySvc     = require('../src/services/notification.service');
+const notifyScans   = require('../src/services/notificationScans.service');
+const dedupeKey     = require('../src/utils/dedupeKey');
+const notifyCleanup = require('../src/jobs/notificationCleanup.job');
+
+// Fatigue rules are stateful and per-user, so anything asserting a specific SKIP
+// reason needs a user no earlier test has already notified.
+let notifSeq = 0;
+async function makeNotifUser(overrides = {}) {
+  const u = await User.create({
+    name: `TST notif ${Date.now()}-${notifSeq}`,
+    phone: `${6 + (notifSeq % 4)}${String(Date.now()).slice(-7)}${notifSeq % 10}`,
+    account_type: 'personal',
+    ...overrides,
+  });
+  notifSeq += 1;
+  track.users.push(u.id);
+  return u;
+}
+
+async function makeNotifTemplate(overrides = {}) {
+  notifSeq += 1;
+  const cat = await models.NotificationCategory.create({
+    name: `TST cat ${Date.now()}-${notifSeq}`, slug: `tst-cat-${Date.now()}-${notifSeq}`,
+  });
+  track.notificationCategories.push(cat.id);
+
+  const tpl = await models.NotificationTemplate.create({
+    code: `tst_${Date.now()}_${notifSeq}`,
+    category_id: cat.id,
+    title: 'Test notification',
+    body: 'Body text.',
+    trigger_type: 'event',
+    is_promotional: 0,
+    ...overrides,
+  });
+  track.notificationTemplates.push(tpl.id);
+  return { tpl, cat };
+}
+
+test('the seeded notification catalogue is complete and every template can render', async () => {
+  const rows = await models.NotificationTemplate.findAll({ where: { is_system: 1 } });
+  assert.ok(rows.length >= 40, `expected the seeded catalogue, got ${rows.length}`);
+
+  // Declared variables must match the copy in both directions. Drift here ships a
+  // literal "{{credits_count}}" to real users.
+  const { assertVariableContract } = require('../src/utils/renderTemplate');
+  for (const t of rows) {
+    assert.doesNotThrow(
+      () => assertVariableContract({ title: t.title, body: t.body, variables: t.variables || [] }),
+      `template '${t.code}' has a broken variable contract`,
+    );
+  }
+
+  // A behavioural template naming a predicate nothing implements is a permanent
+  // silent no-op — the exact failure this feature must not have.
+  for (const t of rows.filter((r) => r.trigger_type === 'behavioral' && r.is_active)) {
+    assert.ok(notifyScans.PREDICATES[(t.trigger_config || {}).predicate],
+      `behavioural template '${t.code}' names an unimplemented predicate`);
+  }
+});
+
+test('a dedupe key identifies the occasion, so one event never notifies twice', async () => {
+  const user = await makeNotifUser();
+  const { tpl } = await makeNotifTemplate();
+
+  const first  = await notifySvc.dispatch({ code: tpl.code, userId: user.id, dedupeKey: dedupeKey.forEntity(tpl.code, 'pay', 1) });
+  const second = await notifySvc.dispatch({ code: tpl.code, userId: user.id, dedupeKey: dedupeKey.forEntity(tpl.code, 'pay', 1) });
+  const other  = await notifySvc.dispatch({ code: tpl.code, userId: user.id, dedupeKey: dedupeKey.forEntity(tpl.code, 'pay', 2) });
+
+  assert.ok(first.created);
+  assert.equal(second.created, null);
+  assert.equal(second.skipped, 'duplicate');
+  assert.ok(other.created, 'a different occasion must send again');
+  assert.equal(await models.UserNotification.count({ where: { user_id: user.id } }), 2);
+});
+
+test('a bulk dispatch is idempotent, which is what makes the scan jobs safe to re-run', async () => {
+  const a = await makeNotifUser();
+  const b = await makeNotifUser();
+  const { tpl } = await makeNotifTemplate();
+  const key = dedupeKey.forCampaign(987654);
+
+  const run1 = await notifySvc.dispatchBulk({ code: tpl.code, userIds: [a.id, b.id], dedupeKey: key });
+  const run2 = await notifySvc.dispatchBulk({ code: tpl.code, userIds: [a.id, b.id], dedupeKey: key });
+
+  assert.equal(run1.inserted, 2);
+  assert.equal(run2.inserted, 0);
+  assert.equal(run2.reasons.duplicate, 2);
+  assert.equal(await models.UserNotification.count({ where: { dedupe_key: key } }), 2);
+});
+
+test('a dormancy key repeats for the same lapse and changes for a new one', async () => {
+  const day = 86400000;
+  const lapsedOn = new Date(Date.now() - 8 * day);
+
+  assert.equal(
+    dedupeKey.forDormancy('inactive_7d', lapsedOn),
+    dedupeKey.forDormancy('inactive_7d', lapsedOn),
+    're-scanning an unchanged last_active_at must produce the same key',
+  );
+  assert.notEqual(
+    dedupeKey.forDormancy('inactive_7d', new Date(Date.now() - 7 * day)),
+    dedupeKey.forDormancy('inactive_7d', lapsedOn),
+    'a user who returned and lapsed again must get a new key',
+  );
+});
+
+test('marketing consent stops a promo but never a receipt', async () => {
+  const user = await makeNotifUser();
+  await models.UserPreference.create({ user_id: user.id, notify_marketing: 0 });
+
+  const { tpl: promo }   = await makeNotifTemplate({ is_promotional: 1 });
+  const { tpl: receipt } = await makeNotifTemplate({ is_promotional: 0 });
+
+  const p = await notifySvc.dispatch({ code: promo.code, userId: user.id, dedupeKey: 'p:1' });
+  const r = await notifySvc.dispatch({ code: receipt.code, userId: user.id, dedupeKey: 'r:1' });
+
+  assert.equal(p.skipped, 'marketing_opt_out');
+  assert.ok(r.created, 'a transactional notification must ignore marketing consent');
+});
+
+test('muting a category stops everything in it, transactional included', async () => {
+  const user = await makeNotifUser();
+  const { tpl, cat } = await makeNotifTemplate({ is_promotional: 0 });
+  await models.UserNotificationSetting.create({ user_id: user.id, category_id: cat.id, in_app: 0 });
+
+  const res = await notifySvc.dispatch({ code: tpl.code, userId: user.id, dedupeKey: 'm:1' });
+  assert.equal(res.skipped, 'category_muted');
+});
+
+test('audience targeting keeps a personal-only notification away from a business account', async () => {
+  const personal = await makeNotifUser({ account_type: 'personal' });
+  const business = await makeNotifUser({ account_type: 'business' });
+  const { tpl } = await makeNotifTemplate({ audience_account_type: 'personal' });
+
+  assert.ok((await notifySvc.dispatch({ code: tpl.code, userId: personal.id, dedupeKey: 'a:1' })).created);
+  assert.equal(
+    (await notifySvc.dispatch({ code: tpl.code, userId: business.id, dedupeKey: 'a:1' })).skipped,
+    'audience_mismatch',
+  );
+});
+
+test('a missing variable aborts the send rather than shipping a hole', async () => {
+  const user = await makeNotifUser();
+  const { tpl } = await makeNotifTemplate({
+    title: 'Low', body: 'Only {{credits_count}} left.', variables: ['credits_count'],
+  });
+
+  const res = await notifySvc.dispatch({ code: tpl.code, userId: user.id, variables: {}, dedupeKey: 'v:1' });
+  assert.equal(res.skipped, 'render_failed');
+  assert.equal(await models.UserNotification.count({ where: { user_id: user.id } }), 0);
+});
+
+test('the inbox lists, reads and dismisses, and hides expired and quiet-held rows', async () => {
+  const user  = await makeNotifUser();
+  const token = h.userTokenFor(user.id);
+  const { tpl } = await makeNotifTemplate();
+
+  await notifySvc.dispatch({ code: tpl.code, userId: user.id, dedupeKey: 'i:1' });
+  await notifySvc.dispatch({ code: tpl.code, userId: user.id, dedupeKey: 'i:2' });
+
+  // Neither of these may ever be visible.
+  await models.UserNotification.create({
+    user_id: user.id, dedupe_key: 'i:expired', title: 'Expired', body: 'x',
+    status: 'delivered', deliver_at: new Date(Date.now() - 86400000),
+    expires_at: new Date(Date.now() - 3600000),
+  });
+  await models.UserNotification.create({
+    user_id: user.id, dedupe_key: 'i:held', title: 'Held', body: 'x',
+    status: 'scheduled', deliver_at: new Date(Date.now() + 86400000),
+  });
+
+  const list = await h.request('GET', `${P}/notifications`, { token });
+  assert.equal(list.status, 200);
+  assert.equal(list.body.meta.total, 2, 'expired and quiet-hours-held rows must not be listed');
+  assert.ok(!('user_id' in list.body.data[0]), 'internal ids must not leak to the client');
+
+  assert.equal((await h.request('GET', `${P}/notifications/summary`, { token })).body.data.unread_count, 2);
+
+  const target = list.body.data[0].uid;
+  assert.equal((await h.request('PATCH', `${P}/notifications/${target}/read`, { token })).status, 200);
+  assert.equal((await h.request('GET', `${P}/notifications/summary`, { token })).body.data.unread_count, 1);
+
+  assert.equal((await h.request('PATCH', `${P}/notifications/${target}/dismiss`, { token })).status, 200);
+  assert.equal((await h.request('GET', `${P}/notifications`, { token })).body.meta.total, 1);
+  // Dismiss is soft: the row still counts toward throttling and answers "did we tell them?".
+  assert.equal(await models.UserNotification.count({ where: { user_id: user.id } }), 4);
+});
+
+test('another user notification is a 404, not a cross-account write', async () => {
+  const owner = await makeNotifUser();
+  const nosy  = await makeNotifUser();
+  const { tpl } = await makeNotifTemplate();
+
+  const created = await notifySvc.dispatch({ code: tpl.code, userId: owner.id, dedupeKey: 'x:1' });
+  const r = await h.request('PATCH', `${P}/notifications/${created.created.uid}/read`, {
+    token: h.userTokenFor(nosy.id),
+  });
+  assert.equal(r.status, 404);
+});
+
+test('notification settings default to on and can mute a category', async () => {
+  const user  = await makeNotifUser();
+  const token = h.userTokenFor(user.id);
+
+  const before = await h.request('GET', `${P}/notifications/settings`, { token });
+  assert.equal(before.status, 200);
+  assert.ok(before.body.data.every((c) => c.in_app === true), 'untouched categories default to on');
+
+  const target = before.body.data[0];
+  const after = await h.request('PUT', `${P}/notifications/settings`, {
+    token, body: { settings: [{ category_uid: target.uid, in_app: false }] },
+  });
+  assert.equal(after.status, 200);
+  assert.equal(after.body.data.find((c) => c.uid === target.uid).in_app, false);
+
+  const bad = await h.request('PUT', `${P}/notifications/settings`, {
+    token, body: { settings: [{ category_uid: 'nope', in_app: false }] },
+  });
+  assert.equal(bad.status, 400);
+});
+
+test('admin notification templates: system rows stay editable but their identity is locked', async () => {
+  const token = h.adminToken(['*']);
+  const seeded = await models.NotificationTemplate.findOne({ where: { code: 'payment_failed' } });
+  assert.ok(seeded, 'the seeded catalogue must be present');
+
+  const renamed = await h.request('PATCH', `${P}/admin/notification-templates/${seeded.uid}`, {
+    token, body: { code: 'payment_failed_v2' },
+  });
+  assert.equal(renamed.status, 403, 'code is wired to a dispatch call site and to existing dedupe keys');
+
+  assert.equal(
+    (await h.request('PATCH', `${P}/admin/notification-templates/${seeded.uid}`, {
+      token, body: { trigger_type: 'manual' },
+    })).status,
+    403,
+  );
+
+  const original = seeded.title;
+  const reworded = await h.request('PATCH', `${P}/admin/notification-templates/${seeded.uid}`, {
+    token, body: { title: 'We could not take your payment' },
+  });
+  assert.equal(reworded.status, 200, 'copy must stay editable — that is the point of the admin panel');
+  // Model-level update, NOT seeded.update(). `seeded` was loaded before the PATCH
+  // went through HTTP, so its in-memory title is still the original — Sequelize
+  // would see no change and silently issue no SQL, leaving the row edited and
+  // poisoning the seed-integrity test on the next run.
+  await models.NotificationTemplate.update({ title: original }, { where: { id: seeded.id } });
+
+  // DELETE is soft: a hard delete would orphan every inbox row referencing it.
+  assert.equal((await h.request('DELETE', `${P}/admin/notification-templates/${seeded.uid}`, { token })).status, 200);
+  const after = await models.NotificationTemplate.findOne({ where: { code: 'payment_failed' } });
+  assert.ok(after, 'the row must survive DELETE');
+  assert.equal(Number(after.is_active), 0);
+  await after.update({ is_active: 1 });
+});
+
+test('the server owns placeholders, so an admin never maintains a variable list', async () => {
+  const token = h.adminToken(['*']);
+
+  // A built-in template may only use what its trigger actually supplies, and the
+  // error has to name what that is — "you failed to declare it" was useless,
+  // because the admin never chose the supply list in the first place.
+  const seeded = await models.NotificationTemplate.findOne({ where: { code: 'trial_activated' } });
+  const originalBody = seeded.body;
+
+  const invented = await h.request('PATCH', `${P}/admin/notification-templates/${seeded.uid}`, {
+    token, body: { body: 'Your trial started. You have {{made_up_thing}} left.' },
+  });
+  assert.equal(invented.status, 400);
+  assert.match(invented.body.error.message, /made_up_thing/);
+  assert.match(invented.body.error.message, /trial_days/, 'the error must list what IS available');
+
+  // Dropping a placeholder to simplify the wording is now fine. Under the old
+  // bidirectional contract this was a 400 ("declared but never used"), which made
+  // shortening a message impossible without also editing a hidden list.
+  const simplified = await h.request('PATCH', `${P}/admin/notification-templates/${seeded.uid}`, {
+    token, body: { body: 'Your Premium trial has started.' },
+  });
+  assert.equal(simplified.status, 200);
+  // Model-level update — see the note in the test above; an instance-level update
+  // here is a silent no-op because `seeded` never saw the HTTP edits.
+  await models.NotificationTemplate.update({ body: originalBody }, { where: { id: seeded.id } });
+
+  // An admin-authored template has no trigger feeding it, so its placeholders are
+  // simply derived from the copy — no list to keep in sync.
+  const created = await h.request('POST', `${P}/admin/notification-templates`, {
+    token,
+    body: {
+      code: `tst_derived_${Date.now()}`, title: 'Hello {{name}}',
+      body: 'You have {{credits_count}} credits.', trigger_type: 'manual',
+    },
+  });
+  assert.equal(created.status, 201);
+  track.notificationTemplates.push(created.body.data.id);
+  const stored = await models.NotificationTemplate.findByPk(created.body.data.id);
+  assert.deepEqual([...stored.variables].sort(), ['credits_count', 'name']);
+
+  // The two fields that used to confuse the form are no longer accepted at all.
+  const sendsVariables = await h.request('POST', `${P}/admin/notification-templates`, {
+    token,
+    body: { code: `tst_v_${Date.now()}`, title: 'x', body: 'y', trigger_type: 'manual', variables: ['ghost'] },
+  });
+  assert.equal(sendsVariables.status, 400);
+
+  const sendsPriority = await h.request('POST', `${P}/admin/notification-templates`, {
+    token,
+    body: { code: `tst_p_${Date.now()}`, title: 'x', body: 'y', trigger_type: 'manual', priority: 99 },
+  });
+  assert.equal(sendsPriority.status, 400);
+});
+
+test('a default value for a placeholder that does not exist is rejected as dead config', async () => {
+  const token = h.adminToken(['*']);
+  const r = await h.request('POST', `${P}/admin/notification-templates`, {
+    token,
+    body: {
+      code: `tst_defaults_${Date.now()}`, title: 'x', body: 'plain text',
+      trigger_type: 'manual', variable_defaults: { nothing_uses_this: 'oops' },
+    },
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error.message, /nothing_uses_this/);
+});
+
+test('campaigns are permissioned apart from the notification catalogue', async () => {
+  // content_admin curates copy; blasting every user on the platform is a different
+  // authority and stays with super_admin.
+  const contentAdmin = h.adminToken(['notifications.*']);
+  assert.equal((await h.request('GET', `${P}/admin/notification-templates`, { token: contentAdmin })).status, 200);
+  assert.equal((await h.request('GET', `${P}/admin/notification-campaigns`, { token: contentAdmin })).status, 403);
+
+  const unrelated = h.adminToken(['categories.*']);
+  assert.equal((await h.request('GET', `${P}/admin/notification-templates`, { token: unrelated })).status, 403);
+});
+
+test('a campaign previews its audience, sends once, and cannot double-send on a re-run', async () => {
+  const token = h.adminToken(['*']);
+  const campaignSvc = require('../src/services/notificationCampaign.service');
+
+  for (let i = 0; i < 3; i++) await makeNotifUser({ account_type: 'business' });
+
+  const created = await h.request('POST', `${P}/admin/notification-campaigns`, {
+    token,
+    body: {
+      name: `TST campaign ${Date.now()}`,
+      title: 'We shipped 2.4', body: 'New features are live.',
+      audience: { account_type: 'business' },
+    },
+  });
+  assert.equal(created.status, 201);
+  track.notificationCampaigns.push(created.body.data.id);
+
+  const rejected = await h.request('POST', `${P}/admin/notification-campaigns`, {
+    token, body: { name: 'TST bad', title: 'x', body: 'y', audience: { not_a_real_filter: true } },
+  });
+  assert.equal(rejected.status, 400,
+    'an unrecognised filter must fail loudly — silently dropping it widens the audience');
+
+  const preview = await h.request('GET', `${P}/admin/notification-campaigns/${created.body.data.uid}/preview`, { token });
+  assert.equal(preview.status, 200);
+  assert.ok(preview.body.data.audience_count >= 3);
+
+  assert.equal(
+    (await h.request('POST', `${P}/admin/notification-campaigns/${created.body.data.uid}/send-now`, { token })).status,
+    200,
+  );
+  await campaignSvc.runDispatchTick();
+
+  const sent = await models.UserNotification.count({ where: { campaign_id: created.body.data.id } });
+  assert.ok(sent >= 3, `expected the segment to receive it, got ${sent}`);
+
+  // Rewind the cursor and drain again: the campaign-scoped dedupe key is what makes
+  // a resumed or restarted fan-out safe.
+  const row = await models.NotificationCampaign.findByPk(created.body.data.id);
+  await row.update({ status: 'sending', cursor_user_id: 0 });
+  await campaignSvc.runDispatchTick();
+  assert.equal(await models.UserNotification.count({ where: { campaign_id: created.body.data.id } }), sent);
+});
+
+test('the retention job prunes old rows and reports how many it actually deleted', async () => {
+  const user = await makeNotifUser();
+  const old = await models.UserNotification.create({
+    user_id: user.id, dedupe_key: `ret:${Date.now()}`, title: 'old', body: 'old',
+    dismissed_at: new Date(Date.now() - 120 * 86400000),
+  });
+  // created_at is Sequelize-managed, so backdating it takes raw SQL.
+  await models.sequelize.query('UPDATE user_notifications SET created_at = :c WHERE id = :id', {
+    replacements: { c: new Date(Date.now() - 120 * 86400000), id: old.id },
+  });
+
+  const deleted = await notifyCleanup.purge();
+  assert.ok(deleted >= 1, 'the count must reflect real deletions, not a discarded driver result');
+  assert.equal(await models.UserNotification.findByPk(old.id), null);
+});
+
+test('the notifications permission grant is additive and idempotent', async () => {
+  const migration = require('../src/db/migrations/20260101000035-role-permissions-notifications');
+  const qi = models.sequelize.getQueryInterface();
+
+  const role = await models.Role.findOne({ where: { name: 'content_admin' } });
+  const before = role.permissions;
+  assert.ok(before.includes('notifications.*'));
+
+  await migration.up(qi);
+  const again = await models.Role.findOne({ where: { name: 'content_admin' } });
+  assert.deepEqual(again.permissions, before, 're-running must not duplicate the grant');
+  // Campaigns are deliberately withheld from content_admin.
+  assert.ok(!again.permissions.includes('notification_campaigns.*'));
 });
