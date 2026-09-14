@@ -40,7 +40,9 @@ const clean = (body) => {
  * @param {function}[opts.protect]     (row) => reason|null; if it returns a string the
  *                                     row is treated as immutable (update/delete -> 403)
  * @param {string[]}[opts.filterable]  query params that filter the list by exact match
- *                                     (e.g. ['plan_id'] -> GET /?plan_id=3)
+ *                                     (e.g. ['plan_id'] -> GET /?plan_id=3). The literal
+ *                                     value 'null' filters for SQL NULL, matching the
+ *                                     convention in utils/catalogRef.js.
  * @param {object} [opts.filterAlias]  { queryParam: column } map of alternate query-param
  *                                     names that filter a differently-named column
  *                                     (e.g. { industry_id: 'business_category_id' })
@@ -127,13 +129,21 @@ function adminCrud(opts) {
     });
   }
 
+  // The literal string 'null' filters for SQL NULL — the same convention
+  // utils/catalogRef.js already uses on the public side (`?parent=null` means
+  // top-level). Without it a nullable filter column has no addressable "unset"
+  // value: `?business_category_id=null` would compare against the string 'null',
+  // which MySQL coerces to 0 and silently matches nothing. That is precisely the
+  // rows the page-content editor needs to list — the shared defaults.
+  const filterValue = (v) => (v === 'null' ? null : v);
+
   router.get('/', authorizeAdmin(`${perm}.read`), async (req, res) => {
     const where = {};
     for (const f of filterable) {
-      if (req.query[f] !== undefined) where[f] = req.query[f];
+      if (req.query[f] !== undefined) where[f] = filterValue(req.query[f]);
     }
     for (const [param, column] of Object.entries(filterAlias)) {
-      if (req.query[param] !== undefined) where[column] = req.query[param];
+      if (req.query[param] !== undefined) where[column] = filterValue(req.query[param]);
     }
     const rows = await model.findAll({ where, order: [['id', 'DESC']], ...(include ? { include } : {}), ...listOptions });
     res.json({ success: true, data: rows });

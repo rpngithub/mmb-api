@@ -13,7 +13,7 @@ const { JWT_SECRET } = require('../src/config/jwt');
 
 const P = '/api/v1';
 let startLogId = 0;
-const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [] };
+const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [], pageSections: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -33,6 +33,9 @@ after(async () => {
   if (track.templates.length) await Template.destroy({ where: { id: track.templates } }); // cascades template_tags / _sizes / _business_categories
   if (track.tags.length)              await models.Tag.destroy({ where: { id: track.tags } });
   if (track.templateSizes.length)     await models.TemplateSize.destroy({ where: { id: track.templateSizes } });
+  // Before the industries: an industry-scoped section cascades away with its
+  // industry, but a DEFAULT section (business_category_id null) does not.
+  if (track.pageSections.length) await models.PageSection.destroy({ where: { id: track.pageSections } }); // cascades page_section_items
   if (track.businessCategories.length) await models.BusinessCategory.destroy({ where: { id: track.businessCategories } });
   if (track.templateCategories.length) await models.TemplateCategory.destroy({ where: { id: track.templateCategories } });
   if (track.assets.length)             await models.Asset.destroy({ where: { id: track.assets } });
@@ -1430,6 +1433,157 @@ test('catalogue exposes related industries via /industries/{ref} and ?with_relat
   assert.ok(alias.body.data.find((c) => c.uid === anchor.uid).RelatedIndustries.length === 2, 'alias honours with_related');
 
   await models.BusinessCategoryRelated.destroy({ where: { category_id: anchor.id } });
+});
+
+// ---- Page content (the editorial blocks under the template grid) ----
+// A distinct page_key per test keeps these from colliding with each other or with
+// whatever the real 'industry' page holds in a seeded database.
+const makeSection = async (pageKey, sectionKey, over = {}) => {
+  const row = await models.PageSection.create({
+    uid: uuid(), page_key: pageKey, section_key: sectionKey, business_category_id: null,
+    heading: 'Default heading', display_order: 0, is_active: 1, ...over,
+  });
+  track.pageSections.push(row.id);
+  return row;
+};
+
+test('page sections: an industry inherits the defaults, overrides one key, and hides another', async () => {
+  const stamp    = Date.now();
+  const pageKey  = `tst_p${stamp}`;
+  const industry = await makeIndustry('PageContent', stamp);
+
+  // Three shared defaults, in page order.
+  await makeSection(pageKey, 'why_choose',      { display_order: 10, heading: 'Why Choose Us' });
+  const ideas = await makeSection(pageKey, 'content_ideas',  { display_order: 20, heading: 'Content for Every {{industry}} Need' });
+  await makeSection(pageKey, 'business_growth', { display_order: 30, subheading: 'videos for your {{industry_lower}} brand.' });
+
+  const items = await Promise.all([
+    models.PageSectionItem.create({ uid: uuid(), section_id: ideas.id, title: 'Festival Greetings', display_order: 1 }),
+    models.PageSectionItem.create({ uid: uuid(), section_id: ideas.id, title: 'Promotional Offers', display_order: 0 }),
+    models.PageSectionItem.create({ uid: uuid(), section_id: ideas.id, title: 'Hidden', display_order: 2, is_active: 0 }),
+  ]);
+
+  const url = `${P}/page-sections?page=${pageKey}&industry=${industry.slug}`;
+
+  // Nothing overridden yet: all three defaults, in display_order, tokens filled
+  // in from the industry being served.
+  const inherited = await h.request('GET', url);
+  assert.equal(inherited.status, 200);
+  assert.deepEqual(inherited.body.data.map((s) => s.section_key), ['why_choose', 'content_ideas', 'business_growth']);
+  assert.ok(inherited.body.data.every((s) => s.inherited), 'every block is the shared default');
+  assert.equal(inherited.body.data[1].heading, `Content for Every ${industry.name} Need`, '{{industry}} substituted');
+  assert.equal(inherited.body.data[2].subheading, `videos for your ${industry.name.toLowerCase()} brand.`, '{{industry_lower}} substituted');
+  assert.deepEqual(inherited.body.data[1].items.map((i) => i.title), ['Promotional Offers', 'Festival Greetings'],
+    'items in display_order, inactive one dropped');
+
+  // An override wins for its key alone; the other two keep inheriting.
+  await makeSection(pageKey, 'content_ideas', { business_category_id: industry.id, display_order: 20, heading: 'Bespoke copy' });
+  const overridden = await h.request('GET', url);
+  assert.equal(overridden.body.data[1].heading, 'Bespoke copy');
+  assert.equal(overridden.body.data[1].inherited, false);
+  assert.deepEqual(overridden.body.data[1].items, [], 'the override starts with no items of its own');
+  assert.ok(overridden.body.data[0].inherited && overridden.body.data[2].inherited, 'other keys still inherit');
+
+  // An INACTIVE override is how an industry hides an inherited block — the
+  // default must not resurface in its place.
+  await makeSection(pageKey, 'why_choose', { business_category_id: industry.id, display_order: 10, is_active: 0 });
+  const hidden = await h.request('GET', url);
+  assert.deepEqual(hidden.body.data.map((s) => s.section_key), ['content_ideas', 'business_growth'],
+    'the hidden block is gone, not replaced by its default');
+
+  // Another industry is untouched by any of it.
+  const other = await makeIndustry('PageContentOther', stamp);
+  const untouched = await h.request('GET', `${P}/page-sections?page=${pageKey}&industry=${other.slug}`);
+  assert.deepEqual(untouched.body.data.map((s) => s.section_key), ['why_choose', 'content_ideas', 'business_growth']);
+  assert.equal(untouched.body.data[1].heading, `Content for Every ${other.name} Need`, 'defaults re-render per industry');
+
+  await models.PageSectionItem.destroy({ where: { id: items.map((i) => i.id) } });
+  assert.equal((await h.request('GET', `${P}/page-sections?page=${pageKey}&industry=nope-${stamp}`)).status, 404);
+});
+
+test('page sections ride along on /industries/{ref}', async () => {
+  const stamp    = Date.now();
+  const industry = await makeIndustry('PageDetail', stamp);
+  await makeSection('industry', `tst_only_${stamp}`, { heading: 'Everything You Need, {{industry}}' });
+
+  const detail = await h.request('GET', `${P}/industries/${industry.slug}`);
+  assert.equal(detail.status, 200);
+  assert.ok(Array.isArray(detail.body.data.sections), 'landing page gets its copy in the same call');
+  const mine = detail.body.data.sections.find((s) => s.section_key === `tst_only_${stamp}`);
+  assert.equal(mine.heading, `Everything You Need, ${industry.name}`);
+});
+
+test('admin page sections: scope uniqueness, clone, reorder and permission gate', async () => {
+  const stamp    = Date.now();
+  const pageKey  = `tst_a${stamp}`;
+  const token    = h.adminToken(['page_content.*']);
+  const industry = await makeIndustry('PageAdmin', stamp);
+  const url      = `${P}/admin/page-sections`;
+
+  const mk = async (body) => {
+    const res = await h.request('POST', url, { token, body: { page_key: pageKey, ...body } });
+    if (res.status === 201) track.pageSections.push(res.body.data.id);
+    return res;
+  };
+
+  const first = await mk({ section_key: 'why_choose', heading: 'Default' });
+  assert.equal(first.status, 201);
+
+  // MySQL allows unlimited NULLs in a unique index, so nothing at the schema
+  // level catches a SECOND default for the same key — the guard is beforeWrite.
+  assert.equal((await mk({ section_key: 'why_choose', heading: 'Dupe' })).status, 409, 'duplicate default rejected');
+
+  // The same key scoped to an industry is a legitimate override, not a clash.
+  const override = await mk({ section_key: 'why_choose', business_category_id: industry.id, heading: 'Mine' });
+  assert.equal(override.status, 201);
+  assert.equal((await mk({ section_key: 'why_choose', business_category_id: industry.id })).status, 409, 'duplicate override rejected');
+  assert.equal((await mk({ section_key: 'why_choose', business_category_id: 999999 })).status, 404, 'unknown industry is a 404, not a raw FK error');
+
+  // Items hang off a section and are ordered by drag, not by insertion.
+  const itemUrl = `${P}/admin/page-section-items`;
+  const a = await h.request('POST', itemUrl, { token, body: { section_id: first.body.data.id, title: 'Card A' } });
+  const b = await h.request('POST', itemUrl, { token, body: { section_id: first.body.data.id, title: 'Card B' } });
+  assert.equal(a.status, 201);
+  assert.equal((await h.request('POST', itemUrl, { token, body: { section_id: 999999, title: 'Orphan' } })).status, 404);
+  assert.equal((await h.request('POST', itemUrl, { token, body: { section_id: first.body.data.id } })).status, 400, 'an item with no content at all is rejected');
+
+  const reorder = await h.request('PATCH', `${itemUrl}/reorder`, { token, body: { ids: [b.body.data.uid, a.body.data.uid] } });
+  assert.equal(reorder.status, 200);
+  const listed = await h.request('GET', `${itemUrl}?section_id=${first.body.data.id}`, { token });
+  assert.deepEqual(listed.body.data.map((i) => i.title), ['Card B', 'Card A'], 'drag order round-trips');
+
+  // Clone refuses while the industry already owns that key...
+  const clone = (body) => h.request('POST', `${url}/clone`, { token, body: { page_key: pageKey, business_category_id: industry.id, ...body } });
+  assert.equal((await clone({})).status, 409, 'will not overwrite copy the industry already has');
+
+  // ...and copies the defaults, with their items, once it doesn't.
+  await models.PageSection.destroy({ where: { id: override.body.data.id } });
+  const cloned = await clone({});
+  assert.equal(cloned.status, 201);
+  track.pageSections.push(...cloned.body.data.map((s) => s.id));
+  assert.deepEqual(cloned.body.data.map((s) => s.section_key), ['why_choose']);
+  const clonedItems = await models.PageSectionItem.findAll({ where: { section_id: cloned.body.data[0].id } });
+  assert.deepEqual(clonedItems.map((i) => i.title).sort(), ['Card A', 'Card B'], 'items came across too');
+  assert.equal((await clone({ section_keys: [`nope_${stamp}`] })).status, 404, 'unknown section_key is a 404');
+
+  // Preview resolves exactly as the public read does.
+  const preview = await h.request('GET', `${url}/preview?page_key=${pageKey}&industry_id=${industry.id}`, { token });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.data.find((s) => s.section_key === 'why_choose').inherited, false, 'the clone is now the industry\'s own');
+
+  // The editor has to be able to list the shared defaults, which is only
+  // expressible if 'null' means IS NULL.
+  const defaults = await h.request('GET', `${url}?page_key=${pageKey}&business_category_id=null`, { token });
+  assert.equal(defaults.status, 200);
+  assert.ok(defaults.body.data.length && defaults.body.data.every((s) => s.business_category_id === null),
+    'business_category_id=null lists the defaults, not the empty set');
+  const mine = await h.request('GET', `${url}?page_key=${pageKey}&industry_id=${industry.id}`, { token });
+  assert.ok(mine.body.data.every((s) => s.business_category_id === industry.id), 'industry_id alias scopes to the overrides');
+
+  // Read permission alone cannot author copy.
+  const readOnly = h.adminToken(['page_content.read']);
+  assert.equal((await h.request('POST', url, { token: readOnly, body: { page_key: pageKey, section_key: 'nope' } })).status, 403);
+  assert.equal((await h.request('GET', url, { token: readOnly })).status, 200);
 });
 
 test('public /assets filters by category slug/uid/id and tag slug (anchor required)', async () => {

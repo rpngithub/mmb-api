@@ -5,6 +5,7 @@ const quotaPackService = require('../services/quotaPack.service');
 const activity        = require('../services/activity.service');
 const uploadService   = require('../services/upload.service');
 const feedbackService = require('../services/feedback.service');
+const pageContent     = require('../services/pageContent.service');
 const s3              = require('../utils/s3Helper');
 const { BusinessCategory, Tag, Template, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
 const { NotFoundError, ValidationError } = require('../errors');
@@ -248,6 +249,39 @@ const setRelatedIndustries = async (req, res) => {
 
   await activity.log(req, { action: 'business_category.related_updated', entityType: 'business_category', entityId: cat.id, metadata: { related_industry_ids: ids } });
   res.json({ success: true, data: sortRelatedIndustries(await findIndustryWithRelated(req.params.uid)) });
+};
+
+// ---- Page content ----
+
+// Seed one industry from the shared defaults so an editor edits real copy rather
+// than an empty form. Refuses if the industry already has any of these sections.
+const clonePageSections = async (req, res) => {
+  const { page_key, business_category_id, section_keys } = req.body;
+  const created = await pageContent.cloneDefaultsToIndustry({
+    pageKey:     page_key,
+    industryId:  business_category_id,
+    sectionKeys: section_keys,
+  });
+  await activity.log(req, {
+    action: 'page_section.cloned', entityType: 'page_section',
+    metadata: { page_key, business_category_id, section_keys: created.map((s) => s.section_key) },
+  });
+  res.status(201).json({ success: true, data: created });
+};
+
+// Exactly what the website will receive for this page — defaults merged with the
+// industry's overrides and `{{industry}}` substituted. The admin panel shows this
+// beside the editor so a change to a DEFAULT can be checked against a real
+// industry before it goes out on every page at once.
+const previewPageSections = async (req, res) => {
+  const { page_key, industry_id } = req.query;
+  let industry = null;
+  if (industry_id !== undefined) {
+    industry = await BusinessCategory.findByPk(industry_id);
+    if (!industry) throw new NotFoundError('industry not found');
+  }
+  const data = await pageContent.resolveSections({ pageKey: page_key || undefined, industry });
+  res.json({ success: true, data });
 };
 
 const listTemplates = async (req, res) => {
@@ -501,4 +535,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };
+module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

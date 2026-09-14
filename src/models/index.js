@@ -71,6 +71,8 @@ const modelFiles = [
   'testimonial.model',
   'appBanner.model',
   'appSetting.model',
+  'pageSection.model',
+  'pageSectionItem.model',
   'feedback.model',
   'notificationCategory.model',
   'notificationTemplate.model',

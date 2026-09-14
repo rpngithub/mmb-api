@@ -26,6 +26,11 @@ const IMAGE_SLOTS = {
   asset_thumbnail:             'assets/thumbnail',
   banner:                      'banners',
   testimonial:                 'testimonials',
+  // Website page content (the editorial blocks under the template grid): the
+  // section-level illustration and the per-card icon. Two slots, one root, so a
+  // lifecycle or CDN rule can treat all marketing imagery alike.
+  page_section_image:          'page-content/section',
+  page_section_item_icon:      'page-content/item',
   // Not an image — a library font file (.woff2/.ttf/…). It shares this registry
   // because the key strategy is identical (uuid, name dropped), but it gets its
   // OWN root rather than living under `assets/font/`: a library font is a
@@ -40,7 +45,7 @@ const { ASSET_TYPES } = require('./../utils/assetTypes');
 // Any final key must live under one of these roots (re-validated on multipart complete/abort).
 // 'themes/' is retained deliberately: thumbnails uploaded before the Brand Series rename
 // still live there, and their stored keys must keep validating on re-save.
-const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/', 'fonts/', 'frames/'];
+const ALLOWED_ROOTS = ['categories/', 'brand-series/', 'variants/', 'themes/', 'events/', 'banners/', 'testimonials/', 'assets/', 'templates/', 'fonts/', 'frames/', 'page-content/'];
 
 const bad = (field, message) => new ValidationError('Validation failed', [{ field, message }]);
 

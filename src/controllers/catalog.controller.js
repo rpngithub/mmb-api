@@ -6,6 +6,7 @@ const send = (res, data) => res.json({ success: true, data });
 const businessCategories = async (req, res) => send(res, await catalog.listBusinessCategories(req.query));
 const industryDetail     = async (req, res) => send(res, await catalog.getIndustryDetail(req.params.ref));
 const industryKeywords   = async (req, res) => send(res, await catalog.listIndustryKeywords(req.params.ref));
+const pageSections       = async (req, res) => send(res, await catalog.listPageSections(req.query));
 const templateCategories = async (req, res) => send(res, await catalog.listTemplateCategories(req.query));
 const assetCategories    = async (req, res) => send(res, await catalog.listAssetCategories(req.query));
 const tags               = async (req, res) => send(res, await catalog.listTags());
@@ -25,6 +26,6 @@ const specialEvents      = async (req, res) => {
 const plans              = async (req, res) => send(res, await catalog.listPlans(req.query));
 
 module.exports = {
-  businessCategories, industryDetail, industryKeywords, templateCategories, assetCategories, tags, languages, templateSizes, brandSeries,
+  businessCategories, industryDetail, industryKeywords, pageSections, templateCategories, assetCategories, tags, languages, templateSizes, brandSeries,
   variants, variantDetail, faqCategories, faqs, testimonials, banners, specialEvents, plans,
 };

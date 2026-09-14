@@ -84,12 +84,42 @@ router.use(optionalAuth, rateLimiter.publicTiered);
  *       (e.g. `restaurant-food`), a uid, or a legacy numeric id. Always carries
  *       `RelatedIndustries` — the curated, editor-ordered cross-link block — which
  *       lists only ACTIVE industries. Inactive industries are not addressable here.
+ *
+ *
+ *       Also carries `sections`: the editorial blocks that render below the template
+ *       grid, in page order, each with its ordered `items`. These are resolved
+ *       server-side — the shared defaults merged per `section_key` with anything this
+ *       industry overrides, inactive blocks removed, and `{{industry}}` substituted —
+ *       so the client renders what it is given and never merges anything itself.
+ *       Render on `section_key`, not on position: it is the stable contract, whereas
+ *       an editor can reorder or hide a block at any time.
  *     tags: [Catalog]
  *     security: []
  *     parameters:
  *       - { in: path, name: ref, required: true, schema: { type: string }, description: "Industry slug, uid, or legacy numeric id" }
  *     responses:
- *       200: { description: "The industry, with a `RelatedIndustries` array (empty when none are curated)" }
+ *       200: { description: "The industry, with `RelatedIndustries` and `sections` (either may be empty)" }
+ *       404: { description: Unknown or inactive industry }
+ * /page-sections:
+ *   get:
+ *     summary: The editorial content blocks for a page
+ *     description: >-
+ *       The same `sections` array embedded in `GET /industries/{ref}`, fetchable on
+ *       its own — for pages that aren't an industry, and for a client refreshing just
+ *       the copy. Resolution is identical: defaults merged with the industry's
+ *       overrides per `section_key`, inactive blocks dropped, tokens substituted.
+ *
+ *
+ *       Without `industry` this returns the bare defaults with `{{industry}}` tokens
+ *       removed rather than substituted, which is only meaningful for a page that
+ *       isn't industry-scoped.
+ *     tags: [Catalog]
+ *     security: []
+ *     parameters:
+ *       - { in: query, name: page,     schema: { type: string, default: industry }, description: "Which website page" }
+ *       - { in: query, name: industry, schema: { type: string }, description: "Industry slug, uid, or legacy numeric id" }
+ *     responses:
+ *       200: { description: Ordered sections, each with its ordered `items` }
  *       404: { description: Unknown or inactive industry }
  * /business-categories:
  *   get:
@@ -165,6 +195,7 @@ router.get('/industries/:ref', controller.industryDetail);
  *         content: { application/json: { schema: { $ref: '#/components/schemas/TagListResponse' } } }
  */
 router.get('/industries/:ref/keywords', controller.industryKeywords);
+router.get('/page-sections', controller.pageSections);
 
 /**
  * @swagger
