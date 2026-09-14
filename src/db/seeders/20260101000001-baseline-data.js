@@ -21,7 +21,7 @@ module.exports = {
         // absent — sending an unsolicited message to every user is a different
         // authority from editing copy, so it stays with super_admin, the same call
         // `quota_packs` makes about pricing.
-        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*', 'frames.*', 'notifications.*']), is_system: 1 },
+        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*', 'frames.*', 'notifications.*', 'page_content.*']), is_system: 1 },
     ]);
 
     // --- admin user ---

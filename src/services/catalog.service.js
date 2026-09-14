@@ -7,6 +7,7 @@ const {
 const planRepo      = require('../repositories/plan.repository');
 const couponRepo    = require('../repositories/coupon.repository');
 const variantAccess = require('./variantAccess.service');
+const pageContent   = require('./pageContent.service');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const { toCardFeatures }   = require('../utils/planFeatures');
 const { NotFoundError } = require('../errors');
@@ -133,6 +134,13 @@ async function listBusinessCategories({ parent, parent_id, tree, hierarchy, with
 // the single fetch behind an industry landing page. Always carries
 // `RelatedIndustries` (that's the point of the endpoint); inactive industries are
 // invisible here exactly as they are in the list.
+//
+// `sections` carries the editorial blocks below the template grid ("Why Choose",
+// "Content Ideas", "Business Growth"), already merged from the shared defaults
+// with this industry's overrides and with `{{industry}}` substituted — see
+// services/pageContent.service.js. They ride along on this call rather than a
+// second one because the landing page needs all of it to render, and one request
+// is one cache entry.
 async function getIndustryDetail(ref) {
   const id = await resolveRef(BusinessCategory, ref);
   if (!id) throw new NotFoundError('industry not found');   // undefined / 'null' / unresolved
@@ -142,7 +150,25 @@ async function getIndustryDetail(ref) {
     include: [relatedIndustryInclude],
   });
   if (!row) throw new NotFoundError('industry not found');
-  return sortRelatedIndustries(row.toJSON());
+
+  const plain = sortRelatedIndustries(row.toJSON());
+  plain.sections = await pageContent.resolveIndustrySections(row);
+  return plain;
+}
+
+// The editorial sections for any page, on their own. The industry landing page
+// gets these inside `getIndustryDetail` already; this exists for the pages that
+// aren't an industry (a home or pricing page, once one is authored) and for a
+// client that wants to refresh just the copy.
+// `industry` accepts a slug / uid / legacy int id, exactly as elsewhere.
+async function listPageSections({ page, industry } = {}) {
+  let row = null;
+  if (industry !== undefined) {
+    const id = await resolveRef(BusinessCategory, industry);
+    if (id) row = await BusinessCategory.findOne({ where: { id, is_active: 1 } });
+    if (!row) throw new NotFoundError('industry not found');
+  }
+  return pageContent.resolveSections({ pageKey: page || undefined, industry: row });
 }
 
 // Assemble a display-order-sorted flat list of self-referential categories into a
@@ -480,7 +506,7 @@ async function listPlans({ plan_type, billing_option_type } = {}) {
 }
 
 module.exports = {
-  listBusinessCategories, getIndustryDetail, listIndustryKeywords, listTemplateCategories, listAssetCategories, listTags, listLanguages, listTemplateSizes,
+  listBusinessCategories, getIndustryDetail, listIndustryKeywords, listPageSections, listTemplateCategories, listAssetCategories, listTags, listLanguages, listTemplateSizes,
   listBrandSeries, listVariants, getVariantDetail, listFaqCategories, listFaqs, listTestimonials,
   listBanners, listPlans,
 };

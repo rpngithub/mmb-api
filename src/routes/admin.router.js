@@ -56,6 +56,12 @@ const {
 } = require('../validators/faq.validator');
 const { createTestimonialSchema, updateTestimonialSchema } = require('../validators/testimonial.validator');
 const {
+  createPageSectionSchema, updatePageSectionSchema,
+  createPageSectionItemSchema, updatePageSectionItemSchema,
+  clonePageSectionsSchema,
+} = require('../validators/pageContent.validator');
+const pageContent = require('../services/pageContent.service');
+const {
   createBrandSeriesSchema, updateBrandSeriesSchema,
   createVariantSchema, updateVariantSchema,
   createStylePersonalitySchema, updateStylePersonalitySchema,
@@ -1065,6 +1071,72 @@ router.put('/business-categories/:uid/tags', authenticate, authorizeAdmin('categ
 router.get('/business-categories/:uid/related', authenticate, authorizeAdmin('categories.read'),   controller.getRelatedIndustries);
 router.put('/business-categories/:uid/related', authenticate, authorizeAdmin('categories.update'), validate(setRelatedIndustriesSchema), controller.setRelatedIndustries);
 
+// ---- Page content: the two operations generic CRUD can't express ----
+// Registered before the `/page-sections` CRUD mount so the literal paths aren't
+// read as a `:id` lookup.
+/**
+ * @swagger
+ * /admin/page-sections/preview:
+ *   get:
+ *     summary: Preview a page's resolved sections exactly as the website will receive them
+ *     description: >-
+ *       Runs the same resolver the public endpoint uses: the shared DEFAULT sections
+ *       (`business_category_id = null`) merged per `section_key` with the industry's
+ *       own overrides, inactive blocks dropped, and `{{industry}}` / `{{industry_lower}}`
+ *       substituted from the industry being previewed.
+ *
+ *
+ *       Its purpose is to check a change to a DEFAULT — which lands on every industry
+ *       page at once — against one real industry before publishing it. Each returned
+ *       section carries `inherited`, saying whether the industry is showing the shared
+ *       default or its own copy.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: page_key,    schema: { type: string, default: industry }, description: "Which website page" }
+ *       - { in: query, name: industry_id, schema: { type: integer }, description: "Preview as this industry; omit to see the bare defaults" }
+ *     responses:
+ *       200: { description: The resolved, token-substituted sections with their ordered items }
+ *       404: { description: Unknown industry }
+ */
+router.get('/page-sections/preview', authenticate, authorizeAdmin('page_content.read'), controller.previewPageSections);
+
+/**
+ * @swagger
+ * /admin/page-sections/clone:
+ *   post:
+ *     summary: Copy the shared default sections into one industry so they can be edited
+ *     description: >-
+ *       Seeds an industry with its own copy of the default sections (and every item
+ *       under them), so an editor starts from the real wording instead of an empty
+ *       form. Until this is called the industry simply inherits the defaults, which
+ *       is the intended state for most of them.
+ *
+ *
+ *       Refuses rather than overwrites: if the industry already has any of the
+ *       sections being cloned, the whole call fails with 409 naming them. The copy
+ *       is all-or-nothing — a half-seeded page silently falls back to defaults for
+ *       the missing halves and looks deliberate.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [business_category_id]
+ *             properties:
+ *               page_key:             { type: string, default: industry }
+ *               business_category_id: { type: integer, description: "The industry to seed" }
+ *               section_keys:         { type: array, items: { type: string }, description: "Clone only these; omit for every default on the page" }
+ *     responses:
+ *       201: { description: The sections created for the industry }
+ *       404: { description: "Unknown industry, or no default sections to clone" }
+ *       409: { description: The industry already has one or more of these sections }
+ */
+router.post('/page-sections/clone', authenticate, authorizeAdmin('page_content.create'), validate(clonePageSectionsSchema), controller.clonePageSections);
+
 // ---- Variant <-> template assignment (M2M not handled by generic CRUD) ----
 /**
  * @swagger
@@ -1426,6 +1498,21 @@ C('/banners',             { model: models.AppBanner,        resource: 'banner', 
 C('/faqs',                { model: models.Faq,              resource: 'faq',              permission: 'faqs', filterable: ['category_id', 'status'], include: [{ model: models.FaqCategory }], createSchema: createFaqSchema, updateSchema: updateFaqSchema });
 C('/faq-categories',      { model: models.FaqCategory,      resource: 'faq_category',     permission: 'faqs', unique: ['name', 'slug'], autoSlug: true, createSchema: createFaqCategorySchema, updateSchema: updateFaqCategorySchema });
 C('/testimonials',        { model: models.Testimonial,      resource: 'testimonial',      permission: 'testimonials', filterable: ['business_category_id', 'status'], filterAlias: { industry_id: 'business_category_id' }, include: [{ model: models.BusinessCategory }], createSchema: createTestimonialSchema, updateSchema: updateTestimonialSchema });
+// Page content — the editorial blocks under the template grid on a website page.
+// `business_category_id` null is the DEFAULT every industry inherits; a row with
+// an industry overrides that one block for that one page (see
+// services/pageContent.service.js for the merge rule).
+//
+// `beforeWrite` carries the scope uniqueness the DB index can't: MySQL allows
+// unlimited NULLs in a UNIQUE index, so nothing at the schema level stops a second
+// DEFAULT row for the same section_key — the one duplicate that would make the
+// resolver's choice arbitrary.
+//
+// `reorderable` on both: section order is the order of the blocks down the page,
+// item order is the order of the cards inside one. Both are hand-curated, so the
+// panel needs drag-reorder rather than a PATCH per row.
+C('/page-sections',       { model: models.PageSection,      resource: 'page_section',      permission: 'page_content', reorderable: true, filterable: ['page_key', 'business_category_id', 'section_key', 'is_active'], filterAlias: { industry_id: 'business_category_id' }, beforeWrite: pageContent.assertSectionScope, createSchema: createPageSectionSchema, updateSchema: updatePageSectionSchema, listOptions: { order: [['display_order', 'ASC'], ['id', 'ASC']] }, include: [{ model: models.PageSectionItem, as: 'items', separate: true, order: [['display_order', 'ASC'], ['id', 'ASC']] }, { model: models.BusinessCategory, attributes: ['id', 'uid', 'slug', 'name'] }] });
+C('/page-section-items',  { model: models.PageSectionItem,  resource: 'page_section_item', permission: 'page_content', reorderable: true, filterable: ['section_id', 'is_active'], beforeWrite: pageContent.assertItemSection, createSchema: createPageSectionItemSchema, updateSchema: updatePageSectionItemSchema, listOptions: { order: [['display_order', 'ASC'], ['id', 'ASC']] } });
 C('/plans',               { model: models.Plan,             resource: 'plan',             permission: 'plans', createSchema: createPlanSchema, updateSchema: updatePlanSchema });
 C('/plan-billing-options',{ model: models.PlanBillingOption, resource: 'plan_billing_option', permission: 'plans', idField: 'id', hasUid: false, filterable: ['plan_id'], createSchema: createBillingOptionSchema, updateSchema: updateBillingOptionSchema });
 C('/plan-features',       { model: models.PlanFeature,      resource: 'plan_feature',     permission: 'plans', idField: 'id', hasUid: false, filterable: ['plan_id', 'feature_type_id'], createSchema: createPlanFeatureSchema, updateSchema: updatePlanFeatureSchema });
