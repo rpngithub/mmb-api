@@ -1,13 +1,22 @@
 const Joi = require('joi');
 const { USER_CLIENT_TYPES } = require('../utils/clientTypes');
+const { toE164 }           = require('../utils/phone');
+
+// India-only, stated up front. This used to admit any international number and
+// leave otpHelper.toLocalNumber to refuse it at send time — after the OTP row had
+// already been written. Accepts every spelling the clients use (+91, 91, 0, bare
+// 10 digits, spaces/hyphens); the service canonicalises, this only decides yes/no.
+const indianMobile = Joi.string().custom((value, helpers) => (
+  toE164(value) ? value : helpers.message('Expected a 10-digit Indian mobile number, optionally prefixed with +91')
+));
 
 const sendOtpSchema = Joi.object({
-  phone:   Joi.string().pattern(/^\+?[1-9]\d{9,14}$/).required(),
+  phone:   indianMobile.required(),
   purpose: Joi.string().valid('login', 'reset').required(),
 });
 
 const verifyOtpSchema = Joi.object({
-  phone:           Joi.string().required(),
+  phone:           indianMobile.required(),
   otp:             Joi.string().length(6).required(),
   purpose:         Joi.string().valid('login', 'reset').required(),
   // Enumerated, like `purpose` above — and notably excluding 'admin_panel', which

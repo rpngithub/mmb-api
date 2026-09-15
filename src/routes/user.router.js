@@ -135,19 +135,37 @@ router.post('/me/sessions/revoke-others', authenticate, controller.revokeOtherSe
  * @swagger
  * /users/me/deactivate:
  *   post:
- *     summary: Deactivate my account
+ *     summary: Deactivate my account (permanently deleted after the grace period)
  *     description: >-
  *       Switches the account off and ends EVERY session, including this one — the client
  *       should discard its tokens and return to the login screen. Neither OTP login nor
  *       token refresh will work afterwards, and the owner's business disappears from the
- *       public directory. Nothing is deleted; an admin can reactivate, which restores
- *       everything as it was.
+ *       public directory.
+ *
+ *       This also starts a deletion clock. Once the grace period passes (admin setting
+ *       `account_deletion_grace_hours`, default 24) everything the account owns —
+ *       business, products, projects, uploads, purchased frames, quota, preferences — is
+ *       permanently deleted and cannot be recovered. `deletion_scheduled_at` in the
+ *       response is when that happens; show it to the user. Within the window an admin
+ *       can reactivate the account, which cancels the deletion with nothing lost.
+ *       Payment history is retained (tax records) against an anonymised record.
  *     tags: [User]
  *     security: [{ bearerAuth: [] }]
  *     responses:
  *       200:
  *         description: Account deactivated; every session ended, including this one
- *         content: { application/json: { schema: { $ref: '#/components/schemas/SessionActionResponse' } } }
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     message:               { type: string, example: Account deactivated }
+ *                     sessions_ended:        { type: integer, example: 2 }
+ *                     deletion_scheduled_at: { type: string, format: date-time, description: When the account's data is permanently deleted unless an admin reactivates it first }
  */
 router.post('/me/deactivate', authenticate, controller.deactivate);
 

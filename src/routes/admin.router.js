@@ -285,6 +285,11 @@ router.get('/users/:uid', authenticate, authorizeAdmin('users.read'), controller
  * /admin/users/{uid}/status:
  *   patch:
  *     summary: Activate / suspend a user
+ *     description: >-
+ *       Suspending here is moderation only — nothing is deleted and no deletion clock starts
+ *       (unlike the user deactivating themselves). Activating a user who self-deactivated
+ *       CANCELS their pending deletion, provided the grace period has not already run out.
+ *       A user whose data has already been purged (`purged_at` set) cannot be reactivated.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -297,6 +302,8 @@ router.get('/users/:uid', authenticate, authorizeAdmin('users.read'), controller
  *       200:
  *         description: Updated user
  *         content: { application/json: { schema: { $ref: '#/components/schemas/UserResponse' } } }
+ *       409:
+ *         description: The account has been permanently deleted and cannot be reactivated
  */
 router.patch('/users/:uid/status', authenticate, authorizeAdmin('users.update'), validate(userStatusSchema), controller.setUserStatus);
 
@@ -982,9 +989,12 @@ router.post('/uploads/confirm',                 authenticate, authorizeAdmin(), 
  *       File columns (`icon_s3_key`, `thumbnail_s3_key`, `series_icon_s3_key`, `s3_key`) take an
  *       S3 key for a file the editor has already uploaded — a full URL is accepted and trimmed to
  *       the key. Blank keeps the current file, `NONE` clears it (`assets.s3_key` is required, so a
- *       blank one skips the row). All other key checks (prefix, extension, reuse, and an S3
- *       existence probe) are ADVISORY: the row still imports and every problem is listed in
- *       `rows[].warnings`.
+ *       blank one skips the row). Shape checks (prefix, extension, reuse) are ADVISORY: the row
+ *       still imports and every problem is listed in `rows[].warnings`. The S3 existence probe is
+ *       advisory too — EXCEPT for `assets`, where a row whose `s3_key` or `thumbnail_s3_key` is
+ *       not in the bucket is SKIPPED, and the whole upload is refused with 400 if S3 cannot be
+ *       reached (an asset is its file; a row pointing at nothing is a phantom nobody can find
+ *       later — see `GET /admin/assets/missing-files` for the ones already there).
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: entity, required: true, schema: { type: string, enum: [industries, template-categories, variants, asset-categories, assets, themes] }, description: "`themes` is a deprecated pre-rename alias of `variants`" }]
@@ -1334,6 +1344,51 @@ router.put('/themes/:uid/relations', authenticate, authorizeAdmin('variants.upda
  */
 router.get('/assets/:uid/tags', authenticate, authorizeAdmin('assets.read'),   controller.getAssetTags);
 router.put('/assets/:uid/tags', authenticate, authorizeAdmin('assets.update'), validate(setAssetTagsSchema), controller.setAssetTags);
+
+// ---- Asset file audit: find (and delete) assets whose S3 file is gone ----
+// Registered before the generic /assets CRUD so the literal path is not swallowed
+// by its /:id route. GET is the report; DELETE re-scans and removes the confirmed
+// rows — the same permission a single asset delete needs.
+/**
+ * @swagger
+ * /admin/assets/missing-files:
+ *   get:
+ *     summary: List assets whose s3_key or thumbnail_s3_key is not in S3 (read-only audit)
+ *     description: >-
+ *       HEADs every distinct file key on the assets table and reports the rows whose file
+ *       or thumbnail comes back 404. Bulk sheets imported before the importer started refusing
+ *       missing files left such rows behind; they look like every other asset in the panel but
+ *       render an empty card in the app. A row is `missing` only on an explicit 404 — keys S3
+ *       could not check (any other error) are listed under `unverified` and are never deleted;
+ *       if nothing at all could be checked the call is refused with 400.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: category_id, schema: { type: integer }, description: "Limit the scan to one asset category (0 = uncategorised)" }
+ *       - { in: query, name: asset_type, schema: { type: string, enum: [icon, emoji, shape, bg, audio, video, animated] }, description: "Limit the scan to one asset type" }
+ *     responses:
+ *       200: { description: "{ summary: { scanned, missing, unverified }, notes: [string], missing: [{ id, uid, name, asset_type, status, is_premium, category, s3_key, thumbnail_s3_key, missing: [s3_key | thumbnail_s3_key] }], unverified: [same shape, missing: []] }" }
+ *       400: { description: "Bad filter, or S3 unreachable so nothing could be checked" }
+ *       403: { description: Missing assets.read }
+ *   delete:
+ *     summary: Delete every asset whose s3_key or thumbnail_s3_key is not in S3
+ *     description: >-
+ *       Runs the same scan as GET at delete time (never trusts an earlier report) and removes
+ *       the rows confirmed missing; their tag links go with them. `unverified` rows are left
+ *       alone. S3 objects are never deleted. Run GET first and check the list — this is bulk
+ *       and permanent. Same query filters as GET.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: category_id, schema: { type: integer } }
+ *       - { in: query, name: asset_type, schema: { type: string, enum: [icon, emoji, shape, bg, audio, video, animated] } }
+ *     responses:
+ *       200: { description: "Same report as GET, plus summary.deleted; `missing` lists the rows that were removed" }
+ *       400: { description: "Bad filter, or S3 unreachable so nothing could be checked (nothing deleted)" }
+ *       403: { description: Missing assets.delete }
+ */
+router.get('/assets/missing-files',    authenticate, authorizeAdmin('assets.read'),   controller.scanMissingAssetFiles);
+router.delete('/assets/missing-files', authenticate, authorizeAdmin('assets.delete'), controller.purgeMissingAssetFiles);
 
 // ---- Special event <-> templates: curate the designs surfaced for a festival/event ----
 /**

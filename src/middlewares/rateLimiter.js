@@ -1,6 +1,7 @@
 const rateLimit  = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
 const redis      = require('../config/redis');
+const { normalizePhone } = require('../utils/phone');
 
 const createLimiter = (options) =>
   rateLimit({
@@ -49,7 +50,8 @@ module.exports = {
     windowMs:     10 * 60_000,
     max:          3,
     message:      'Too many OTP requests. Try again in 10 minutes.',
-    keyGenerator: (req) => `otp:send:${req.body?.phone || req.ip}`,
+    // Canonicalised, so +91X and X share one bucket instead of doubling the cap.
+    keyGenerator: (req) => `otp:send:${req.body?.phone ? normalizePhone(req.body.phone) : req.ip}`,
   }),
   // Dev SMS diagnostics. Every call spends a real DLT credit and texts a real handset,
   // so it is capped harder than otpSend even though the route is development-only.

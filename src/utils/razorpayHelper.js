@@ -12,6 +12,14 @@ const createSubscription = (planId, totalCount = 12, startAt) => {
   return getRazorpay().subscriptions.create(params);
 };
 
+// Stops a recurring subscription (UPI Autopay / card mandate) at Razorpay.
+// Immediate, not at cycle end: the only caller today is the account purge, and
+// an account that is about to be wiped must not take one more charge. Razorpay
+// rejects cancellation of a subscription that is already cancelled/completed/
+// expired; callers that may hit that should treat it as already done.
+const cancelSubscription = (subscriptionId) =>
+  getRazorpay().subscriptions.cancel(subscriptionId, /* cancelAtCycleEnd */ false);
+
 // Razorpay signs the RAW request bytes — pass the raw Buffer/string, never a
 // re-serialized object (JSON.stringify reorders/spaces keys and breaks the HMAC).
 const verifyWebhookSignature = (rawBody, signature) => {
@@ -30,4 +38,4 @@ const verifyPaymentSignature = (orderId, paymentId, signature) => {
   return expected === signature;
 };
 
-module.exports = { createOrder, createSubscription, verifyWebhookSignature, verifyPaymentSignature };
+module.exports = { createOrder, createSubscription, cancelSubscription, verifyWebhookSignature, verifyPaymentSignature };

@@ -15,6 +15,7 @@ const { signAccessToken, signRefreshToken, verifyToken } = require('../utils/jwt
 const { generateOtp, hashOtp, verifyOtp, sendOtp }       = require('../utils/otpHelper');
 const { hashToken, verifyTokenHash }                     = require('../utils/tokenHash');
 const { ADMIN_CLIENT_TYPE }                              = require('../utils/clientTypes');
+const { normalizePhone }                                 = require('../utils/phone');
 const {
   AuthError, NotFoundError, RateLimitError, TokenReuseError, RefreshInProgressError,
 } = require('../errors');
@@ -33,7 +34,13 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // a safety net, not a substitute for that.
 const REFRESH_GRACE_MS = 15 * 1000;
 
-async function sendOtpService({ phone, purpose }) {
+// Both entry points canonicalise the phone before anything is keyed on it. The
+// Flutter app sends +91XXXXXXXXXX and the web app sends the bare 10 digits; stored
+// raw, those were two accounts and a profile completed on one client was missing
+// on the other. See utils/phone.js. Migration 000038 rewrote the rows that
+// pre-date this.
+async function sendOtpService({ phone: rawPhone, purpose }) {
+  const phone   = normalizePhone(rawPhone);
   const otp     = generateOtp();
   const hash    = await hashOtp(otp);
   const expires = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
@@ -47,7 +54,8 @@ async function sendOtpService({ phone, purpose }) {
   return result;
 }
 
-async function verifyOtpService({ phone, otp, purpose, client_mnemonic }) {
+async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic }) {
+  const phone  = normalizePhone(rawPhone);
   const record = await otpRepo.findActive(phone, purpose);
   if (!record) throw new AuthError('OTP expired or not found');
 

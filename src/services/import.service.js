@@ -2,6 +2,7 @@ const { v4: uuid } = require('uuid');
 const models    = require('../models');
 const slugify   = require('../utils/slugify');
 const s3        = require('../utils/s3Helper');
+const { eachLimited, probeKeys } = require('../utils/s3Probe');
 const { parse, stripBom, csvLine } = require('../utils/csv');
 const activity  = require('./activity.service');
 const { ValidationError } = require('../errors');
@@ -43,10 +44,13 @@ const coerceStatus = (v) => {
 //      typo never costs an editor the rest of the row. `NONE` clears the file,
 //      blank leaves whatever is already stored.
 //
-//      One exception: a column marked `required` (an asset IS its file — there is
-//      no record to import without one) skips the row when the cell is blank. ----
+//      Two exceptions: a column marked `required` (an asset IS its file — there is
+//      no record to import without one) skips the row when the cell is blank, and
+//      an entity marked `filesMustExist` skips any row whose key is not in the
+//      bucket (and refuses the whole import when the bucket cannot be checked).
+//      Assets set both: a wrong key there is not a cosmetic slip but a phantom
+//      record that is nearly impossible to find and remove afterwards. ----
 const CLEAR_IMAGE = 'NONE';
-const S3_CONCURRENCY = 15;
 
 // What a key is expected to point at. Drives the extension, content-type and size
 // warnings only; nothing here can stop a row importing.
@@ -223,6 +227,10 @@ const ENTITIES = {
     textColumns: ['asset_type'],
     statusColumns: ['status'],
     fileNoun: 'Files',
+    // The file IS the asset. A row whose s3_key (or thumbnail_s3_key, when given)
+    // is not in the bucket is skipped, not imported-with-a-warning: bulk sheets
+    // with mistyped keys were producing assets nobody could locate to delete.
+    filesMustExist: true,
     s3KeyColumns: {
       s3_key: {
         required: true,
@@ -244,6 +252,7 @@ const ENTITIES = {
       '# name (required): the label shown in the editor. Names need not be unique.',
       `# asset_type (required): one of ${ASSET_TYPES.join(', ')}.`,
       '# s3_key (required): rows are matched on it — re-importing the same key UPDATES that asset instead of adding a second one.',
+      '#   The file MUST already be uploaded to S3: a row whose s3_key (or thumbnail_s3_key) is not in the bucket is SKIPPED.',
       '#   File by asset_type: icon/emoji/shape/bg -> png, jpg, webp, svg · audio -> mp3, wav, m4a · video -> mp4, webm · animated -> json (Lottie), gif, webp, mp4',
       '# thumbnail_s3_key: the preview image shown while browsing, always a png/jpg/webp/svg whatever the asset_type is.',
       '#   It is shown to users who have NOT paid, so on a premium row upload a small/watermarked copy — never the real file again.',
@@ -336,29 +345,6 @@ function shapeWarnings(spec, key, values) {
   return w;
 }
 
-// Run `fn` over the items with a capped number of in-flight S3 calls.
-async function eachLimited(items, fn) {
-  const pending = [...items];
-  const worker = async () => {
-    for (let it = pending.shift(); it !== undefined; it = pending.shift()) await fn(it);
-  };
-  await Promise.all(Array.from({ length: Math.min(S3_CONCURRENCY, pending.length) }, worker));
-}
-
-// HEAD every distinct key. A null probe means "could not check" (see
-// s3Helper.objectExists) and is reported once as a note instead of as a per-row
-// warning, so an unreachable bucket does not spam the report.
-async function probeKeys(keys) {
-  const probes = new Map();
-  let unavailable = false;
-  await eachLimited(keys, async (k) => {
-    const r = await s3.objectExists(k);
-    if (r === null) unavailable = true;
-    else probes.set(k, r);
-  });
-  return { probes, unavailable };
-}
-
 // Mark the images this import put into use with the same `status=active` tag the
 // presigned-upload flow applies on confirm. Editors upload straight from the S3
 // console, so their objects arrive untagged; tagging them here keeps a
@@ -431,7 +417,14 @@ async function prepareFiles(cfg, rows) {
   if (!distinct.size) return { byLine, notes, missing };
 
   const { probes, unavailable } = await probeKeys(distinct);
-  if (unavailable) notes.push('Some S3 keys could not be verified (bucket unreachable or not configured) — they were imported without an existence check.');
+  if (unavailable) {
+    // "Could not check" is not "exists". Where existence is the gate, importing
+    // unverified would reopen exactly the hole the gate closes — refuse instead.
+    if (cfg.filesMustExist) {
+      throw new ValidationError(`${cfg.label} could not be imported: S3 is unreachable or not configured, so the file keys could not be verified. Nothing was written — fix the S3 connection and upload the file again.`);
+    }
+    notes.push('Some S3 keys could not be verified (bucket unreachable or not configured) — they were imported without an existence check.');
+  }
 
   for (const entry of byLine.values()) {
     const keys = [...Object.entries(entry.values).filter(([, v]) => v), ...(entry.groupKey ? [[cfg.groupS3Key.column, entry.groupKey]] : [])];
@@ -440,7 +433,8 @@ async function prepareFiles(cfg, rows) {
       if (!probe) continue;                                  // not checked
       if (!probe.exists) {
         missing.add(key);
-        entry.warnings.push(`${column}: no such object in S3 ('${key}') — imported anyway`);
+        if (cfg.filesMustExist) entry.errors.push(`${column}: no such object in S3 ('${key}') — upload the file first`);
+        else entry.warnings.push(`${column}: no such object in S3 ('${key}') — imported anyway`);
         continue;
       }
       const kind = entry.kinds[column] || FILE_KINDS.image;
@@ -475,7 +469,12 @@ function fileHelp(cfg) {
   if (optional.length) lines.push(`#   Blank = keep the current ${one}. ${CLEAR_IMAGE} = remove the current ${one}.`);
   const required = specs.filter((s) => s.required).map((s) => s.column);
   if (required.length) lines.push(`#   ${required.join(', ')} cannot be blank — a row without it is skipped.`);
-  lines.push('#   Other key problems never skip a row: the row imports and the issue is listed under rows[].warnings in the response.');
+  if (cfg.filesMustExist) {
+    lines.push('#   Every key must point at an object that is ALREADY in S3 — a row with a key that is not found is skipped, and the import is refused outright if S3 cannot be reached.');
+    lines.push('#   Other key problems (wrong folder, wrong extension) never skip a row: the row imports and the issue is listed under rows[].warnings in the response.');
+  } else {
+    lines.push('#   Other key problems never skip a row: the row imports and the issue is listed under rows[].warnings in the response.');
+  }
   lines.push('#   Upload with dry_run=1 first to check every key before anything is written.');
   return lines;
 }

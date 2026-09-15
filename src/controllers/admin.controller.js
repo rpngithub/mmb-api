@@ -6,6 +6,7 @@ const activity        = require('../services/activity.service');
 const uploadService   = require('../services/upload.service');
 const feedbackService = require('../services/feedback.service');
 const pageContent     = require('../services/pageContent.service');
+const assetAudit      = require('../services/assetAudit.service');
 const s3              = require('../utils/s3Helper');
 const { BusinessCategory, Tag, Template, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
 const { NotFoundError, ValidationError } = require('../errors');
@@ -394,6 +395,18 @@ const setAssetTags = async (req, res) => {
   res.json({ success: true, data: await findAssetWithTags(req.params.uid) });
 };
 
+// Asset file audit: report, then delete, the rows whose S3 file is gone. The
+// filters come off the query string on both verbs — a DELETE carries no body.
+const auditFilters = (req) => ({ category_id: req.query.category_id, asset_type: req.query.asset_type });
+
+const scanMissingAssetFiles = async (req, res) => {
+  res.json({ success: true, data: await assetAudit.scanMissingFiles(auditFilters(req)) });
+};
+
+const purgeMissingAssetFiles = async (req, res) => {
+  res.json({ success: true, data: await assetAudit.purgeMissingFiles(auditFilters(req), req) });
+};
+
 // Lightweight template shape for event-assignment views (same as variant, no heavy `content`).
 const findEventWithTemplates = (uid) => SpecialEvent.findOne({
   where: { uid },
@@ -535,4 +548,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };
+module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

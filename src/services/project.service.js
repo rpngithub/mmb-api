@@ -3,6 +3,8 @@ const projectRepo    = require('../repositories/project.repository');
 const businessRepo   = require('../repositories/business.repository');
 const templateRepo   = require('../repositories/template.repository');
 const variantAccess  = require('./variantAccess.service');
+const thumbnail      = require('./projectThumbnail.service');
+const userRepo       = require('../repositories/user.repository');
 const notify         = require('./notification.service');
 const dedupe         = require('../utils/dedupeKey');
 const { TemplateSize } = require('../models');
@@ -34,9 +36,24 @@ async function validateProjectRefs(userId, data) {
   }
 }
 
+// The editor's autosave sends the preview inline (`thumbnail`, a data URL) with
+// the content, so one request saves both. Stored under a project-scoped key and
+// swapped for `thumbnail_s3_key` before the row is written; a bad image fails the
+// whole request, so content and preview never get out of step. See
+// projectThumbnail.service for why this bypasses the presign flow.
+async function withThumbnail(userId, projectUid, data, currentKey = null) {
+  const { thumbnail: image, ...rest } = data;
+  if (image === undefined) return rest;
+  const user = await userRepo.findById(userId, { attributes: ['uid'] });
+  rest.thumbnail_s3_key = await thumbnail.store(image, { userUid: user.uid, projectUid, currentKey });
+  return rest;
+}
+
 async function createProject(userId, data) {
   await validateProjectRefs(userId, data);
-  const project = await projectRepo.create({ ...data, uid: uuid(), user_id: userId, status: 'draft' });
+  const projectUid = uuid();
+  const fields     = await withThumbnail(userId, projectUid, data);
+  const project    = await projectRepo.create({ ...fields, uid: projectUid, user_id: userId, status: 'draft' });
 
   // "Congratulations! You created your first design." The dedupe key has no scope
   // beyond the code, so this is a genuine once-per-lifetime notification and the
@@ -67,7 +84,8 @@ async function updateProject(uid, userId, data) {
   const project = await projectRepo.findByUid(uid);
   if (!project) throw new NotFoundError('Project not found');
   if (project.user_id !== userId) throw new ForbiddenError('Access denied');
-  await projectRepo.update(project.id, data);
+  const fields = await withThumbnail(userId, project.uid, data, project.thumbnail_s3_key);
+  await projectRepo.update(project.id, fields);
   return projectRepo.findByUid(uid);
 }
 

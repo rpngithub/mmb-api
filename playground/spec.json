@@ -68,7 +68,7 @@
                   "send-otp"
                 ]
               },
-              "description": "purpose: `login` | `reset`. In development/staging the response `data.otp` is returned and auto-saved to the `otp` env var.",
+              "description": "purpose: `login` | `reset`. In development the response `data.otp` is returned and auto-saved to the `otp` env var.\n\n**Phone is India-only** and every spelling lands on the same account — `+919876543210`, `919876543210`, `09876543210` and bare `9876543210` are one user, stored as `+91XXXXXXXXXX`. Anything that is not an Indian mobile is a 400 here, before any OTP is written.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"purpose\": \"{{purpose}}\"\n}",
@@ -122,7 +122,7 @@
                   "verify-otp"
                 ]
               },
-              "description": "Authenticates the user and auto-saves `access_token` + `refresh_token`. The collection default auth is `Bearer {{access_token}}`, so every user request inherits it.",
+              "description": "Authenticates the user and auto-saves `access_token` + `refresh_token`. The collection default auth is `Bearer {{access_token}}`, so every user request inherits it.\n\n`phone` follows the same rules as Send OTP and need not be the same spelling that requested the OTP. A deactivated account gets 401 here for the whole deletion grace period — only an admin reactivation lets it back in.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"otp\": \"{{otp}}\",\n  \"purpose\": \"{{purpose}}\",\n  \"client_mnemonic\": \"{{client_mnemonic}}\"\n}",
@@ -604,7 +604,7 @@
                   "deactivate"
                 ]
               },
-              "description": "Switches the account off and ends EVERY session including this one — discard the tokens after calling. Nothing is deleted; an admin can reactivate.",
+              "description": "Switches the account off and ends EVERY session including this one — discard the tokens after calling.\n\n**This starts a deletion clock.** After the grace period (admin setting `account_deletion_grace_hours`, default 24) everything the account owns — business, products, projects, uploads, purchased frames, quota, preferences — is permanently deleted. `data.deletion_scheduled_at` is when; show it to the user before they confirm. Within the window an admin can reactivate, which cancels the deletion with nothing lost. Logging in does NOT cancel it (401 until reactivated). After deletion the same number can sign up again as a brand-new account. Payment history is kept (tax records) against an anonymised record.\n\nRunning this signs you out — run **Auth → Send OTP / Verify OTP** again afterwards, which will fail with 401 until an admin runs **Admin → Set User Status** with `is_active: 1`.",
               "body": {
                 "mode": "raw",
                 "raw": "{}",
@@ -627,7 +627,8 @@
                     "if (ct.includes('application/json')) {",
                     "  const body = pm.response.json();",
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
-                    "}"
+                    "}",
+                    "pm.test('deletion_scheduled_at present', () => pm.expect((pm.response.json().data || {})).to.have.property('deletion_scheduled_at'));"
                   ]
                 }
               }
@@ -1436,7 +1437,7 @@
       },
       {
         "name": "Projects",
-        "description": "User designs (canvas documents) and their export records.",
+        "description": "User designs (canvas documents) and their export records.\n\n**Autosave:** `PATCH /projects/{uid}` takes `content` and `thumbnail` together, so one request saves both. Send `content` on the short tick (every ~2 s is fine) and `thumbnail` on a slower one — every 15–30 s, on blur, on close. It is base64 plus a canvas render, so shipping it every keystroke is wasted work.",
         "item": [
           {
             "name": "Create Project",
@@ -1457,7 +1458,7 @@
                   "projects"
                 ]
               },
-              "description": "All of `business_id`, `template_id` and `size_id` are optional, and all three are **numeric ids**, not uids — unlike the rest of the app API, which addresses things by uid. Nothing in this collection captures a numeric business id, so they are left out of the sample body; fill them from `GET /businesses`, `GET /templates` and `GET /template-sizes` when you need a project bound to a template.",
+              "description": "All of `business_id`, `template_id` and `size_id` are optional, and all three are **numeric ids**, not uids — unlike the rest of the app API, which addresses things by uid. Nothing in this collection captures a numeric business id, so they are left out of the sample body; fill them from `GET /businesses`, `GET /templates` and `GET /template-sizes` when you need a project bound to a template.\n\n`thumbnail` is accepted here too, so the first save is one call. `thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"name\": \"Diwali Poster\",\n  \"content\": \"{}\"\n}",
@@ -1556,6 +1557,56 @@
             ]
           },
           {
+            "name": "Autosave (content + thumbnail)",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}"
+                ]
+              },
+              "description": "What the editor sends on its slow tick: the design and its preview in ONE request — no presign, no confirm. On the fast tick send `content` alone (see Update Project).\n\n`thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"content\": \"{\\\"version\\\":2,\\\"objects\\\":[]}\",\n  \"thumbnail\": \"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "pm.test('thumbnail stored under the project', () => pm.expect(String((pm.response.json().data || {}).thumbnail_s3_key)).to.match(/\\/projects\\/.+\\/thumb-[0-9a-f]{12}\\.(png|jpg|webp)$/));"
+                  ]
+                }
+              }
+            ]
+          },
+          {
             "name": "Update Project",
             "request": {
               "method": "PATCH",
@@ -1575,10 +1626,10 @@
                   "{{project_uid}}"
                 ]
               },
-              "description": "status: `draft` | `published` | `archived`.",
+              "description": "Send whatever changed: `name`, `content`, `status` (`draft` | `published` | `archived`) and/or `thumbnail`. A content-only PATCH leaves the existing thumbnail alone. `thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
               "body": {
                 "mode": "raw",
-                "raw": "{\n  \"name\": \"Diwali Poster v2\",\n  \"status\": \"published\"\n}",
+                "raw": "{\n  \"name\": \"Diwali Poster v2\",\n  \"content\": \"{\\\"version\\\":3,\\\"objects\\\":[]}\",\n  \"status\": \"published\"\n}",
                 "options": {
                   "raw": {
                     "language": "json"

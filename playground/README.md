@@ -107,6 +107,6 @@ playground and the collections never disagree.
 
 ## Scope
 
-App endpoints only — 93 requests across Auth, Users, Businesses, Projects, Products, Frames,
+App endpoints only — 103 requests across Auth, Users, Businesses, Projects, Products, Frames,
 Uploads, Fonts, Feedback, Templates, Assets, Catalog, Config and Subscriptions. Admin endpoints are
 excluded by design; use the full Postman collection for those.
