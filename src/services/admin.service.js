@@ -92,7 +92,16 @@ async function getUser(userUid) {
 async function setUserActive(userUid, isActive) {
   const user = await User.findOne({ where: { uid: userUid } });
   if (!user) throw new NotFoundError('User not found');
-  await user.update({ is_active: isActive });
+  // A purged account is a tombstone — name, phone and everything it owned are
+  // gone. Switching it back on would produce a nameless, phoneless login that can
+  // never be used, so refuse rather than pretend.
+  if (isActive && user.purged_at) throw new ConflictError('This account has been permanently deleted and cannot be reactivated');
+
+  // Reactivation cancels a pending self-deletion: clearing `deactivated_at` takes
+  // the account out of the purge job's scan (see accountPurge.service#findDue).
+  // Deactivation from here leaves it alone on purpose — an admin ban is
+  // moderation, not a deletion request, and must never start the clock.
+  await user.update(isActive ? { is_active: 1, deactivated_at: null } : { is_active: 0 });
 
   // Deactivating from the admin panel is a moderation action, so it must take
   // effect now — not whenever the user's access token happens to expire. This

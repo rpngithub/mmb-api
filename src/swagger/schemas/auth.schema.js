@@ -6,7 +6,7 @@
  *       type: object
  *       required: [phone, purpose]
  *       properties:
- *         phone:   { type: string, example: "+919876543210" }
+ *         phone:   { type: string, example: "+919876543210", description: "Indian mobile only. +91XXXXXXXXXX, 91XXXXXXXXXX, 0XXXXXXXXXX and bare XXXXXXXXXX all resolve to the same account; stored as +91XXXXXXXXXX." }
  *         purpose: { type: string, enum: [login, reset] }
  *
  *     SendOtpResponse:
@@ -23,7 +23,7 @@
  *       type: object
  *       required: [phone, otp, purpose, client_mnemonic]
  *       properties:
- *         phone:           { type: string }
+ *         phone:           { type: string, example: "+919876543210", description: "Same rules as send-otp; need not be the same spelling that requested the OTP." }
  *         otp:             { type: string, minLength: 6, maxLength: 6 }
  *         purpose:         { type: string, enum: [login, reset] }
  *         client_mnemonic:

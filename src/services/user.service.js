@@ -3,6 +3,7 @@ const userRepo    = require('../repositories/user.repository');
 const billingRepo = require('../repositories/userBillingDetail.repository');
 const userUpload  = require('./userUpload.service');
 const sessionService = require('./session.service');
+const accountPurge   = require('./accountPurge.service');
 const { Op } = require('sequelize');
 const { Business, UserPreference, Language, User } = require('../models');
 const { NotFoundError, ConflictError, ValidationError } = require('../errors');
@@ -121,17 +122,29 @@ async function setPassword(userId, { new_password }, currentSessionUid = null) {
   return { sessions_ended: revoked };
 }
 
-// Self-service deactivation. Reversible by an admin: nothing is deleted, the
-// account is just switched off. Every session ends — including the caller's own,
-// since they are closing the account they are using — and auth.service refuses
-// both OTP login and refresh for an inactive account, so it stays closed.
+// Self-service deactivation — and the start of the deletion clock. The account is
+// switched off now; once the grace period (admin-tunable, default 24h) passes,
+// jobs/accountPurge.job.js permanently deletes everything it owns. Until then an
+// admin can reactivate, which cancels the deletion with nothing lost.
+//
+// Every session ends — including the caller's own, since they are closing the
+// account they are using — and auth.service refuses both OTP login and refresh
+// for an inactive account, so it stays closed for the whole grace period.
+//
+// `deactivated_at` is stamped HERE and nowhere else: an admin switching an
+// account off is moderation, not a deletion request.
 async function deactivate(userId) {
   const user = await userRepo.findById(userId);
   if (!user) throw new NotFoundError('User not found');
 
-  await userRepo.update(userId, { is_active: 0 });
+  const deactivatedAt = new Date();
+  await userRepo.update(userId, { is_active: 0, deactivated_at: deactivatedAt });
   const revoked = await sessionService.revokeAll('user', userId, 'revoked');
-  return { sessions_ended: revoked };
+  return {
+    sessions_ended:        revoked,
+    // For the app to show: "your data will be permanently deleted on …".
+    deletion_scheduled_at: await accountPurge.deletionScheduledAt(deactivatedAt),
+  };
 }
 
 // ---- Preferences ----

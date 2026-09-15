@@ -1,7 +1,8 @@
 const Joi = require('joi');
 
-// Same phone pattern as sendOtpSchema; otpHelper.toLocalNumber narrows it to an
-// Indian mobile and returns a 400 if it isn't one.
+// Looser than sendOtpSchema on purpose: this is the vendor diagnostic, and being
+// able to see exactly what toLocalNumber does with an odd number is part of the
+// point. It still narrows to an Indian mobile and 400s if it isn't one.
 const testSmsSchema = Joi.object({
   phone:   Joi.string().pattern(/^\+?[1-9]\d{9,14}$/).required(),
   dry_run: Joi.boolean().default(false),

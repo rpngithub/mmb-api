@@ -10,6 +10,7 @@ const renewalJob      = require('./jobs/subscriptionRenewal.job');
 const tokenCleanupJob = require('./jobs/tokenCleanup.job');
 const otpCleanupJob   = require('./jobs/otpCleanup.job');
 const quotaEventCleanupJob = require('./jobs/quotaEventCleanup.job');
+const accountPurgeJob      = require('./jobs/accountPurge.job');
 const notifyDispatchJob    = require('./jobs/notificationDispatch.job');
 const notifyScheduledJob   = require('./jobs/notificationScheduled.job');
 const notifyBehavioralJob  = require('./jobs/notificationBehavioral.job');
@@ -60,8 +61,11 @@ async function start() {
   tokenCleanupJob.job.start();
   otpCleanupJob.job.start();
   quotaEventCleanupJob.job.start();
+  // Deletes self-deactivated accounts once their grace period is up. Advisory-
+  // locked like the notification jobs below; see jobs/accountPurge.job.js.
+  accountPurgeJob.job.start();
 
-  // The notification jobs. Unlike the five above they are pinned to Asia/Kolkata,
+  // The notification jobs. Unlike the six above they are pinned to Asia/Kolkata,
   // because a user-visible notification has to land at 09:00 local regardless of
   // the container's clock, and they coordinate across instances with a MySQL
   // advisory lock (see services/notificationJobRunner.js). NOTIFY_JOBS_ENABLED=false

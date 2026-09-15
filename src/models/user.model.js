@@ -18,6 +18,14 @@ module.exports = (sequelize) => {
     profile_photo_s3_key: { type: DataTypes.STRING(500), allowNull: true },
     razorpay_customer_id: { type: DataTypes.STRING(100), allowNull: true },
     is_active:            { type: DataTypes.TINYINT, defaultValue: 1 },
+    // When the user deactivated THEMSELVES — the start of the deletion clock (see
+    // services/accountPurge.service.js). Admin deactivation is moderation, not a
+    // deletion request, and leaves this NULL. Admin reactivation clears it.
+    deactivated_at:       { type: DataTypes.DATE, allowNull: true },
+    // Stamped once the purge has run. The row is then a tombstone: no PII, no
+    // content, kept so payments and the audit trail still resolve. Cannot be
+    // reactivated — there is nothing left to bring back.
+    purged_at:            { type: DataTypes.DATE, allowNull: true },
     last_login_at:        { type: DataTypes.DATE, allowNull: true },
     // Distinct from `last_login_at`, which moves once per sign-in — and a refresh
     // token lives 30 days, so someone who opens the app daily logs in about once a

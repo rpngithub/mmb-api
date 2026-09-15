@@ -32,6 +32,8 @@ const { createProjectSchema, updateProjectSchema, createExportSchema } = require
  *               template_id: { type: integer }
  *               size_id:     { type: integer }
  *               content:     { type: string }
+ *               thumbnail:
+ *                 $ref: '#/components/schemas/ProjectThumbnailInput'
  *     responses:
  *       201:
  *         description: Created project
@@ -64,14 +66,37 @@ router.get('/', authenticate, controller.list);
  *         description: Access denied
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   patch:
- *     summary: Update a project (owner only)
+ *     summary: Update a project (owner only) — the editor's autosave call
+ *     description: >-
+ *       Send whatever changed. `content` and `thumbnail` can travel together, so one
+ *       request saves both — no presign/confirm round-trips for the preview. A rejected
+ *       thumbnail (not an image, over the size cap) fails the whole request with 400 and
+ *       nothing is saved, so content and preview never drift apart.
+ *
+ *       Autosave guidance: send `content` on your short tick (a couple of seconds is fine);
+ *       send `thumbnail` on a slower one — every 15–30 s, on blur, and on close. It is base64
+ *       and needs a canvas render, so shipping it on every keystroke is wasted work.
  *     tags: [Projects]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:      { type: string }
+ *               content:   { type: string }
+ *               status:    { type: string, enum: [draft, published, archived] }
+ *               thumbnail:
+ *                 $ref: '#/components/schemas/ProjectThumbnailInput'
  *     responses:
  *       200:
- *         description: Updated project
+ *         description: Updated project; `thumbnail_s3_key` is the new preview key (prepend `cdn_base_url`)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ProjectResponse' } } }
+ *       400:
+ *         description: Invalid thumbnail (not JPEG/PNG/WebP, or over 500 KB) — nothing was saved
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   delete:
  *     summary: Delete a project (owner only, archived)
  *     tags: [Projects]

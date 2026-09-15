@@ -7,7 +7,12 @@ const h = require('./helpers');
 const { models } = h;
 const { User, Business, Template, UserSubscription, Payment, ActivityLog, OtpCode, UserSession } = models;
 const { hashOtp } = require('../src/utils/otpHelper');
+const { toE164 }  = require('../src/utils/phone');
 const jwt = require('jsonwebtoken');
+
+// Login phones are stored in E.164 whatever spelling the request used, so a test
+// that logs in with a bare 10-digit number has to look the row up canonically.
+const userByPhone = (phone) => User.findOne({ where: { phone: toE164(phone) } });
 const bcrypt = require('bcryptjs');
 const { JWT_SECRET } = require('../src/config/jwt');
 
@@ -175,7 +180,7 @@ test('OTP login: send-otp then verify-otp issues tokens with free tier', async (
   assert.equal(claims.actor_type, 'user');
   assert.equal(claims.tier, 'free');
 
-  const u = await User.findOne({ where: { phone } });
+  const u = await userByPhone(phone);
   if (u) track.users.push(u.id);
 });
 
@@ -186,7 +191,7 @@ test('verify-otp rejects a wrong OTP', async () => {
     body: { phone, otp: '000000', purpose: 'login', client_mnemonic: 'android' },
   });
   assert.equal(verify.status, 401);
-  const u = await User.findOne({ where: { phone } });
+  const u = await userByPhone(phone);
   if (u) track.users.push(u.id);
 });
 
@@ -217,8 +222,57 @@ test('verify-otp only accepts known clients, and admin_panel is not one of them'
     'ios', 'the accepted value is what lands in the token',
   );
 
-  const u = await User.findOne({ where: { phone } });
+  const u = await userByPhone(phone);
   if (u) track.users.push(u.id);
+});
+
+// The Flutter app sends +91XXXXXXXXXX and the web app sends the bare 10 digits.
+// Stored raw, those were two accounts: a profile completed on mobile was "missing"
+// on web. Every spelling must land on the same row, stored as E.164.
+test('the same number in any spelling is one account, stored as +91', async () => {
+  const local = `8${String(Date.now()).slice(-9)}`;
+  const login = async (phone) => {
+    const sent = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
+    assert.equal(sent.status, 200, `send-otp rejected ${phone}`);
+    const r = await h.request('POST', `${P}/auth/verify-otp`, {
+      body: { phone, otp: sent.body.data.otp, purpose: 'login', client_mnemonic: 'web' },
+    });
+    assert.equal(r.status, 200, `verify-otp rejected ${phone}`);
+    return JSON.parse(Buffer.from(r.body.data.access_token.split('.')[1], 'base64').toString()).userId;
+  };
+
+  const first = await login(`+91${local}`);            // mobile app
+  track.users.push(first);
+  assert.equal(await login(local),            first, 'web app: bare 10 digits');
+  assert.equal(await login(`91${local}`),     first, 'country code without the plus');
+  assert.equal(await login(`0${local}`),      first, 'trunk prefix');
+  assert.equal(await login(`+91 ${local.slice(0, 5)}-${local.slice(5)}`), first, 'spaces and hyphens');
+
+  const rows = await User.findAll({ where: { phone: { [require('sequelize').Op.like]: `%${local}` } } });
+  assert.equal(rows.length, 1, 'exactly one row for the number');
+  assert.equal(rows[0].phone, `+91${local}`, 'stored canonically');
+});
+
+// The normaliser everything above (and the OTP rate-limit key, which cannot be
+// exercised here since limiting is skipped under NODE_ENV=test) is built on.
+test('toE164 canonicalises every Indian spelling and nothing else', () => {
+  const { toE164, normalizePhone } = require('../src/utils/phone');
+  for (const s of ['9876543210', '+919876543210', '919876543210', '09876543210', '+91 98765-43210', '(+91) 98765 43210']) {
+    assert.equal(toE164(s), '+919876543210', s);
+  }
+  for (const s of ['+14155552671', '5876543210', '987654321', '98765432101', '+9198765432', '', null, undefined, 'abc']) {
+    assert.equal(toE164(s), null, `${s} is not an Indian mobile`);
+  }
+  assert.equal(normalizePhone('+14155552671'), '+14155552671', 'non-Indian passes through untouched');
+});
+
+// India-only, stated at validation rather than discovered at SMS time (which used to
+// write an OTP row first and then 400).
+test('send-otp refuses anything that is not an Indian mobile', async () => {
+  for (const phone of ['+14155552671', '12345', '5123456789', '+91512345678', 'abc']) {
+    const r = await h.request('POST', `${P}/auth/send-otp`, { body: { phone, purpose: 'login' } });
+    assert.equal(r.status, 400, `${phone} should be refused`);
+  }
 });
 
 test('admin login succeeds with seeded credentials', async () => {
@@ -1209,25 +1263,40 @@ test('import assets: stores the thumbnail alongside the file, clears it with NON
   assert.equal(icon.s3_key, iconKey, 'the deliverable is untouched');
 });
 
-test('import assets: skips unknown category, blank s3_key and bad asset_type; warns on key problems', async () => {
+test('import assets: skips unknown category, blank s3_key, bad asset_type and files missing from S3; warns on shape problems', async () => {
   const token = h.adminToken(['assets.*']);
   const stamp = Date.now();
   const cat = await models.AssetCategory.create({ name: `IMP Warn Cat ${stamp}`, slug: `imp-warn-cat-${stamp}` });
   track.assetCategories.push(cat.id);
-  const strayKey = `assets/emoji/stray-${stamp}.png`;   // wrong folder for an icon, absent from the bucket
+  const strayKey = `assets/emoji/stray-${stamp}.png`;   // wrong folder for an icon, present in the bucket
+  const ghostKey = `assets/icon/ghost-${stamp}.svg`;    // well-formed, but never uploaded
+  const okKey    = `assets/icon/ok-${stamp}.svg`;
+  const noThumb  = `assets/thumbnail/ghost-${stamp}.png`; // thumbnail never uploaded
   const dupKey   = `assets/icon/dup-${stamp}.svg`;
+  const noCatKey = `assets/icon/x-${stamp}.svg`;
+  const badTypeKey = `assets/icon/y-${stamp}.svg`;
 
   const csv = [
-    'category,name,asset_type,s3_key,is_premium,status,tags',
-    `No Such Category ${stamp},IMP NoCat ${stamp},icon,assets/icon/x-${stamp}.svg,0,active,`, // unknown category -> skip
-    `${cat.slug},IMP NoFile ${stamp},icon,,0,active,`,                                        // no file -> skip
-    `${cat.slug},IMP BadType ${stamp},sticker,assets/icon/y-${stamp}.svg,0,active,`,          // bad asset_type -> skip
-    `${cat.slug},IMP Stray ${stamp},icon,${strayKey},0,active,`,                              // wrong prefix + missing -> warnings only
-    `${cat.slug},IMP Dup A ${stamp},icon,${dupKey},0,active,`,
-    `${cat.slug},IMP Dup B ${stamp},icon,${dupKey},0,active,`,                                // same file -> updates the row above
+    'category,name,asset_type,s3_key,thumbnail_s3_key,is_premium,status,tags',
+    `No Such Category ${stamp},IMP NoCat ${stamp},icon,${noCatKey},,0,active,`,                // unknown category -> skip
+    `${cat.slug},IMP NoFile ${stamp},icon,,,0,active,`,                                        // no file -> skip
+    `${cat.slug},IMP BadType ${stamp},sticker,${badTypeKey},,0,active,`,                       // bad asset_type -> skip
+    `${cat.slug},IMP Ghost ${stamp},icon,${ghostKey},,0,active,`,                              // file not in S3 -> skip
+    `${cat.slug},IMP GhostThumb ${stamp},icon,${okKey},${noThumb},1,active,`,                  // thumbnail not in S3 -> skip
+    `${cat.slug},IMP Stray ${stamp},icon,${strayKey},,0,active,`,                              // wrong prefix -> warning only
+    `${cat.slug},IMP Dup A ${stamp},icon,${dupKey},,0,active,`,
+    `${cat.slug},IMP Dup B ${stamp},icon,${dupKey},,0,active,`,                                // same file -> updates the row above
   ].join('\n');
 
-  const { result: res, tagged } = await withS3Objects({ [dupKey]: { content_type: 'image/svg+xml' } }, () => importCsv('assets', csv, { token }));
+  const present = {
+    [dupKey]: { content_type: 'image/svg+xml' },
+    [okKey]: { content_type: 'image/svg+xml' },
+    [strayKey]: { content_type: 'image/png' },
+    // these files are real; only the category / asset_type on their rows is wrong
+    [noCatKey]: { content_type: 'image/svg+xml' },
+    [badTypeKey]: { content_type: 'image/svg+xml' },
+  };
+  const { result: res, tagged } = await withS3Objects(present, () => importCsv('assets', csv, { token }));
   assert.equal(res.status, 200);
   const rows = res.body.data.rows;
   const row = (n) => rows.find((r) => r.name === `IMP ${n} ${stamp}`);
@@ -1235,21 +1304,49 @@ test('import assets: skips unknown category, blank s3_key and bad asset_type; wa
   assert.match(row('NoCat').message, /import asset-categories/);
   assert.match(row('NoFile').message, /s3_key is required/);
   assert.match(row('BadType').message, /asset_type/);
-  assert.equal(res.body.data.summary.skipped, 3);
+  assert.equal(row('Ghost').status, 'skipped', 'an asset whose file is not in S3 is not imported');
+  assert.match(row('Ghost').message, /s3_key: no such object in S3/);
+  assert.match(row('Ghost').message, /upload the file first/);
+  assert.equal(row('GhostThumb').status, 'skipped', 'a missing thumbnail blocks the row too');
+  assert.match(row('GhostThumb').message, /thumbnail_s3_key: no such object in S3/);
+  assert.equal(res.body.data.summary.skipped, 5);
 
-  assert.equal(row('Stray').status, 'created', 'key problems never skip a row');
+  assert.equal(row('Stray').status, 'created', 'shape problems on an existing file stay advisory');
   const strayWarnings = row('Stray').warnings.join(' | ');
   assert.match(strayWarnings, /expected a key under 'assets\/icon\/'/);
-  assert.match(strayWarnings, /no such object in S3/);
+  assert.doesNotMatch(strayWarnings, /no such object/);
   assert.match(row('Dup B').warnings.join(' | '), /same file as line \d+ — that record is updated, not duplicated/);
   assert.equal(row('Dup A').status, 'created');
   assert.equal(row('Dup B').status, 'updated');
-  assert.deepEqual(tagged.map(([k]) => k), [dupKey], 'the absent stray key is not tagged');
+  assert.deepEqual(tagged.map(([k]) => k).sort(), [dupKey, strayKey].sort(), 'only files behind a saved row are tagged');
 
   const made = await models.Asset.findAll({ where: { category_id: cat.id } });
-  assert.equal(made.length, 2, 'stray + one deduplicated row');
+  assert.equal(made.length, 2, 'stray + one deduplicated row; no phantom rows for missing files');
+  assert.ok(!made.some((a) => a.s3_key === ghostKey || a.s3_key === okKey), 'neither skipped row reached the table');
   assert.equal(made.find((a) => a.s3_key === dupKey).name, `IMP Dup B ${stamp}`, 'second row won the key');
   track.assets.push(...made.map((a) => a.id));
+});
+
+test('import assets: refuses the whole file when S3 cannot be checked (no unverified asset rows)', async () => {
+  const s3 = require('../src/utils/s3Helper');
+  const original = { objectExists: s3.objectExists, putObjectTagging: s3.putObjectTagging };
+  s3.objectExists = async () => null;               // "could not check"
+  const token = h.adminToken(['assets.*']);
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `IMP NoBucket Cat ${stamp}`, slug: `imp-nobucket-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const key = `assets/icon/nobucket-${stamp}.svg`;
+  const csv = [
+    'category,name,asset_type,s3_key,is_premium,status,tags',
+    `${cat.slug},IMP NoBucket ${stamp},icon,${key},0,active,`,
+  ].join('\n');
+  try {
+    const res = await importCsv('assets', csv, { token });
+    assert.equal(res.status, 400, 'unlike industries, an unverifiable bucket is fatal for assets');
+    assert.match(res.body.error.message, /could not be verified/);
+    assert.match(res.body.error.message, /Nothing was written/);
+  } finally { Object.assign(s3, original); }
+  assert.equal(await models.Asset.count({ where: { s3_key: key } }), 0, 'no row slipped through');
 });
 
 test('import assets: an audio row pointing at an image warns about the file type', async () => {
@@ -1270,6 +1367,110 @@ test('import assets: an audio row pointing at an image warns about the file type
   assert.equal(res.body.data.summary.created, 1);
   const made = await models.Asset.findAll({ where: { category_id: cat.id } });
   track.assets.push(...made.map((a) => a.id));
+});
+
+// ---- Asset file audit: GET reports, DELETE removes the rows whose S3 file is gone ----
+test('asset file audit: reports missing files, deletes only confirmed-404 rows, leaves unverified alone', async () => {
+  const s3 = require('../src/utils/s3Helper');
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `AUD Cat ${stamp}`, slug: `aud-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const otherCat = await models.AssetCategory.create({ name: `AUD Other ${stamp}`, slug: `aud-other-${stamp}` });
+  track.assetCategories.push(otherCat.id);
+
+  const goodKey   = `assets/icon/aud-good-${stamp}.svg`;
+  const goodThumb = `assets/thumbnail/aud-good-${stamp}.png`;
+  const ghostKey  = `assets/icon/aud-ghost-${stamp}.svg`;      // file gone
+  const okKey     = `assets/icon/aud-thumbless-${stamp}.svg`;
+  const goneThumb = `assets/thumbnail/aud-gone-${stamp}.png`;  // thumbnail gone, file fine
+  const flakyKey  = `assets/icon/aud-flaky-${stamp}.svg`;      // S3 errors (not 404)
+  const otherKey  = `assets/bg/aud-other-${stamp}.jpg`;        // gone, but in another category
+
+  const [good, ghost, thumbless, flaky, other] = await Promise.all([
+    models.Asset.create({ category_id: cat.id, name: `AUD Good ${stamp}`, asset_type: 'icon', s3_key: goodKey, thumbnail_s3_key: goodThumb }),
+    models.Asset.create({ category_id: cat.id, name: `AUD Ghost ${stamp}`, asset_type: 'icon', s3_key: ghostKey }),
+    models.Asset.create({ category_id: cat.id, name: `AUD Thumbless ${stamp}`, asset_type: 'icon', s3_key: okKey, thumbnail_s3_key: goneThumb, is_premium: 1 }),
+    models.Asset.create({ category_id: cat.id, name: `AUD Flaky ${stamp}`, asset_type: 'icon', s3_key: flakyKey }),
+    models.Asset.create({ category_id: otherCat.id, name: `AUD Other ${stamp}`, asset_type: 'bg', s3_key: otherKey }),
+  ]);
+  track.assets.push(good.id, ghost.id, thumbless.id, flaky.id, other.id);
+  const tag = await models.Tag.create({ name: `aud-tag-${stamp}`, slug: `aud-tag-${stamp}` });
+  track.tags.push(tag.id);
+  await ghost.setTags([tag]);
+
+  const present = { [goodKey]: {}, [goodThumb]: {}, [okKey]: {} };
+  const original = s3.objectExists;
+  s3.objectExists = async (key) => {
+    if (key === flakyKey) return null;                       // "could not check"
+    return Object.prototype.hasOwnProperty.call(present, key) ? { exists: true, content_type: 'image/png', size: 1 } : { exists: false };
+  };
+
+  try {
+    // Read-only report, scoped to one category.
+    const reader = h.adminToken(['assets.read']);
+    const scan = await h.request('GET', `${P}/admin/assets/missing-files?category_id=${cat.id}`, { token: reader });
+    assert.equal(scan.status, 200);
+    const d = scan.body.data;
+    assert.deepEqual(d.summary, { scanned: 4, missing: 2, unverified: 1 });
+    const byName = (list, n) => list.find((r) => r.name === `AUD ${n} ${stamp}`);
+    assert.deepEqual(byName(d.missing, 'Ghost').missing, ['s3_key']);
+    assert.deepEqual(byName(d.missing, 'Thumbless').missing, ['thumbnail_s3_key'], 'a missing thumbnail alone flags the row');
+    assert.equal(byName(d.missing, 'Ghost').uid, ghost.uid);
+    assert.equal(byName(d.missing, 'Ghost').category.slug, cat.slug, 'category carried so the row can be found in the panel');
+    assert.equal(byName(d.unverified, 'Flaky').name, `AUD Flaky ${stamp}`);
+    assert.match(d.notes.join(' '), /could not be verified/);
+    assert.ok(!byName(d.missing, 'Other'), 'category_id filter respected');
+    assert.equal(await models.Asset.count({ where: { id: [ghost.id, thumbless.id] } }), 2, 'GET writes nothing');
+
+    // Reader cannot delete.
+    const denied = await h.request('DELETE', `${P}/admin/assets/missing-files?category_id=${cat.id}`, { token: reader });
+    assert.equal(denied.status, 403);
+
+    // Bad filter.
+    const bad = await h.request('GET', `${P}/admin/assets/missing-files?asset_type=sticker`, { token: reader });
+    assert.equal(bad.status, 400);
+
+    // category_id=0 means the uncategorised rows (NULL), not a literal 0.
+    const loose = await models.Asset.create({ category_id: null, name: `AUD Loose ${stamp}`, asset_type: 'icon', s3_key: `assets/icon/aud-loose-${stamp}.svg` });
+    track.assets.push(loose.id);
+    const uncategorised = await h.request('GET', `${P}/admin/assets/missing-files?category_id=0`, { token: reader });
+    assert.equal(uncategorised.status, 200);
+    assert.ok(uncategorised.body.data.missing.some((r) => r.uid === loose.uid), 'uncategorised row found via category_id=0');
+    assert.ok(!uncategorised.body.data.missing.some((r) => r.uid === ghost.uid), 'categorised rows excluded');
+
+    // Delete, scoped to the category: ghost + thumbless go, flaky and good stay, other untouched.
+    const purge = await h.request('DELETE', `${P}/admin/assets/missing-files?category_id=${cat.id}`, { token: h.adminToken(['assets.*']) });
+    assert.equal(purge.status, 200);
+    assert.deepEqual(purge.body.data.summary, { scanned: 4, missing: 2, unverified: 1, deleted: 2 });
+    assert.equal(await models.Asset.count({ where: { id: [ghost.id, thumbless.id] } }), 0, 'confirmed-missing rows removed');
+    assert.equal(await models.Asset.count({ where: { id: [good.id, flaky.id, other.id] } }), 3, 'good, unverified and out-of-scope rows survive');
+    assert.equal(await models.AssetTag.count({ where: { asset_id: ghost.id } }), 0, 'tag links cascade');
+
+    const log = await ActivityLog.findOne({ where: { action: 'asset.purged_missing_files' }, order: [['id', 'DESC']] });
+    assert.ok(log, 'purge is logged');
+
+    // Second pass finds nothing left to do.
+    const again = await h.request('DELETE', `${P}/admin/assets/missing-files?category_id=${cat.id}`, { token: h.adminToken(['assets.*']) });
+    assert.equal(again.body.data.summary.deleted, 0);
+  } finally { s3.objectExists = original; }
+});
+
+test('asset file audit: refuses to run when nothing can be checked', async () => {
+  const s3 = require('../src/utils/s3Helper');
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ name: `AUD NoS3 Cat ${stamp}`, slug: `aud-nos3-cat-${stamp}` });
+  track.assetCategories.push(cat.id);
+  const row = await models.Asset.create({ category_id: cat.id, name: `AUD NoS3 ${stamp}`, asset_type: 'icon', s3_key: `assets/icon/aud-nos3-${stamp}.svg` });
+  track.assets.push(row.id);
+
+  const original = s3.objectExists;
+  s3.objectExists = async () => null;
+  try {
+    const res = await h.request('DELETE', `${P}/admin/assets/missing-files?category_id=${cat.id}`, { token: h.adminToken(['assets.*']) });
+    assert.equal(res.status, 400);
+    assert.match(res.body.error.message, /could not be checked|unreachable/);
+  } finally { s3.objectExists = original; }
+  assert.equal(await models.Asset.count({ where: { id: row.id } }), 1, 'nothing deleted on an inconclusive scan');
 });
 
 test('import assets: enforces the assets permission and validates the header', async () => {
@@ -3361,7 +3562,7 @@ const newPhone = () => `7${String(Date.now()).slice(-9)}${Math.floor(Math.random
 test('logout actually ends the session â€” the refresh token dies with it', async () => {
   const phone = newPhone();
   const t = await otpLogin(phone);
-  const user = await User.findOne({ where: { phone } });
+  const user = await userByPhone(phone);
   track.users.push(user.id);
 
   // Before: the refresh token works.
@@ -3389,7 +3590,7 @@ const sidOf = (t) => JSON.parse(Buffer.from(t.split('.')[1], 'base64').toString(
 test('replaying a rotated refresh token signs every session out', async () => {
   const phone  = newPhone();
   const stolen = await otpLogin(phone);
-  const user   = await User.findOne({ where: { phone } });
+  const user   = await userByPhone(phone);
   track.users.push(user.id);
 
   // A second device, to prove the whole account goes and not just this session.
@@ -3430,7 +3631,7 @@ test('replaying a rotated refresh token signs every session out', async () => {
 test('a refresh retried inside the grace window is a retry, not a break-in', async () => {
   const phone = newPhone();
   const t     = await otpLogin(phone);
-  const user  = await User.findOne({ where: { phone } });
+  const user  = await userByPhone(phone);
   track.users.push(user.id);
 
   const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
@@ -3462,7 +3663,7 @@ test('a refresh retried inside the grace window is a retry, not a break-in', asy
 test('a token bearing a known prev_jti but the wrong body revokes nothing', async () => {
   const phone = newPhone();
   const t     = await otpLogin(phone);
-  const user  = await User.findOne({ where: { phone } });
+  const user  = await userByPhone(phone);
   track.users.push(user.id);
 
   const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
@@ -3502,7 +3703,7 @@ test('a token bearing a known prev_jti but the wrong body revokes nothing', asyn
 test('logout with a pre-refresh access token still ends the live session', async () => {
   const phone = newPhone();
   const t     = await otpLogin(phone);
-  const user  = await User.findOne({ where: { phone } });
+  const user  = await userByPhone(phone);
   track.users.push(user.id);
 
   const rotated = await h.request('POST', `${P}/auth/refresh`, { body: { refresh_token: t.refresh_token } });
@@ -3527,7 +3728,7 @@ test('logout with a pre-refresh access token still ends the live session', async
 test('revoke-others kills the access token a device held before its last refresh', async () => {
   const phone = newPhone();
   const a     = await otpLogin(phone);
-  const user  = await User.findOne({ where: { phone } });
+  const user  = await userByPhone(phone);
   track.users.push(user.id);
   const b = await otpLogin(phone);
 
@@ -3557,7 +3758,7 @@ test('revoke-others kills the access token a device held before its last refresh
 test('a session stored with the old bcrypt hash still refreshes, and is upgraded', async () => {
   const phone = newPhone();
   const t     = await otpLogin(phone);
-  const user  = await User.findOne({ where: { phone } });
+  const user  = await userByPhone(phone);
   track.users.push(user.id);
 
   const session = await UserSession.findOne({ where: { uid: sidOf(t.access_token) } });
@@ -3573,7 +3774,7 @@ test('a session stored with the old bcrypt hash still refreshes, and is upgraded
 test('revoke-others signs out every other device immediately, keeping the current one', async () => {
   const phone = newPhone();
   const a = await otpLogin(phone);
-  const user = await User.findOne({ where: { phone } });
+  const user = await userByPhone(phone);
   track.users.push(user.id);
   const b = await otpLogin(phone);
   const c = await otpLogin(phone);
@@ -3599,7 +3800,7 @@ test('revoke-others signs out every other device immediately, keeping the curren
 test('set password: only when there is none, and it ends other sessions', async () => {
   const phone = newPhone();
   const a = await otpLogin(phone);
-  const user = await User.findOne({ where: { phone } });
+  const user = await userByPhone(phone);
   track.users.push(user.id);
   const b = await otpLogin(phone);
 
@@ -3634,7 +3835,7 @@ test('set password: only when there is none, and it ends other sessions', async 
 test('deactivate ends everything and cannot be undone by logging in again', async () => {
   const phone = newPhone();
   const a = await otpLogin(phone);
-  const user = await User.findOne({ where: { phone } });
+  const user = await userByPhone(phone);
   track.users.push(user.id);
   const b = await otpLogin(phone);
 
@@ -3660,7 +3861,7 @@ test('deactivate ends everything and cannot be undone by logging in again', asyn
 test('a deactivated owner disappears from the public directory but nothing is deleted', async () => {
   const phone = newPhone();
   const t = await otpLogin(phone);
-  const user = await User.findOne({ where: { phone } });
+  const user = await userByPhone(phone);
   track.users.push(user.id);
 
   const biz = (await h.request('POST', `${P}/businesses`, {
@@ -3681,6 +3882,285 @@ test('a deactivated owner disappears from the public directory but nothing is de
   // The business row itself is untouched, so reactivating restores the listing.
   const row = await Business.findOne({ where: { uid: biz.uid } });
   assert.equal(row.is_active, 1, 'not soft-deleted â€” reactivation brings it back as it was');
+});
+
+// ---------- Account purge (self-deactivation → deletion after the grace period) ----------
+
+const purgeSvc = require('../src/services/accountPurge.service');
+
+// Razorpay and S3 are stubbed the same way the upload tests stub S3: swap the
+// functions on the module object and record the calls.
+const withStubbedPurgeDeps = async (fn, { razorpayFails = false } = {}) => {
+  const s3  = require('../src/utils/s3Helper');
+  const rzp = require('../src/utils/razorpayHelper');
+  const original = { deleteByPrefix: s3.deleteByPrefix, cancelSubscription: rzp.cancelSubscription };
+  const calls = { prefixes: [], cancelled: [] };
+  s3.deleteByPrefix      = async (prefix) => { calls.prefixes.push(prefix); };
+  rzp.cancelSubscription = async (id) => {
+    if (razorpayFails) throw new Error('gateway timeout');
+    calls.cancelled.push(id);
+  };
+  try { return await fn(calls); } finally { Object.assign(s3, original); Object.assign(rzp, original); }
+};
+
+const setGraceHours = (hours) => models.AppSetting.update({ value: String(hours) }, { where: { key: purgeSvc.GRACE_SETTING_KEY } });
+const hoursAgo = (h) => new Date(Date.now() - h * 3600e3);
+
+test('self-deactivation starts the deletion clock; admin deactivation does not', async () => {
+  const phone = newPhone();
+  const t     = await otpLogin(phone);
+  const user  = await userByPhone(phone);
+  track.users.push(user.id);
+
+  const before = Date.now();
+  const off    = await h.request('POST', `${P}/users/me/deactivate`, { token: t.access_token });
+  assert.equal(off.status, 200);
+  await user.reload();
+  assert.ok(user.deactivated_at, 'stamped');
+
+  const scheduled = new Date(off.body.data.deletion_scheduled_at).getTime();
+  const expected  = new Date(user.deactivated_at).getTime() + 24 * 3600e3;
+  assert.ok(Math.abs(scheduled - expected) < 5000, 'deletion_scheduled_at = deactivated_at + the 24h default');
+  assert.ok(scheduled > before, 'in the future');
+
+  // Admin reactivation cancels it.
+  const admin = h.adminToken(['users.*']);
+  const on = await h.request('PATCH', `${P}/admin/users/${user.uid}/status`, { token: admin, body: { is_active: 1 } });
+  assert.equal(on.status, 200);
+  await user.reload();
+  assert.equal(user.is_active, 1);
+  assert.equal(user.deactivated_at, null, 'clock cleared');
+
+  // Admin deactivation is moderation: no clock.
+  const ban = await h.request('PATCH', `${P}/admin/users/${user.uid}/status`, { token: admin, body: { is_active: 0 } });
+  assert.equal(ban.status, 200);
+  await user.reload();
+  assert.equal(user.is_active, 0);
+  assert.equal(user.deactivated_at, null, 'an admin ban never schedules a purge');
+});
+
+test('the purge job wipes everything a due account owns and leaves a tombstone', async () => {
+  const phone = newPhone();
+  const t     = await otpLogin(phone);
+  const user  = await userByPhone(phone);
+  track.users.push(user.id);
+
+  // Real content via the API, plus rows in the tables the API is awkward to reach.
+  const biz = (await h.request('POST', `${P}/businesses`, {
+    token: t.access_token,
+    body: { name: `TST Purge Biz ${Date.now()}`, industry: 'restaurant-food' },
+  })).body.data;
+  assert.ok(biz?.uid, 'business created');
+  await h.request('PATCH', `${P}/users/me/preferences`, { token: t.access_token, body: { notify_email: false } });
+  await models.UserUpload.create({ uid: uuid(), user_id: user.id, s3_key: `users/${user.uid}/logo/${uuid()}.png`, slot: 'logo', bytes: 100 });
+  await models.Project.create({ uid: uuid(), user_id: user.id, name: 'TST Purge Project' });
+  await models.UserBillingDetail.create({ user_id: user.id, billing_name: 'X', billing_address: 'Y', billing_state: 'KA', billing_pincode: '560001' });
+  const pro = await models.Plan.findOne({ where: { name: 'Pro' } });
+  const sub = await UserSubscription.create({
+    uid: uuid(), user_id: user.id, plan_id: pro.id, sub_type: 'regular', status: 'active', auto_renew: 1,
+    razorpay_subscription_id: `sub_TST${Date.now()}`,
+    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
+  });
+  const sessionsBefore = await UserSession.count({ where: { actor_type: 'user', actor_id: user.id } });
+  assert.ok(sessionsBefore > 0);
+
+  // Deactivated 25 hours ago → due under the 24h default.
+  await h.request('POST', `${P}/users/me/deactivate`, { token: t.access_token });
+  await user.update({ deactivated_at: hoursAgo(25) });
+
+  const result = await withStubbedPurgeDeps(async (calls) => {
+    const r = await purgeSvc.runOnce();
+    // `includes`, not deepEqual: the test DB persists, so a due account left by an
+    // interrupted earlier run may legitimately be swept in the same pass.
+    assert.equal(calls.prefixes.filter((p) => p === `users/${user.uid}/`).length, 1, 'the whole S3 namespace, once');
+    assert.ok(calls.cancelled.includes(sub.razorpay_subscription_id), 'the recurring mandate is stopped');
+    return r;
+  });
+  assert.ok(result.purged >= 1 && result.failed === 0, JSON.stringify(result));
+
+  // Content: gone.
+  assert.equal(await Business.count({ where: { user_id: user.id } }), 0);
+  assert.equal(await models.Project.count({ where: { user_id: user.id } }), 0);
+  assert.equal(await models.UserUpload.count({ where: { user_id: user.id } }), 0);
+  assert.equal(await models.UserPreference.count({ where: { user_id: user.id } }), 0);
+  assert.equal(await models.UserBillingDetail.count({ where: { user_id: user.id } }), 0, 'no invoices → billing details go too');
+  assert.equal(await UserSession.count({ where: { actor_type: 'user', actor_id: user.id } }), 0);
+  assert.equal(await OtpCode.count({ where: { phone: toE164(phone) } }), 0);
+
+  // History: kept, but not live.
+  await sub.reload();
+  assert.equal(sub.status, 'cancelled');
+
+  // Tombstone.
+  await user.reload();
+  assert.equal(user.name, 'Deleted User');
+  assert.equal(user.phone, null);
+  assert.equal(user.is_active, 0);
+  assert.ok(user.purged_at);
+  assert.ok(await ActivityLog.findOne({ where: { action: 'account_purged', entity_type: 'user', entity_id: user.id } }));
+
+  // The number is free again: logging in with it makes a brand-new account.
+  const again = await otpLogin(phone);
+  const fresh = await userByPhone(phone);
+  track.users.push(fresh.id);
+  assert.notEqual(fresh.id, user.id, 'new account, not the tombstone');
+  assert.equal((await h.request('GET', `${P}/users/me`, { token: again.access_token })).status, 200);
+
+  // And the tombstone cannot be switched back on.
+  const on = await h.request('PATCH', `${P}/admin/users/${user.uid}/status`, { token: h.adminToken(['users.*']), body: { is_active: 1 } });
+  assert.equal(on.status, 409);
+});
+
+test('purge respects the grace period, the admin setting, and admin reactivation', async () => {
+  const mk = async (deactivatedHoursAgo) => {
+    const u = await mkUser('PurgeGrace');
+    await u.update({ is_active: 0, deactivated_at: hoursAgo(deactivatedHoursAgo) });
+    return u;
+  };
+  const recent    = await mk(2);      // inside 24h
+  const old       = await mk(30);     // outside
+  const rescued   = await mk(30);     // outside, but an admin brought them back
+  const adminBan  = await mkUser('PurgeBan');
+  await adminBan.update({ is_active: 0 });   // no deactivated_at: admin moderation
+
+  await h.request('PATCH', `${P}/admin/users/${rescued.uid}/status`, { token: h.adminToken(['users.*']), body: { is_active: 1 } });
+
+  const dueIds = (await purgeSvc.findDue()).map((u) => u.id);
+  assert.ok(dueIds.includes(old.id),       'past the grace period → due');
+  assert.ok(!dueIds.includes(recent.id),   'inside the grace period → not yet');
+  assert.ok(!dueIds.includes(rescued.id),  'reactivated → cancelled');
+  assert.ok(!dueIds.includes(adminBan.id), 'admin-deactivated → never');
+
+  // Shorten the grace period from the admin setting: takes effect on the next scan.
+  await setGraceHours(1);
+  try {
+    const shortened = (await purgeSvc.findDue()).map((u) => u.id);
+    assert.ok(shortened.includes(recent.id), '2h-old deactivation is due under a 1h grace');
+  } finally {
+    await setGraceHours(24);
+  }
+  assert.equal(await purgeSvc.graceHours(), 24, 'restored');
+});
+
+test('a purge that cannot stop Razorpay billing leaves the account untouched for retry', async () => {
+  const u = await mkUser('PurgeRzp');
+  const pro = await models.Plan.findOne({ where: { name: 'Pro' } });
+  await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: pro.id, sub_type: 'regular', status: 'active', auto_renew: 1,
+    razorpay_subscription_id: `sub_TSTFAIL${Date.now()}`,
+    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
+  });
+  await models.Project.create({ uid: uuid(), user_id: u.id, name: 'TST Survives' });
+  await u.update({ is_active: 0, deactivated_at: hoursAgo(48) });
+
+  await withStubbedPurgeDeps(async (calls) => {
+    await assert.rejects(purgeSvc.purgeUser(u), /Razorpay cancel failed/);
+    assert.equal(calls.prefixes.length, 0, 'S3 not touched');
+  }, { razorpayFails: true });
+
+  await u.reload();
+  assert.equal(u.purged_at, null, 'still pending');
+  assert.equal(u.name, 'TST PurgeRzp', 'nothing scrubbed');
+  assert.equal(await models.Project.count({ where: { user_id: u.id } }), 1, 'content intact');
+  assert.ok((await purgeSvc.findDue()).some((d) => d.id === u.id), 'will be retried next run');
+});
+
+// ---------- Project thumbnails (inline on the autosave call) ----------
+
+// Smallest valid files of each type; what matters is the signature bytes.
+const PNG_1PX  = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+const JPEG_MIN = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 0), Buffer.from([0xff, 0xd9])]);
+const dataUrl  = (buf, mime = 'image/png') => `data:${mime};base64,${buf.toString('base64')}`;
+
+const withStubbedThumbS3 = async (fn) => {
+  const s3 = require('../src/utils/s3Helper');
+  const original = { uploadFile: s3.uploadFile, deleteFile: s3.deleteFile };
+  const calls = { uploaded: [], deleted: [] };
+  s3.uploadFile = async (key, buf, type) => { calls.uploaded.push({ key, bytes: buf.length, type }); };
+  s3.deleteFile = async (key) => { calls.deleted.push(key); };
+  try { return await fn(calls); } finally { Object.assign(s3, original); }
+};
+
+test('project autosave: content and thumbnail in one PATCH, content-addressed, old preview cleaned up', async () => {
+  const u     = await mkUser('Thumb');
+  const token = h.userTokenFor(u.id);
+
+  await withStubbedThumbS3(async (calls) => {
+    // Create with a thumbnail straight away — the first save is one call too.
+    const created = await h.request('POST', `${P}/projects`, { token, body: { name: 'TST Thumb', content: '{"v":1}', thumbnail: dataUrl(PNG_1PX) } });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const proj = created.body.data;
+    assert.match(proj.thumbnail_s3_key, new RegExp(`^users/${u.uid}/projects/${proj.uid}/thumb-[0-9a-f]{12}\\.png$`));
+    assert.equal(calls.uploaded.length, 1);
+    assert.equal(calls.uploaded[0].type, 'image/png', 'type comes from the bytes');
+    assert.equal(await models.UserUpload.count({ where: { user_id: u.id } }), 0, 'not in the uploads ledger');
+
+    // Same image again: no upload, same key.
+    const same = await h.request('PATCH', `${P}/projects/${proj.uid}`, { token, body: { content: '{"v":2}', thumbnail: dataUrl(PNG_1PX) } });
+    assert.equal(same.status, 200);
+    assert.equal(same.body.data.thumbnail_s3_key, proj.thumbnail_s3_key, 'unchanged bytes → unchanged key');
+    assert.equal(same.body.data.content, '{"v":2}', 'content still saved');
+    assert.equal(calls.uploaded.length, 1, 'no second upload');
+
+    // Different image: new key, old object deleted. Declared MIME is ignored.
+    const next = await h.request('PATCH', `${P}/projects/${proj.uid}`, { token, body: { thumbnail: dataUrl(JPEG_MIN, 'image/png') } });
+    assert.equal(next.status, 200);
+    assert.match(next.body.data.thumbnail_s3_key, /\.jpg$/, 'sniffed as JPEG despite the data-URL saying png');
+    assert.notEqual(next.body.data.thumbnail_s3_key, proj.thumbnail_s3_key);
+    assert.deepEqual(calls.deleted, [proj.thumbnail_s3_key], 'previous preview removed');
+
+    // Content-only PATCH leaves the thumbnail alone.
+    const contentOnly = await h.request('PATCH', `${P}/projects/${proj.uid}`, { token, body: { content: '{"v":3}' } });
+    assert.equal(contentOnly.body.data.thumbnail_s3_key, next.body.data.thumbnail_s3_key);
+    assert.equal(calls.uploaded.length, 2);
+  });
+});
+
+test('project thumbnail: rejects non-images and oversize, and a bad thumbnail saves nothing', async () => {
+  const u     = await mkUser('ThumbBad');
+  const token = h.userTokenFor(u.id);
+  const proj  = (await h.request('POST', `${P}/projects`, { token, body: { name: 'TST ThumbBad', content: '{"v":1}' } })).body.data;
+
+  await withStubbedThumbS3(async (calls) => {
+    const attempt = (thumbnail, content = '{"v":"MUST_NOT_SAVE"}') =>
+      h.request('PATCH', `${P}/projects/${proj.uid}`, { token, body: { content, thumbnail } });
+
+    assert.equal((await attempt('data:image/png;base64,aGVsbG8gd29ybGQ=')).status, 400, 'text pretending to be png');
+    assert.equal((await attempt('<svg xmlns="http://www.w3.org/2000/svg"/>')).status, 400, 'not base64 image bytes');
+    assert.equal((await attempt('')).status, 400, 'empty');
+
+    // Just over the cap, with a valid PNG header so only the size trips it.
+    const { MAX_BYTES } = require('../src/services/projectThumbnail.service');
+    const big = Buffer.concat([PNG_1PX, Buffer.alloc(MAX_BYTES - PNG_1PX.length + 1)]);
+    const over = await attempt(dataUrl(big));
+    assert.equal(over.status, 400);
+    assert.match(JSON.stringify(over.body), /500 KB/);
+
+    // Exactly at the cap is fine.
+    const atCap = Buffer.concat([PNG_1PX, Buffer.alloc(MAX_BYTES - PNG_1PX.length)]);
+    assert.equal((await attempt(dataUrl(atCap), '{"v":"changed"}')).status, 200);
+
+    assert.equal(calls.uploaded.length, 1, 'only the valid one reached S3');
+  });
+
+  // The failed attempts did not save their content either.
+  const row = await models.Project.findOne({ where: { uid: proj.uid } });
+  assert.equal(row.content, '{"v":"changed"}', 'from the at-cap success only');
+  assert.ok(row.thumbnail_s3_key);
+});
+
+test('billing details survive the purge when invoices exist', async () => {
+  const u = await mkUser('PurgeInvoice');
+  await models.UserBillingDetail.create({ user_id: u.id, billing_name: 'Invoiced Co', billing_address: 'Y', billing_state: 'KA', billing_pincode: '560001' });
+  await Payment.create({ uid: uuid(), user_id: u.id, order_type: 'subscription', purchase_type: 'subscription', amount: 118, amount_before_tax: 100, gst_amount: 18, status: 'success', paid_at: new Date() });
+  await u.update({ is_active: 0, deactivated_at: hoursAgo(48) });
+
+  await withStubbedPurgeDeps(() => purgeSvc.purgeUser(u));
+
+  assert.equal(await Payment.count({ where: { user_id: u.id } }), 1, 'the invoice is a tax record');
+  assert.equal(await models.UserBillingDetail.count({ where: { user_id: u.id } }), 1, 'and the details it was issued to stay with it');
+  await u.reload();
+  assert.equal(u.name, 'Deleted User');
 });
 
 test('notification preferences: defaults without a row, partial update, lazily created row', async () => {
@@ -4310,7 +4790,7 @@ test('the role permission migration is additive and idempotent', async () => {
 test('an admin deactivating a user ends their sessions immediately', async () => {
   const phone = newPhone();
   const a = await otpLogin(phone);
-  const user = await User.findOne({ where: { phone } });
+  const user = await userByPhone(phone);
   track.users.push(user.id);
   const b = await otpLogin(phone);
 
