@@ -9,7 +9,7 @@ const productService  = require('./product.service');
 const fontService     = require('./font.service');
 const frameService    = require('./frame.service');
 const variantAccess   = require('./variantAccess.service');
-const { sequelize, Variant, VariantBadge, Plan, Template, Tag, Font, BusinessCategory, BusinessVariant } = require('../models');
+const { sequelize, Variant, VariantBadge, Plan, Template, Tag, Font, BusinessCategory, BusinessVariant, Product } = require('../models');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const slugify         = require('../utils/slugify');
 const { NotFoundError, ForbiddenError, ValidationError, ConflictError } = require('../errors');
@@ -419,10 +419,11 @@ async function deleteBusiness(uid, userId) {
   await businessRepo.update(biz.id, { is_active: 0 });
 
   // Everything hanging off the business goes with it — logo, cover, and the
-  // images of its live products. Otherwise deleting a business would strand its
-  // storage as permanently charged with no route left to reclaim it. Products
-  // already soft-deleted released their own images at the time, so the
-  // active-only list here is exactly the remainder.
+  // images of its remaining products, active AND inactive (an inactive product
+  // is merely hidden; its files are still charged). Otherwise deleting a
+  // business would strand its storage as permanently charged with no route left
+  // to reclaim it. Deleted products released their own images at the time and
+  // are already out of this list.
   await userUpload.release(biz.logo_s3_key, userId);
   await userUpload.release(biz.cover_s3_key, userId);
   for (const product of await productRepo.findByBusiness(biz.id)) {
@@ -461,10 +462,15 @@ async function getPublicProfile(uid) {
   return toPublic(biz);
 }
 
-async function getPublicProducts(uid) {
+// Storefront list: only what the owner has switched on. `type` narrows it to
+// products or services.
+async function getPublicProducts(uid, { type } = {}) {
+  if (type !== undefined && !Product.TYPES.includes(type)) {
+    throw new ValidationError(`type must be one of: ${Product.TYPES.join(', ')}`);
+  }
   const biz = await businessRepo.findPublicByUid(uid);
   if (!biz) throw new NotFoundError('Business not found');
-  return productRepo.findByBusiness(biz.id);
+  return productRepo.findActiveByBusiness(biz.id, { type });
 }
 
 // ---- "Add to your Business" — business-scoped variant adoption ----

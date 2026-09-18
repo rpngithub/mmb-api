@@ -1274,7 +1274,7 @@
             ]
           },
           {
-            "name": "Public Products",
+            "name": "Public Products & Services",
             "request": {
               "method": "GET",
               "header": [],
@@ -1287,8 +1287,16 @@
                   "businesses",
                   "{{business_uid}}",
                   "products"
+                ],
+                "query": [
+                  {
+                    "key": "type",
+                    "value": "product",
+                    "disabled": true
+                  }
                 ]
               },
+              "description": "Active items only. Filter with `type` (product | service).",
               "auth": {
                 "type": "noauth"
               }
@@ -1778,7 +1786,7 @@
       },
       {
         "name": "Products",
-        "description": "Products/services of a business (shown on the public storefront).",
+        "description": "Products AND services of a business (shown on the public storefront). One resource, told apart by `type`: a product carries `unit` (Unit/Weight), a service carries `service_area` — sending the other type's field is a 400. `offer_price` is the selling price while on offer and cannot exceed `price` (the struck-through \"actual\"). `is_active` is the owner's show/hide toggle (the \"In Active\" tab); DELETE is permanent.",
         "item": [
           {
             "name": "Create Product",
@@ -1801,7 +1809,7 @@
               },
               "body": {
                 "mode": "raw",
-                "raw": "{\n  \"business_uid\": \"{{business_uid}}\",\n  \"name\": \"Cappuccino\",\n  \"description\": \"Hot coffee\",\n  \"price\": 150\n}",
+                "raw": "{\n  \"business_uid\": \"{{business_uid}}\",\n  \"type\": \"product\",\n  \"name\": \"Red Velvet Cake\",\n  \"unit\": \"1 Kg\",\n  \"description\": \"Moist and rich\",\n  \"price\": 800,\n  \"offer_price\": 750\n}",
                 "options": {
                   "raw": {
                     "language": "json"
@@ -1830,7 +1838,56 @@
             ]
           },
           {
-            "name": "List Products",
+            "name": "Create Service",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/products",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products"
+                ]
+              },
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"business_uid\": \"{{business_uid}}\",\n  \"type\": \"service\",\n  \"name\": \"Wall Painting\",\n  \"service_area\": \"Nagercoil\",\n  \"description\": \"Interior and exterior\",\n  \"price\": 5000\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('product_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Products & Services",
             "request": {
               "method": "GET",
               "header": [],
@@ -1846,10 +1903,20 @@
                   {
                     "key": "business_uid",
                     "value": "{{business_uid}}"
+                  },
+                  {
+                    "key": "type",
+                    "value": "product",
+                    "disabled": true
+                  },
+                  {
+                    "key": "is_active",
+                    "value": "0",
+                    "disabled": true
                   }
                 ]
               },
-              "description": "`business_uid` is required."
+              "description": "`business_uid` is required. Returns active AND inactive items; `meta.counts` (`all`, `products`, `services`, `inactive`) drives the tab badges and ignores the filters."
             },
             "event": [
               {
@@ -1925,7 +1992,56 @@
               },
               "body": {
                 "mode": "raw",
-                "raw": "{\n  \"price\": 160,\n  \"is_active\": 1\n}",
+                "raw": "{\n  \"price\": 850,\n  \"offer_price\": 799\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Hide / Show Product",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/products/{{product_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "products",
+                  "{{product_uid}}"
+                ]
+              },
+              "description": "`is_active: 0` moves it to the In Active tab and off the storefront; `1` brings it back. Not a delete.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"is_active\": 0\n}",
                 "options": {
                   "raw": {
                     "language": "json"
@@ -1965,7 +2081,8 @@
                   "products",
                   "{{product_uid}}"
                 ]
-              }
+              },
+              "description": "Permanent: leaves every list including In Active, and releases its images from the storage quota."
             },
             "event": [
               {
@@ -4447,7 +4564,7 @@
       },
       {
         "name": "Subscriptions",
-        "description": "Plan purchase (Razorpay one-time + recurring), coupons, trials, the ₹10 access pass, and the current entitlement state.",
+        "description": "Plan purchase (Razorpay one-time + recurring), coupons, trials, the ₹10 access pass, the current entitlement state, and the Billing & Payments screen (history, invoice/receipt, cancel renewal).",
         "item": [
           {
             "name": "My Subscription & Entitlements",
@@ -4464,7 +4581,7 @@
                   "me"
                 ]
               },
-              "description": "The ACTIVE subscription with its plan, billing cycle, and per-feature entitlements (limit/used/remaining, or `enabled` for booleans). Poll after checkout to detect activation. `has_active_subscription: false` ⇒ treat as free tier."
+              "description": "The ACTIVE subscription with its plan, billing cycle, and per-feature entitlements (limit/used/remaining, or `enabled` for booleans). Poll after checkout to detect activation. `has_active_subscription: false` ⇒ treat as free tier.\n\nBilling-screen fields on `subscription`: `renews_on` (next charge date, null when not renewing — then `ends_at` is the expiry), `cancel_renewal_allowed` (drives the Cancel Renewal button), `renewal_cancelled_at`, and `payment_gateway` / `payment_method` / `payment_method_detail` from the latest successful charge."
             },
             "event": [
               {
@@ -4479,6 +4596,175 @@
                     "  const body = pm.response.json();",
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
                     "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Cancel Renewal",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/me/cancel-renewal",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "me",
+                  "cancel-renewal"
+                ]
+              },
+              "description": "Stops the recurring mandate at Razorpay AT CYCLE END. The subscription stays active with `auto_renew=false` until `ends_at`, then expires; no further charge. Also stops an uncharged free trial from converting. Idempotent (`idempotent: true` on a repeat). 404 nothing active · 409 one-time plan / access pass (nothing renews) · 502 gateway refused, nothing changed. No resume — a change of heart is a fresh subscription.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 404, 409]));"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Payment History",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/payments",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "payments"
+                ],
+                "query": [
+                  {
+                    "key": "page",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "20",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Every payment the user started, newest first — successful, pending and failed alike, each with a resolved `description` (plan + cycle, top-up pack, frame, access pass), `payment_method`, `invoice_number` and `documents_available`. `last_transaction` (page 1) is the newest SUCCESSFUL row for the \"Last transaction\" card."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const paid = (d.items || []).find((r) => r.documents_available); if (paid) pm.environment.set('payment_uid', paid.uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Invoice (HTML)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/payments/{{payment_uid}}/document?type=invoice",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "payments",
+                  "{{payment_uid}}",
+                  "document"
+                ],
+                "query": [
+                  {
+                    "key": "type",
+                    "value": "invoice",
+                    "disabled": false
+                  }
+                ]
+              },
+              "description": "Print-ready HTML tax invoice for one SUCCESSFUL payment: seller & buyer GSTIN (buyer block from `PUT /users/me/billing` when set), SAC, CGST+SGST or IGST by the buyer's state, coupon noted. Invoice number `MMB/<FY>/000001` is issued when the payment succeeds and never changes. Open in a tab/webview and Print / Save as PDF. 403 not yours · 404 unknown · 409 payment not successful."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('html', () => { pm.expect(pm.response.code).to.eql(200); pm.expect(pm.response.headers.get('Content-Type')).to.include('text/html'); });"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Receipt (HTML)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/subscriptions/payments/{{payment_uid}}/document?type=receipt",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "subscriptions",
+                  "payments",
+                  "{{payment_uid}}",
+                  "document"
+                ],
+                "query": [
+                  {
+                    "key": "type",
+                    "value": "receipt",
+                    "disabled": false
+                  }
+                ]
+              },
+              "description": "Print-ready HTML payment receipt: amount received, gateway reference, method, date, and the invoice number it belongs to. Same rules as the invoice."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('html', () => { pm.expect(pm.response.code).to.eql(200); pm.expect(pm.response.headers.get('Content-Type')).to.include('text/html'); });"
                   ]
                 }
               }
@@ -4919,6 +5205,12 @@
       },
       {
         "key": "razorpay_signature",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "payment_uid",
         "value": "",
         "type": "default",
         "enabled": true

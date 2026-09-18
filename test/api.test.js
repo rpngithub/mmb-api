@@ -1918,6 +1918,79 @@ test('product ownership is enforced across users', async () => {
   assert.equal(asB.status, 403, 'B cannot read A product');
 });
 
+// ---------- Products & services ----------
+test('products and services: type-specific fields, offer price, and the inactive tab vs delete', async () => {
+  const u = await User.create({ uid: uuid(), name: 'TST PS', phone: `7${String((Date.now() + 7) % 1000000000).padStart(9, '0')}` });
+  track.users.push(u.id);
+  const biz   = await Business.create({ uid: uuid(), user_id: u.id, name: 'TST PS Biz' });
+  const token = h.userTokenFor(u.id);
+  const post  = (body) => h.request('POST', `${P}/products`, { token, body: { business_uid: biz.uid, ...body } });
+  const list  = (q = '') => h.request('GET', `${P}/products?business_uid=${biz.uid}${q}`, { token });
+  const pub   = (q = '') => h.request('GET', `${P}/businesses/${biz.uid}/products${q}`);
+
+  // A product carries unit + an offer price below its actual price.
+  const cake = await post({ name: 'Red Velvet Cake', unit: '1 Kg', price: 800, offer_price: 750, description: 'Moist' });
+  assert.equal(cake.status, 201, JSON.stringify(cake.body));
+  assert.equal(cake.body.data.type, 'product', 'type defaults to product');
+  assert.equal(cake.body.data.unit, '1 Kg');
+  assert.equal(Number(cake.body.data.offer_price), 750);
+
+  // A service carries service_area instead.
+  const paint = await post({ type: 'service', name: 'Wall Painting', service_area: 'Nagercoil', price: 5000 });
+  assert.equal(paint.status, 201, JSON.stringify(paint.body));
+  assert.equal(paint.body.data.service_area, 'Nagercoil');
+
+  // The other type's detail, and an offer above the actual price, are rejected.
+  const r1 = await post({ type: 'service', name: 'Bad', unit: '1 Kg' });
+  assert.equal(r1.status, 400);
+  assert.equal(r1.body.error.details[0].field, 'unit');
+  const r2 = await post({ name: 'Bad', service_area: 'Here' });
+  assert.equal(r2.status, 400);
+  assert.equal(r2.body.error.details[0].field, 'service_area');
+  const r3 = await post({ name: 'Bad', price: 100, offer_price: 150 });
+  assert.equal(r3.status, 400);
+  assert.equal(r3.body.error.details[0].field, 'offer_price');
+  const r4 = await post({ name: 'Bad', offer_price: 50 });
+  assert.equal(r4.status, 400, 'offer_price without a price');
+  // ...and the offer is checked against the STORED price on a partial update.
+  const r5 = await h.request('PATCH', `${P}/products/${cake.body.data.uid}`, { token, body: { offer_price: 900 } });
+  assert.equal(r5.status, 400, 'offer above the stored price');
+
+  // Hiding an item: it stays in the owner's list (In Active tab) but leaves the storefront.
+  const hide = await h.request('PATCH', `${P}/products/${paint.body.data.uid}`, { token, body: { is_active: 0 } });
+  assert.equal(hide.status, 200);
+  let owner = await list();
+  assert.equal(owner.status, 200);
+  assert.deepEqual(owner.body.meta.counts, { all: 2, products: 1, services: 1, inactive: 1 });
+  assert.equal(owner.body.data.length, 2, 'owner sees active and inactive');
+  assert.equal((await list('&is_active=0')).body.data.map((p) => p.name).join(), 'Wall Painting');
+  assert.equal((await list('&type=product')).body.data.map((p) => p.name).join(), 'Red Velvet Cake');
+  assert.deepEqual((await list('&type=product')).body.meta.counts.all, 2, 'counts ignore the filter');
+  assert.equal((await list('&type=bogus')).status, 400);
+  let store = await pub();
+  assert.equal(store.status, 200);
+  assert.deepEqual(store.body.data.map((p) => p.name), ['Red Velvet Cake'], 'public list is active-only');
+  assert.equal((await pub('?type=service')).body.data.length, 0);
+
+  // Re-enable, then flip the service to a product: the service_area is dropped.
+  await h.request('PATCH', `${P}/products/${paint.body.data.uid}`, { token, body: { is_active: 1 } });
+  const flipped = await h.request('PATCH', `${P}/products/${paint.body.data.uid}`, { token, body: { type: 'product', unit: 'per room' } });
+  assert.equal(flipped.status, 200, JSON.stringify(flipped.body));
+  assert.equal(flipped.body.data.type, 'product');
+  assert.equal(flipped.body.data.service_area, null, 'stale service_area cleared on type change');
+  assert.equal(flipped.body.data.unit, 'per room');
+  assert.deepEqual((await pub('?type=product')).body.data.length, 2);
+
+  // Deleting is distinct from hiding: gone from every owner list, not just the storefront.
+  assert.equal((await h.request('DELETE', `${P}/products/${cake.body.data.uid}`, { token })).status, 200);
+  owner = await list();
+  assert.deepEqual(owner.body.meta.counts, { all: 1, products: 1, services: 0, inactive: 0 });
+  assert.equal((await list('&is_active=0')).body.data.length, 0, 'a deleted item is not "inactive"');
+  assert.equal((await h.request('GET', `${P}/products/${cake.body.data.uid}`, { token })).status, 404);
+  store = await pub();
+  assert.deepEqual(store.body.data.map((p) => p.name), ['Wall Painting'], 'public list drops the deleted item too');
+});
+
 // ---------- Subscriptions: webhook ----------
 function signWebhook(obj) {
   const raw = Buffer.from(JSON.stringify(obj));
@@ -5790,6 +5863,274 @@ test('a subscription.charged webhook records the renewal payment and extends the
 
   const replay = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
   assert.equal(replay.body.idempotent, true);
+});
+
+// ---------- Billing & Payments: method capture, history, documents, cancel renewal ----------
+const INVOICE_NO = /^MMB\/\d{4}-\d{2}\/\d{6}$/;
+
+// A pending one-time plan purchase for `u`, the state the checkout leaves behind.
+const mkPendingPlanPayment = async (u, over = {}) => {
+  const sub = await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1,
+    status: 'pending', starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), auto_renew: 0, amount_paid: 352.82,
+  });
+  const payment = await Payment.create({
+    uid: uuid(), user_id: u.id, subscription_id: sub.id, order_type: 'one_time', purchase_type: 'subscription',
+    amount: 352.82, amount_before_tax: 299, gst_amount: 53.82, razorpay_order_id: `order_bill_${u.id}_${Date.now()}`, status: 'pending',
+    ...over,
+  });
+  return { sub, payment };
+};
+
+const captured = (payment, entity) => signWebhook({
+  event: 'payment.captured',
+  payload: { payment: { entity: { id: `pay_bill_${payment.id}`, order_id: payment.razorpay_order_id, amount: 35282, ...entity } } },
+});
+
+test('the webhook records how a payment was paid and issues its invoice number once', async () => {
+  const u = await mkUser('Method');
+  const { payment } = await mkPendingPlanPayment(u);
+
+  const { raw, sig } = captured(payment, { method: 'upi', vpa: 'pramod@okaxis' });
+  assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } })).status, 200);
+
+  const after = await payment.reload();
+  assert.equal(after.status, 'success');
+  assert.equal(after.payment_method, 'upi');
+  assert.equal(after.payment_method_detail, 'UPI · pr***@okaxis', 'the VPA handle is masked, never stored whole');
+  assert.match(after.invoice_number, INVOICE_NO);
+
+  const first = after.invoice_number;
+  await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal((await payment.reload()).invoice_number, first, 'a redelivered webhook never renumbers');
+
+  // A second payment draws the next number in the same financial year.
+  const { payment: p2 } = await mkPendingPlanPayment(u);
+  const w2 = captured(p2, { method: 'card', card: { network: 'Visa', last4: '4242' } });
+  await h.request('POST', `${P}/subscriptions/webhook`, { body: w2.raw, headers: { 'x-razorpay-signature': w2.sig } });
+  const second = (await p2.reload());
+  assert.equal(second.payment_method_detail, 'VISA •• 4242');
+  const seq = (n) => parseInt(n.split('/')[2], 10);
+  assert.equal(seq(second.invoice_number), seq(first) + 1, 'numbers are sequential');
+  assert.equal(second.invoice_number.split('/')[1], first.split('/')[1], 'same FY');
+});
+
+test('the client callback confirms without a method and the webhook fills it in afterwards', async () => {
+  const u = await mkUser('Callback');
+  const { payment } = await mkPendingPlanPayment(u);
+  // Mark it the way verifyPayment does (signature-verified callback, no method).
+  await payment.update({ status: 'success', razorpay_payment_id: `pay_cb_${payment.id}`, paid_at: new Date() });
+
+  const { raw, sig } = captured(payment, { method: 'netbanking', bank: 'HDFC' });
+  const r = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  assert.equal(r.body.idempotent, true, 'already paid — nothing is fulfilled twice');
+  const after = await payment.reload();
+  assert.equal(after.payment_method, 'netbanking');
+  assert.equal(after.payment_method_detail, 'Netbanking · HDFC');
+});
+
+test('a recurring charge records its method and Razorpay invoice id', async () => {
+  const u = await mkUser('RenewMethod');
+  const sub = await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1, sub_type: 'regular', status: 'active',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 5 * 864e5), auto_renew: 1, amount_paid: 352.82,
+    razorpay_subscription_id: `sub_method_${u.id}`,
+  });
+  const { raw, sig } = signWebhook({
+    event: 'subscription.charged',
+    payload: {
+      subscription: { entity: { id: sub.razorpay_subscription_id } },
+      payment:      { entity: { id: `pay_rm_${u.id}`, amount: 35282, method: 'upi', vpa: 'someone@ybl', invoice_id: `inv_${u.id}` } },
+    },
+  });
+  await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+
+  const payment = await Payment.findOne({ where: { razorpay_payment_id: `pay_rm_${u.id}` } });
+  assert.equal(payment.payment_method, 'upi');
+  assert.equal(payment.razorpay_invoice_id, `inv_${u.id}`);
+  assert.match(payment.invoice_number, INVOICE_NO);
+
+  // And the subscription card reports the method of its latest charge.
+  const me = await h.request('GET', `${P}/subscriptions/me`, { token: h.userTokenFor(u.id) });
+  assert.equal(me.body.data.subscription.payment_gateway, 'razorpay');
+  assert.equal(me.body.data.subscription.payment_method, 'upi');
+  assert.equal(me.body.data.subscription.payment_method_detail, 'UPI · so***@ybl');
+  assert.equal(me.body.data.subscription.cancel_renewal_allowed, true);
+  // The charge extended the term; renews_on is the NEW end.
+  assert.equal(new Date(me.body.data.subscription.renews_on).getTime(), new Date((await sub.reload()).ends_at).getTime());
+});
+
+test('payment history describes each purchase and exposes documents for successful rows only', async () => {
+  const u     = await mkUser('History');
+  const token = h.userTokenFor(u.id);
+
+  const { payment: paid }   = await mkPendingPlanPayment(u);
+  const { raw, sig }        = captured(paid, { method: 'upi', vpa: 'h@okicici' });
+  await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  const { payment: failed } = await mkPendingPlanPayment(u, { status: 'failed', failure_reason: 'declined' });
+  const { payment: pend }   = await mkPendingPlanPayment(u);
+
+  const r = await h.request('GET', `${P}/subscriptions/payments`, { token });
+  assert.equal(r.status, 200);
+  const rows = r.body.data.items;
+  assert.equal(rows.length, 3, 'pending and failed attempts are listed too');
+  assert.deepEqual(rows.map((x) => x.uid), [pend.uid, failed.uid, paid.uid], 'newest first');
+  assert.equal(r.body.data.last_transaction.uid, paid.uid, 'the newest SUCCESSFUL row, not the newest attempt');
+  assert.equal(r.body.data.pagination.total, 3);
+
+  const paidRow = rows.find((x) => x.uid === paid.uid);
+  assert.match(paidRow.description, /Monthly Plan$/);
+  assert.equal(paidRow.payment_method, 'upi');
+  assert.equal(paidRow.documents_available, true);
+  assert.match(paidRow.invoice_number, INVOICE_NO);
+  assert.equal(rows.find((x) => x.uid === failed.uid).documents_available, false);
+  assert.equal(rows.find((x) => x.uid === pend.uid).documents_available, false);
+
+  // Invoice: HTML, the number, the GST breakup and the buyer's saved billing block.
+  await h.request('PUT', `${P}/users/me/billing`, { token, body: {
+    billing_name: 'Acme Studio', gstin: '29ABCDE1234F1Z5', billing_address: '1 MG Road', billing_state: 'Karnataka', billing_pincode: '560001',
+  } });
+  const inv = await h.request('GET', `${P}/subscriptions/payments/${paid.uid}/document?type=invoice`, { token });
+  assert.equal(inv.status, 200);
+  assert.match(inv.headers['content-type'], /text\/html/);
+  assert.ok(inv.body.includes('Tax Invoice'));
+  assert.ok(inv.body.includes(paidRow.invoice_number));
+  assert.ok(inv.body.includes('Acme Studio') && inv.body.includes('29ABCDE1234F1Z5'), 'buyer block from PUT /users/me/billing');
+  assert.ok(inv.body.includes('299.00') && inv.body.includes('352.82'), 'taxable value and total');
+  assert.ok(inv.body.includes('IGST @ 18%') || inv.body.includes('CGST @ 9%'), 'GST split rendered');
+
+  const rec = await h.request('GET', `${P}/subscriptions/payments/${paid.uid}/document?type=receipt`, { token });
+  assert.equal(rec.status, 200);
+  assert.ok(rec.body.includes('Payment Receipt') && rec.body.includes(`pay_bill_${paid.id}`), 'receipt carries the gateway reference');
+
+  assert.equal((await h.request('GET', `${P}/subscriptions/payments/${paid.uid}/document?type=pdf`, { token })).status, 400);
+  assert.equal((await h.request('GET', `${P}/subscriptions/payments/${pend.uid}/document`, { token })).status, 409, 'no document for money not received');
+  const other = await mkUser('Other');
+  assert.equal((await h.request('GET', `${P}/subscriptions/payments/${paid.uid}/document`, { token: h.userTokenFor(other.id) })).status, 403);
+  assert.equal((await h.request('GET', `${P}/subscriptions/payments/${uuid()}/document`, { token })).status, 404);
+});
+
+test('a payment that succeeded before numbering existed is numbered on first document request', async () => {
+  const u = await mkUser('Backfill');
+  const { payment } = await mkPendingPlanPayment(u, {
+    status: 'success', razorpay_payment_id: `pay_old_${Date.now()}`, paid_at: new Date('2025-06-15T10:00:00Z'),
+  });
+  assert.equal(payment.invoice_number, null);
+
+  const r = await h.request('GET', `${P}/subscriptions/payments/${payment.uid}/document`, { token: h.userTokenFor(u.id) });
+  assert.equal(r.status, 200);
+  const numbered = (await payment.reload()).invoice_number;
+  assert.match(numbered, INVOICE_NO);
+  assert.equal(numbered.split('/')[1], '2025-26', 'dated to when it was paid, not when it was viewed');
+  assert.ok(r.body.includes(numbered));
+});
+
+test('escapes user-authored text in the documents', async () => {
+  const u = await mkUser('Xss');
+  const { payment } = await mkPendingPlanPayment(u, { status: 'success', razorpay_payment_id: `pay_x_${Date.now()}`, paid_at: new Date() });
+  const token = h.userTokenFor(u.id);
+  await h.request('PUT', `${P}/users/me/billing`, { token, body: {
+    billing_name: '<script>alert(1)</script>', billing_address: 'x', billing_state: 'Kerala', billing_pincode: '682001',
+  } });
+  const r = await h.request('GET', `${P}/subscriptions/payments/${payment.uid}/document`, { token });
+  assert.ok(!r.body.includes('<script>'), 'raw tag never reaches the page');
+  assert.ok(r.body.includes('&lt;script&gt;'));
+});
+
+// The gateway has no test double: the cancel call is swapped out and recorded.
+const withStubbedCancel = async (fn, { fail } = {}) => {
+  const rzp      = require('../src/utils/razorpayHelper');
+  const original = rzp.cancelSubscriptionAtCycleEnd;
+  const calls    = [];
+  rzp.cancelSubscriptionAtCycleEnd = async (id) => {
+    calls.push(id);
+    if (fail) { const e = new Error('gateway'); e.error = { description: fail }; throw e; }
+    return { id, status: 'active', has_scheduled_changes: true };
+  };
+  try { return await fn(calls); } finally { rzp.cancelSubscriptionAtCycleEnd = original; }
+};
+
+test('cancel renewal stops the mandate at cycle end and leaves the paid term intact', async () => {
+  const u      = await mkUser('Cancel');
+  const token  = h.userTokenFor(u.id);
+  // Whole seconds: DATETIME drops the milliseconds and the round-trip must match.
+  const endsAt = new Date(Math.floor((Date.now() + 20 * 864e5) / 1000) * 1000);
+  const sub    = await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1, sub_type: 'regular', status: 'active',
+    starts_at: new Date(), ends_at: endsAt, auto_renew: 1, amount_paid: 352.82, razorpay_subscription_id: `sub_cancel_${u.id}`,
+  });
+
+  await withStubbedCancel(async (calls) => {
+    const r = await h.request('POST', `${P}/subscriptions/me/cancel-renewal`, { token });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(calls, [sub.razorpay_subscription_id], 'cancelled at the gateway, at cycle end');
+    assert.equal(r.body.data.auto_renew, false);
+    assert.equal(r.body.data.can_resume, false);
+    assert.equal(new Date(r.body.data.access_until).getTime(), endsAt.getTime());
+
+    const after = await sub.reload();
+    assert.equal(after.status, 'active', 'still entitled until the term ends');
+    assert.equal(Number(after.auto_renew), 0);
+    assert.ok(after.cancelled_at);
+
+    const me = await h.request('GET', `${P}/subscriptions/me`, { token });
+    assert.equal(me.body.data.has_active_subscription, true);
+    assert.equal(me.body.data.subscription.auto_renew, false);
+    assert.equal(me.body.data.subscription.renews_on, null);
+    assert.equal(me.body.data.subscription.cancel_renewal_allowed, false);
+    assert.ok(me.body.data.subscription.renewal_cancelled_at);
+
+    const again = await h.request('POST', `${P}/subscriptions/me/cancel-renewal`, { token });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.data.idempotent, true, 'a second click is a no-op');
+    assert.equal(calls.length, 1, 'the gateway is not called again');
+
+    // The user is told, once, with the plan and the date access ends.
+    const note = await models.UserNotification.findOne({ where: { user_id: u.id, dedupe_key: `renewal_cancelled:sub:${sub.id}` } });
+    assert.ok(note, 'renewal_cancelled notification is posted');
+    assert.equal(note.status, 'delivered', 'transactional — not held for quiet hours');
+    assert.ok(note.body.includes('will not renew'));
+    assert.ok(note.body.includes(endsAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' })));
+    assert.equal(await models.UserNotification.count({ where: { user_id: u.id, dedupe_key: `renewal_cancelled:sub:${sub.id}` } }), 1);
+  });
+
+  // Razorpay closes the mandate at cycle end; the user's cancellation date stands.
+  const stamped = (await sub.reload()).cancelled_at;
+  const { raw, sig } = signWebhook({ event: 'subscription.cancelled', payload: { subscription: { entity: { id: sub.razorpay_subscription_id } } } });
+  await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+  const ended = await sub.reload();
+  assert.equal(ended.status, 'cancelled');
+  assert.equal(new Date(ended.cancelled_at).getTime(), new Date(stamped).getTime(), 'the webhook does not move cancelled_at');
+});
+
+test('cancel renewal refuses what cannot renew and does not lie when the gateway fails', async () => {
+  const u     = await mkUser('CancelNo');
+  const token = h.userTokenFor(u.id);
+  assert.equal((await h.request('POST', `${P}/subscriptions/me/cancel-renewal`, { token })).status, 404, 'nothing active');
+
+  const oneTime = await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1, status: 'active',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 864e5), auto_renew: 0, amount_paid: 352.82,
+  });
+  assert.equal((await h.request('POST', `${P}/subscriptions/me/cancel-renewal`, { token })).status, 409, 'a one-time plan has no renewal');
+  await oneTime.update({ status: 'expired' });
+
+  const recurring = await UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1, status: 'active',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 864e5), auto_renew: 1, amount_paid: 352.82, razorpay_subscription_id: `sub_fail_${u.id}`,
+  });
+  await withStubbedCancel(async () => {
+    const r = await h.request('POST', `${P}/subscriptions/me/cancel-renewal`, { token });
+    assert.equal(r.status, 502);
+    assert.equal(Number((await recurring.reload()).auto_renew), 1, 'the row is untouched while the mandate is still live');
+  }, { fail: 'Razorpay is down' });
+
+  // "Already cancelled" at the gateway means renewal HAS stopped — record it.
+  await withStubbedCancel(async () => {
+    const r = await h.request('POST', `${P}/subscriptions/me/cancel-renewal`, { token });
+    assert.equal(r.status, 200);
+    assert.equal(Number((await recurring.reload()).auto_renew), 0);
+  }, { fail: 'Subscription is already cancelled' });
 });
 
 // ---------- Relaxed quota enforcement ----------

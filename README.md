@@ -16,7 +16,7 @@ npm install
 
 # 1. configure env — edit the file matching your environment
 #    .env.development | .env.staging | .env.production | .env.test
-#    set DB_*, REDIS_URL, JWT_SECRET, RAZORPAY_* etc.
+#    set DB_*, REDIS_URL, JWT_SECRET, RAZORPAY_*, SELLER_* (invoice header) etc.
 
 # 2. create the database, build tables, load baseline data
 npm run db:create     # CREATE DATABASE if missing
@@ -74,7 +74,7 @@ npm run test:only   # run tests without re-preparing the DB
 | Businesses, products, projects, project exports | `/api/v1/{businesses,products,projects}` | bearer (owner-scoped) |
 | Frames store (browse, add a free frame, buy a premium one, My Frames) | `/api/v1/frames` | optional to browse, bearer to own |
 | Quota (usage + breakdown, top-up packs, buy more) | `/api/v1/quota` | optional to browse packs, bearer for usage |
-| Subscriptions (plans, coupon verify, initiate, payment verify) | `/api/v1/subscriptions` | bearer |
+| Subscriptions (plans, coupon verify, initiate, payment verify, cancel renewal, payment history, HTML invoice/receipt) | `/api/v1/subscriptions` | bearer |
 | Razorpay webhook | `POST /api/v1/subscriptions/webhook` | HMAC signature |
 | Admin (RBAC-gated CRUD, user admin, audit log) | `/api/v1/admin/*` | bearer + admin permission |
 | Public config | `/api/v1/config` | public |
@@ -85,7 +85,7 @@ npm run test:only   # run tests without re-preparing the DB
 
 - **Auth:** mobile OTP for users, email+password for admins; JWT access/refresh with rotation + blacklist. User tokens carry a `tier` claim (`free`/`paid`).
 - **Premium templates:** non-paid viewers get a locked preview (no editable content).
-- **Payments:** supports both one-time (Orders API) and recurring (Subscriptions API); the **webhook is the source of truth** (idempotent).
+- **Payments:** supports both one-time (Orders API) and recurring (Subscriptions API); the **webhook is the source of truth** (idempotent). It also records the payment method and issues the GST invoice number (`MMB/<FY>/000001`, sequential per financial year via `invoice_counters`). Invoices and receipts are rendered server-side as print-ready HTML — no PDF dependency; the seller block comes from the `SELLER_*` env vars. "Cancel renewal" cancels the Razorpay mandate at cycle end; access runs to `ends_at`, and there is no resume.
 - **Admin:** role-based permissions (`*`, `domain.*`, or exact); every mutation is written to `activity_logs`.
 - **Cron jobs:** OTP cleanup, token cleanup, subscription expiry, trending-score recompute (started in `server.js`).
 

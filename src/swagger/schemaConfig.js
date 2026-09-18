@@ -115,6 +115,21 @@ module.exports = {
     },
   },
 
+  // A product or a service — one shape, told apart by `type`. Always arrives with
+  // its images. `deleted_at` is the paranoid marker: a deleted row is never served.
+  Product: {
+    exclude: ['deleted_at'],
+    add: {
+      type:         { type: 'string', enum: ['product', 'service'] },
+      unit:         { type: 'string', nullable: true, description: 'Unit/Weight display text ("1 Kg"). Only ever set on a product.' },
+      service_area: { type: 'string', nullable: true, description: 'Where the service is offered. Only ever set on a service.' },
+      price:        { type: 'number', nullable: true, description: 'The actual price. When `offer_price` is set, render THIS struck through beside it.' },
+      offer_price:  { type: 'number', nullable: true, description: 'Selling price while on offer; never above `price`. Null when not on offer — show `price` alone.' },
+      is_active:    { type: 'integer', description: '0 = hidden from the storefront (the owner\'s "In Active" tab). Public lists only ever carry 1.' },
+      ProductImages: { type: 'array', items: { $ref: '#/components/schemas/ProductImage' } },
+    },
+  },
+
   // Feedback is read-only for admins and always carries its submitter — there is
   // nobody to follow up with otherwise.
   Feedback: {

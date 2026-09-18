@@ -1,14 +1,24 @@
 const BaseRepository = require('./base.repository');
 const { Product, ProductImage } = require('../models');
 
+// Deleted rows never surface: the model is paranoid, so every read here already
+// carries `deleted_at IS NULL`.
 class ProductRepository extends BaseRepository {
   constructor() { super(Product); }
 
-  findByBusiness(businessId) {
-    return this.findMany(
-      { business_id: businessId, is_active: 1 },
-      { include: [{ model: ProductImage }], order: [['id', 'DESC']] }
-    );
+  // Owner's list: everything the business still has, active or not, so the
+  // Manage Products tabs (All / Products / Services / In Active) can be driven
+  // from one call. `type` and `is_active` narrow it.
+  findByBusiness(businessId, { type, is_active } = {}) {
+    const where = { business_id: businessId };
+    if (type !== undefined)      where.type      = type;
+    if (is_active !== undefined) where.is_active = is_active;
+    return this.findMany(where, { include: [{ model: ProductImage }], order: [['id', 'DESC']] });
+  }
+
+  // Storefront / Near Me: only what the owner has switched on.
+  findActiveByBusiness(businessId, { type } = {}) {
+    return this.findByBusiness(businessId, { type, is_active: 1 });
   }
 
   findByUidWithImages(uid) {

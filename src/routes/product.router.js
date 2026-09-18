@@ -9,14 +9,18 @@ const { createProductSchema, updateProductSchema, addImageSchema } = require('..
  * @swagger
  * tags:
  *   - name: Products
- *     description: Products under a user's own business (owner-scoped)
+ *     description: >-
+ *       Products AND services under a user's own business (owner-scoped). One resource,
+ *       told apart by `type`: a product carries `unit` (Unit/Weight), a service carries
+ *       `service_area`. `is_active` is the owner's show/hide toggle (the "In Active" tab);
+ *       DELETE is permanent.
  */
 
 /**
  * @swagger
  * /products:
  *   post:
- *     summary: Create a product under one of my businesses
+ *     summary: Create a product or service under one of my businesses
  *     tags: [Products]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -28,18 +32,30 @@ const { createProductSchema, updateProductSchema, addImageSchema } = require('..
  *             required: [business_uid, name]
  *             properties:
  *               business_uid: { type: string, format: uuid }
- *               name:         { type: string }
+ *               type:         { type: string, enum: [product, service], default: product }
+ *               name:         { type: string, maxLength: 200 }
+ *               unit:         { type: string, maxLength: 50, description: "Unit/Weight, display text (\"1 Kg\", \"500 ml\"). Products only — 400 on a service." }
+ *               service_area: { type: string, maxLength: 200, description: "Where the service is offered. Services only — 400 on a product." }
  *               description:  { type: string }
- *               price:        { type: number }
+ *               price:        { type: number, description: "The actual price. Struck through on the card when `offer_price` is set." }
+ *               offer_price:  { type: number, description: "Selling price when on offer. Requires `price` and cannot exceed it — 400 otherwise." }
  *     responses:
  *       201:
- *         description: Created product
+ *         description: Created item
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ProductResponse' } } }
+ *       400:
+ *         description: Field for the other type, or offer_price above price
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *       403:
  *         description: Business not owned by caller
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   get:
- *     summary: List products for one of my businesses
+ *     summary: List products and services for one of my businesses
+ *     description: >-
+ *       Everything the business still has — active AND inactive — newest first, so one call
+ *       drives every tab of Manage Products. `meta.counts` carries the tab badges
+ *       (`all`, `products`, `services`, `inactive`) and is always computed over the whole
+ *       business, regardless of the filters applied to `data`.
  *     tags: [Products]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
@@ -47,10 +63,35 @@ const { createProductSchema, updateProductSchema, addImageSchema } = require('..
  *         name: business_uid
  *         required: true
  *         schema: { type: string, format: uuid }
+ *       - in: query
+ *         name: type
+ *         required: false
+ *         schema: { type: string, enum: [product, service] }
+ *       - in: query
+ *         name: is_active
+ *         required: false
+ *         schema: { type: integer, enum: [0, 1] }
+ *         description: "0 = the In Active tab"
  *     responses:
  *       200:
- *         description: Array of products (with images)
- *         content: { application/json: { schema: { $ref: '#/components/schemas/ProductListResponse' } } }
+ *         description: Array of products/services (with images) plus tab counts
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/ProductListResponse'
+ *                 - type: object
+ *                   properties:
+ *                     meta:
+ *                       type: object
+ *                       properties:
+ *                         counts:
+ *                           type: object
+ *                           properties:
+ *                             all:      { type: integer, example: 8 }
+ *                             products: { type: integer, example: 6 }
+ *                             services: { type: integer, example: 2 }
+ *                             inactive: { type: integer, example: 2 }
  */
 router.post('/', authenticate, validate(createProductSchema), controller.create);
 router.get('/', authenticate, controller.list);
@@ -71,16 +112,44 @@ router.get('/', authenticate, controller.list);
  *         description: Access denied
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   patch:
- *     summary: Update a product (owner only)
+ *     summary: Update a product/service (owner only)
+ *     description: >-
+ *       Partial. `is_active: 0` hides the item from the storefront (the "In Active" tab) and
+ *       `1` shows it again — this is the toggle, not DELETE. Send `null` to clear `unit`,
+ *       `service_area`, `price` or `offer_price`. Changing `type` drops the detail that no
+ *       longer applies (`unit` on a service, `service_area` on a product) unless the body
+ *       sends it, which is a 400. `offer_price` is checked against the STORED `price`
+ *       when the body omits one of the pair.
  *     tags: [Products]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               type:         { type: string, enum: [product, service] }
+ *               name:         { type: string, maxLength: 200 }
+ *               unit:         { type: string, maxLength: 50, nullable: true }
+ *               service_area: { type: string, maxLength: 200, nullable: true }
+ *               description:  { type: string }
+ *               price:        { type: number, nullable: true }
+ *               offer_price:  { type: number, nullable: true }
+ *               is_active:    { type: integer, enum: [0, 1] }
  *     responses:
  *       200:
- *         description: Updated product
+ *         description: Updated item
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ProductResponse' } } }
+ *       400:
+ *         description: Field for the other type, or offer_price above price
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   delete:
- *     summary: Delete a product (owner only, soft delete)
+ *     summary: Delete a product/service (owner only)
+ *     description: >-
+ *       Permanent from the owner's point of view — the item leaves every list, including
+ *       "In Active", and its images are released from the storage quota. To merely hide
+ *       it, PATCH `is_active: 0` instead.
  *     tags: [Products]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
