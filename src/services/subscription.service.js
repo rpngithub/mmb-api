@@ -9,12 +9,14 @@ const catalogService    = require('./catalog.service');
 const frameService      = require('./frame.service');
 const quotaPackService  = require('./quotaPack.service');
 const notify            = require('./notification.service');
+const invoiceNumber     = require('./invoiceNumber.service');
 const dedupe            = require('../utils/dedupeKey');
-const {
-  createOrder, createSubscription, verifyWebhookSignature, verifyPaymentSignature,
-} = require('../utils/razorpayHelper');
+// Namespace import for the gateway calls the suite needs to stub (see
+// quotaPack.service for the same reason); the pure helpers are destructured.
+const razorpay          = require('../utils/razorpayHelper');
+const { verifyWebhookSignature, verifyPaymentSignature, paymentMethodFrom } = razorpay;
 const { withGst, GST_RATE } = require('../utils/gst');
-const { NotFoundError, AuthError, ForbiddenError, ConflictError } = require('../errors');
+const { NotFoundError, AuthError, ForbiddenError, ConflictError, AppError } = require('../errors');
 const { PlanBillingOption, Plan } = require('../models');
 
 function addCycle(date, cycle) {
@@ -106,6 +108,13 @@ async function getMySubscription(userId) {
   const option   = sub.PlanBillingOption;
   const { features, period } = await quota.usageSummary(userId, { sub });
 
+  // The subscription's payment method is that of its latest successful charge —
+  // there is no separate "instrument on file" to read; the mandate lives at
+  // Razorpay. Null for a trial that has not been charged yet, and for a payment
+  // confirmed only by the client callback until the webhook fills it in.
+  const lastPayment = await paymentRepo.findLatestSuccessForSubscription(sub.id);
+  const autoRenew   = !!sub.auto_renew;
+
   return {
     has_active_subscription: true,
     is_on_trial:             sub.sub_type === 'trial',
@@ -116,10 +125,20 @@ async function getMySubscription(userId) {
       uid:         sub.uid,
       status:      sub.status,
       sub_type:    sub.sub_type,
-      auto_renew:  !!sub.auto_renew,
+      auto_renew:  autoRenew,
       starts_at:   sub.starts_at,
       ends_at:     sub.ends_at,
+      // The date the next charge is taken, or null when nothing will renew —
+      // the screen then labels ends_at "Expires on" instead.
+      renews_on:   autoRenew ? sub.ends_at : null,
+      // Set once the user (or the gateway) stopped renewal; access runs to ends_at.
+      renewal_cancelled_at:   sub.cancelled_at,
+      // Whether "Cancel renewal" applies: only a live recurring mandate can be stopped.
+      cancel_renewal_allowed: autoRenew && !!sub.razorpay_subscription_id,
       amount_paid: sub.amount_paid,
+      payment_gateway:       lastPayment ? 'razorpay' : null,
+      payment_method:        lastPayment?.payment_method || null,
+      payment_method_detail: lastPayment?.payment_method_detail || null,
     },
     plan:    plan   ? { uid: plan.uid, name: plan.name, description: plan.description, plan_type: plan.plan_type } : null,
     billing: option ? { cycle: option.billing_cycle, price: option.price, currency: option.currency } : null,
@@ -182,7 +201,7 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
     }
     const totalCount = option.billing_cycle === 'annual' ? 5 : 12;
     const startAt    = Math.floor(endsAt.getTime() / 1000); // first charge at trial end
-    const rzpSub     = await createSubscription(option.razorpay_plan_id, totalCount, startAt);
+    const rzpSub     = await razorpay.createSubscription(option.razorpay_plan_id, totalCount, startAt);
     const sub        = await subRepo.create({ ...baseSub, auto_renew: 1, razorpay_subscription_id: rzpSub.id });
     return {
       type:                  'trial',
@@ -197,7 +216,7 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
   // otherwise a one-time Orders-API charge.
   if (option.razorpay_plan_id) {
     const totalCount = option.billing_cycle === 'annual' ? 5 : 12;
-    const rzpSub     = await createSubscription(option.razorpay_plan_id, totalCount);
+    const rzpSub     = await razorpay.createSubscription(option.razorpay_plan_id, totalCount);
     const sub        = await subRepo.create({ ...baseSub, auto_renew: 1, razorpay_subscription_id: rzpSub.id });
     return {
       type:                  'recurring',
@@ -208,7 +227,7 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
   }
 
   const sub   = await subRepo.create({ ...baseSub, auto_renew: 0 });
-  const order = await createOrder(totalAmount, 'INR', `sub_${Date.now()}`);
+  const order = await razorpay.createOrder(totalAmount, 'INR', `sub_${Date.now()}`);
   const payment = await paymentRepo.create({
     uid:               uuid(),
     user_id:           userId,
@@ -259,7 +278,7 @@ async function initiateAccessPass(userId) {
     amount_paid:            totalAmount,
   });
 
-  const order   = await createOrder(totalAmount, 'INR', `pass_${Date.now()}`);
+  const order   = await razorpay.createOrder(totalAmount, 'INR', `pass_${Date.now()}`);
   const payment = await paymentRepo.create({
     uid:               uuid(),
     user_id:           userId,
@@ -361,9 +380,19 @@ async function verifyPayment(userId, { razorpay_order_id, razorpay_payment_id, r
     await paymentRepo.update(payment.id, {
       status: 'success', razorpay_payment_id, razorpay_signature, paid_at: new Date(),
     });
+    await _numberInvoice(payment.id);
     await _fulfil(payment);
   }
   return { verified: true, payment_uid: payment.uid };
+}
+
+// A payment that has succeeded is a supply, and a supply gets an invoice number
+// — at that moment, so the sequence stays in date order. Numbering failing must
+// never fail the confirmation that money was received: the document endpoint
+// backfills a missing number on first request.
+async function _numberInvoice(paymentId, issuedAt = new Date()) {
+  try { await invoiceNumber.assign(paymentId, issuedAt); }
+  catch (err) { console.error('[Billing] invoice numbering failed for payment', paymentId, err.message); }
 }
 
 // ---- Webhook (source of truth) ----
@@ -389,9 +418,17 @@ async function _onOneTimePaid(event) {
 
   const payment = await paymentRepo.findByRazorpayOrderId(p.order_id);
   if (!payment) return { ignored: 'unknown order' };
-  if (payment.status === 'success') return { ok: true, idempotent: true };
+  if (payment.status === 'success') {
+    // The client callback got here first and it carries no method — the webhook
+    // is the only source for HOW it was paid, so that part is still ours to do.
+    if (!payment.payment_method && p.method) await paymentRepo.update(payment.id, paymentMethodFrom(p));
+    return { ok: true, idempotent: true };
+  }
 
-  await paymentRepo.update(payment.id, { status: 'success', razorpay_payment_id: p.id, paid_at: new Date() });
+  await paymentRepo.update(payment.id, {
+    status: 'success', razorpay_payment_id: p.id, paid_at: new Date(), ...paymentMethodFrom(p),
+  });
+  await _numberInvoice(payment.id);
   await _fulfil(payment);
   return { ok: true };
 }
@@ -440,11 +477,15 @@ async function _onSubCharged(event) {
   const amount    = (p?.amount || 0) / 100;
   const beforeTax = parseFloat((amount / (1 + GST_RATE)).toFixed(2));
   const gstAmount = parseFloat((amount - beforeTax).toFixed(2));
-  await paymentRepo.create({
+  const payment   = await paymentRepo.create({
     uid: uuid(), user_id: sub.user_id, subscription_id: sub.id, order_type: 'subscription', purchase_type: 'subscription',
     amount, amount_before_tax: beforeTax, gst_amount: gstAmount,
     status: 'success', razorpay_payment_id: p?.id, paid_at: new Date(),
+    // Razorpay's own invoice for this charge — kept for reconciliation only.
+    razorpay_invoice_id: p?.invoice_id || null,
+    ...paymentMethodFrom(p),
   });
+  await _numberInvoice(payment.id);
 
   const cycle = sub.PlanBillingOption?.billing_cycle || 'monthly';
   const base  = sub.ends_at && new Date(sub.ends_at) > new Date() ? new Date(sub.ends_at) : new Date();
@@ -465,10 +506,82 @@ async function _onSubEnded(event) {
   const s   = event.payload?.subscription?.entity;
   const sub = s && await subRepo.findByRazorpaySubscriptionId(s.id);
   if (!sub) return { ignored: 'unknown subscription' };
-  await subRepo.update(sub.id, { status: 'cancelled', cancelled_at: new Date() });
+  // A row the renewal job already expired (the user cancelled at cycle end and
+  // the timer beat the webhook) is left as it is — both are terminal, and
+  // flipping it would only churn the audit trail.
+  if (sub.status === 'cancelled' || sub.status === 'expired') return { ok: true, idempotent: true };
+  // cancelled_at was stamped when the USER asked to stop renewing; the webhook
+  // that closes the mandate at cycle end must not move it to today.
+  await subRepo.update(sub.id, { status: 'cancelled', auto_renew: 0, cancelled_at: sub.cancelled_at || new Date() });
   return { ok: true };
+}
+
+// ---- Cancel renewal ----
+
+// "Stop charging me, but let me use what I paid for." The mandate is told to
+// cancel at cycle end, so the paid term runs out naturally: the row stays
+// active with auto_renew off, the renewal job expires it at ends_at (it only
+// looks at auto_renew=0 rows), and Razorpay's own subscription.cancelled
+// arrives around the same time. There is no undo — Razorpay does not reinstate
+// a cancel-at-cycle-end — so a change of heart is a fresh subscription, and the
+// response says so.
+async function cancelRenewal(userId) {
+  const sub = await subRepo.findActiveByUser(userId);
+  if (!sub) throw new NotFoundError('No active subscription');
+
+  // One-time plans and the access pass never renew; a second click on a
+  // subscription already winding down is a no-op, not an error.
+  if (!sub.auto_renew) {
+    if (sub.cancelled_at) return _cancelRenewalResult(sub, { idempotent: true });
+    throw new ConflictError('This subscription does not auto-renew');
+  }
+  if (!sub.razorpay_subscription_id) {
+    throw new ConflictError('This subscription has no recurring mandate to cancel');
+  }
+
+  try {
+    await razorpay.cancelSubscriptionAtCycleEnd(sub.razorpay_subscription_id);
+  } catch (err) {
+    // Razorpay refuses to cancel what is already cancelled/completed/expired —
+    // which means renewal has in fact stopped, and our row should say so. Any
+    // other failure is the gateway's, and the user must not be told renewal is
+    // off while the mandate is still live.
+    const desc = String(err?.error?.description || err?.message || '');
+    if (!/cancel|completed|expired/i.test(desc)) {
+      throw new AppError('Could not stop renewal with the payment gateway; please try again', 502, 'GATEWAY_ERROR');
+    }
+  }
+
+  await subRepo.update(sub.id, { auto_renew: 0, cancelled_at: new Date() });
+
+  // Confirm it in the inbox: no further charge, access until the term ends.
+  // Keyed on the subscription row — a mandate is cancelled once — so a retry
+  // after a gateway "already cancelled" cannot post it twice.
+  const plan = await Plan.findByPk(sub.plan_id, { attributes: ['name'] });
+  notify.notify({
+    code: 'renewal_cancelled', userId,
+    variables: {
+      plan_name:    plan?.name || 'Premium',
+      access_until: new Date(sub.ends_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' }),
+    },
+    dedupeKey: dedupe.forEntity('renewal_cancelled', 'sub', sub.id),
+  });
+
+  return _cancelRenewalResult(await subRepo.findById(sub.id));
+}
+
+function _cancelRenewalResult(sub, extra = {}) {
+  return {
+    ...extra,
+    subscription_uid:     sub.uid,
+    auto_renew:           false,
+    access_until:         sub.ends_at,
+    renewal_cancelled_at: sub.cancelled_at,
+    can_resume:           false,
+  };
 }
 
 module.exports = {
   listPlans, verifyCoupon, getMySubscription, initiateSubscription, initiateAccessPass, verifyPayment, handleWebhook,
+  cancelRenewal,
 };

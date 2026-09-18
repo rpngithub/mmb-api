@@ -93,7 +93,13 @@ router.get('/plans', controller.listPlans);
  *                         auto_renew:  { type: boolean }
  *                         starts_at:   { type: string, format: date-time }
  *                         ends_at:     { type: string, format: date-time }
+ *                         renews_on:   { type: string, format: date-time, nullable: true, description: 'Next charge date (= ends_at) while auto-renewing; null when nothing will renew, in which case ends_at is the expiry' }
+ *                         renewal_cancelled_at: { type: string, format: date-time, nullable: true, description: 'Set once renewal was stopped; access continues to ends_at' }
+ *                         cancel_renewal_allowed: { type: boolean, description: 'True only for a live recurring mandate — drives the Cancel Renewal button' }
  *                         amount_paid: { type: number }
+ *                         payment_gateway:       { type: string, nullable: true, enum: [razorpay] }
+ *                         payment_method:        { type: string, nullable: true, enum: [upi, card, netbanking, wallet, emi, other], description: 'From the latest successful charge; null until the webhook reports it (or for an uncharged trial)' }
+ *                         payment_method_detail: { type: string, nullable: true, example: 'UPI · pr***@okaxis' }
  *                     plan:
  *                       type: object
  *                       nullable: true
@@ -127,6 +133,136 @@ router.get('/plans', controller.listPlans);
  *         $ref: '#/components/responses/Unauthorized'
  */
 router.get('/me', authenticate, controller.mySubscription);
+
+/**
+ * @swagger
+ * /subscriptions/me/cancel-renewal:
+ *   post:
+ *     summary: Stop the active subscription from renewing (access continues to the end of the paid term)
+ *     description: >-
+ *       Cancels the recurring mandate at Razorpay AT CYCLE END. The subscription stays active
+ *       with `auto_renew=false` until `ends_at`, then expires; no further charge is taken.
+ *       Also stops an uncharged free trial from converting. Idempotent: a subscription already
+ *       winding down returns 200 with `idempotent: true`. There is no resume — Razorpay does not
+ *       reinstate a cancelled mandate — so a change of heart is a new subscription.
+ *     tags: [Subscriptions]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Renewal stopped
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     subscription_uid:     { type: string }
+ *                     auto_renew:           { type: boolean, example: false }
+ *                     access_until:         { type: string, format: date-time }
+ *                     renewal_cancelled_at: { type: string, format: date-time }
+ *                     can_resume:           { type: boolean, example: false }
+ *                     idempotent:           { type: boolean, description: 'Present when renewal was already stopped' }
+ *       404:
+ *         description: No active subscription
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       409:
+ *         description: The subscription does not auto-renew (one-time plan / access pass)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       502:
+ *         description: The gateway refused the cancellation; nothing was changed
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.post('/me/cancel-renewal', authenticate, controller.cancelRenewal);
+
+/**
+ * @swagger
+ * /subscriptions/payments:
+ *   get:
+ *     summary: My payment history (Billing & Payments screen)
+ *     description: >-
+ *       Every payment the user started, newest first — successful, pending and failed alike.
+ *       `last_transaction` (page 1 only) is the newest SUCCESSFUL row, for the "Last transaction"
+ *       card. `documents_available` says whether the invoice/receipt endpoint will serve the row.
+ *     tags: [Subscriptions]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Payment history
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     items:
+ *                       type: array
+ *                       items: { $ref: '#/components/schemas/PaymentHistoryRow' }
+ *                     last_transaction:
+ *                       allOf: [{ $ref: '#/components/schemas/PaymentHistoryRow' }]
+ *                       nullable: true
+ *                     pagination:
+ *                       type: object
+ *                       properties:
+ *                         page: { type: integer }
+ *                         limit: { type: integer }
+ *                         total: { type: integer }
+ *                         total_pages: { type: integer }
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ */
+router.get('/payments', authenticate, controller.listPayments);
+
+/**
+ * @swagger
+ * /subscriptions/payments/{uid}/document:
+ *   get:
+ *     summary: Invoice or receipt for one successful payment (HTML)
+ *     description: >-
+ *       Returns a self-contained, print-ready HTML page — open it in a tab/webview and use the
+ *       browser's Print / Save as PDF. `invoice` is the GST tax invoice (seller & buyer GSTIN,
+ *       SAC, CGST+SGST or IGST by the buyer's billing state, coupon noted); `receipt` is the
+ *       payment acknowledgment (reference, method, date, amount). The invoice number is issued
+ *       when the payment succeeds and never changes. Buyer details come from
+ *       `PUT /users/me/billing` when set, else the account's name and contact.
+ *     tags: [Subscriptions]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema: { type: string }
+ *         description: Payment uid from the history list
+ *       - in: query
+ *         name: type
+ *         schema: { type: string, enum: [invoice, receipt], default: invoice }
+ *     responses:
+ *       200:
+ *         description: The document
+ *         content: { text/html: { schema: { type: string } } }
+ *       403:
+ *         description: Not this user's payment
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       404:
+ *         description: Payment not found
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       409:
+ *         description: Payment not successful — no document exists
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.get('/payments/:uid/document', authenticate, controller.paymentDocument);
 
 /**
  * @swagger

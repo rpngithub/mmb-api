@@ -22,6 +22,18 @@ module.exports = (sequelize) => {
     razorpay_order_id:     { type: DataTypes.STRING(100), allowNull: true },
     razorpay_payment_id:   { type: DataTypes.STRING(100), allowNull: true },
     razorpay_signature:    { type: DataTypes.STRING(500), allowNull: true },
+    // HOW it was paid, as Razorpay reports it on the captured payment. NULL until
+    // the webhook lands — the client callback carries no method. `detail` is a
+    // display string only ("UPI · pr***@okaxis", "VISA •• 4242"), never the
+    // full instrument.
+    payment_method:        { type: DataTypes.ENUM('upi', 'card', 'netbanking', 'wallet', 'emi', 'other'), allowNull: true },
+    payment_method_detail: { type: DataTypes.STRING(100), allowNull: true },
+    // Razorpay's own invoice for a recurring charge. Reconciliation only: one-time
+    // Orders never get one, so the user-facing invoice/receipt is always ours.
+    razorpay_invoice_id:   { type: DataTypes.STRING(100), allowNull: true },
+    // Our GST invoice number (MMB/<FY>/000001). Issued once, on first success,
+    // by services/invoiceNumber.service — never set from anywhere else.
+    invoice_number:        { type: DataTypes.STRING(30), allowNull: true, unique: true },
     failure_reason:        { type: DataTypes.TEXT, allowNull: true },
     paid_at:               { type: DataTypes.DATE, allowNull: true },
   }, { tableName: 'payments' });
@@ -29,6 +41,10 @@ module.exports = (sequelize) => {
   Payment.associate = (models) => {
     Payment.belongsTo(models.User,             { foreignKey: 'user_id' });
     Payment.belongsTo(models.UserSubscription, { foreignKey: 'subscription_id' });
+    // What a standalone payment bought. Each purchase writes exactly one grant /
+    // ownership row against its payment, so these are one-to-one from this side.
+    Payment.hasOne(models.UserQuotaGrant, { foreignKey: 'payment_id' });
+    Payment.hasOne(models.UserFrame,      { foreignKey: 'payment_id' });
   };
 
   return Payment;

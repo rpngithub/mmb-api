@@ -6,8 +6,8 @@ const create = async (req, res) => {
 };
 
 const list = async (req, res) => {
-  const items = await productService.listProducts(req.user.userId, req.query.business_uid);
-  res.json({ success: true, data: items });
+  const { items, counts } = await productService.listProducts(req.user.userId, req.query);
+  res.json({ success: true, data: items, meta: { counts } });
 };
 
 const getOne = async (req, res) => {

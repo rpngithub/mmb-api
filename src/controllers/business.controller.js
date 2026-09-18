@@ -59,7 +59,7 @@ const publicProfile = async (req, res) => {
 };
 
 const publicProducts = async (req, res) => {
-  const items = await businessService.getPublicProducts(req.params.uid);
+  const items = await businessService.getPublicProducts(req.params.uid, req.query);
   res.json({ success: true, data: items });
 };
 

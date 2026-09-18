@@ -139,12 +139,15 @@ router.get('/:uid/public', optionalAuth, rateLimiter.publicTiered, controller.pu
  * /businesses/{uid}/products:
  *   get:
  *     summary: Public product/service list for a business
+ *     description: "Only items the owner has switched on (`is_active` = 1). Products and services come back together; filter with `type`."
  *     tags: [Business]
  *     security: []
- *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: type, required: false, schema: { type: string, enum: [product, service] } }
  *     responses:
  *       200:
- *         description: Array of active products with images
+ *         description: Array of active products/services with images
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ProductListResponse' } } }
  *       404:
  *         description: Not found
