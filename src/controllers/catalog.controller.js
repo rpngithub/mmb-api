@@ -20,8 +20,8 @@ const faqs               = async (req, res) => send(res, await catalog.listFaqs(
 const testimonials       = async (req, res) => send(res, await catalog.listTestimonials());
 const banners            = async (req, res) => send(res, await catalog.listBanners(req.user));
 const specialEvents      = async (req, res) => {
-  const { range, events } = await specialEventService.listSpecialEvents(req.query, req.user);
-  res.json({ success: true, data: events, meta: { range } });
+  const { range, types, events } = await specialEventService.listSpecialEvents(req.query, req.user);
+  res.json({ success: true, data: events, meta: { range, types } });
 };
 const plans              = async (req, res) => send(res, await catalog.listPlans(req.query));
 

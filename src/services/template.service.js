@@ -116,6 +116,7 @@ async function listTemplates(filters = {}, viewer = null) {
   if (categoryId !== undefined) where.category_id = categoryId;
   if (TEMPLATE_TYPES.includes(filters.template_type)) where.template_type = filters.template_type;
   if (filters.is_premium !== undefined) where.is_premium = toPosInt(filters.is_premium) ? 1 : 0;
+  if (filters.is_popular !== undefined) where.is_popular = toPosInt(filters.is_popular) ? 1 : 0;
 
   // Narrow to the viewer's "Preferred Languages". Language-neutral designs
   // (language_id IS NULL — no text, or symbols only) always come through, which
@@ -191,6 +192,7 @@ async function listTemplatesForAdmin(filters = {}) {
   if (['active', 'inactive', 'draft'].includes(filters.status)) where.status = filters.status;
   if (TEMPLATE_TYPES.includes(filters.template_type)) where.template_type = filters.template_type;
   if (filters.is_premium !== undefined) where.is_premium = toPosInt(filters.is_premium) ? 1 : 0;
+  if (filters.is_popular !== undefined) where.is_popular = toPosInt(filters.is_popular) ? 1 : 0;
 
   const categoryId = toPosInt(filters.category_id);
   if (categoryId) where.category_id = categoryId;

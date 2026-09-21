@@ -474,6 +474,16 @@ async function _onSubCharged(event) {
     if (existing) return { ok: true, idempotent: true };
   }
 
+  // Razorpay sends `subscription.charged` for the FIRST payment too, alongside
+  // `subscription.activated`, and in either order. Treating that first charge
+  // as a renewal granted two cycles for one payment (activated: now+1 cycle;
+  // charged: ends_at+1 cycle — and the pending row's ends_at is already a cycle
+  // out, so charged-first doubled it just the same). A recurring row with no
+  // successful payment yet is on its first charge; a trial converts from its
+  // trial end instead, since that is where the paid days begin. Read before
+  // this charge's own row is written below.
+  const isFirstCharge = sub.sub_type !== 'trial' && !(await paymentRepo.findLatestSuccessForSubscription(sub.id));
+
   const amount    = (p?.amount || 0) / 100;
   const beforeTax = parseFloat((amount / (1 + GST_RATE)).toFixed(2));
   const gstAmount = parseFloat((amount - beforeTax).toFixed(2));
@@ -486,6 +496,14 @@ async function _onSubCharged(event) {
     ...paymentMethodFrom(p),
   });
   await _numberInvoice(payment.id);
+
+  if (isFirstCharge) {
+    // Same window `subscription.activated` sets (now + one cycle), so the two
+    // events agree whichever lands first. _activate's own guard keeps the
+    // coupon count and the "plan is active" notification to one.
+    await _activate(sub.id);
+    return { ok: true };
+  }
 
   const cycle = sub.PlanBillingOption?.billing_cycle || 'monthly';
   const base  = sub.ends_at && new Date(sub.ends_at) > new Date() ? new Date(sub.ends_at) : new Date();

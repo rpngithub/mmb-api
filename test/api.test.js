@@ -18,7 +18,7 @@ const { JWT_SECRET } = require('../src/config/jwt');
 
 const P = '/api/v1';
 let startLogId = 0;
-const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [], pageSections: [] };
+const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [], pageSections: [], specialEvents: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -30,6 +30,7 @@ after(async () => {
   if (track.faqs.length)          await models.Faq.destroy({ where: { id: track.faqs } });
   if (track.faqCategories.length) await models.FaqCategory.destroy({ where: { id: track.faqCategories } });
   if (track.testimonials.length)  await models.Testimonial.destroy({ where: { id: track.testimonials } });
+  if (track.specialEvents.length) await models.SpecialEvent.destroy({ where: { id: track.specialEvents } }); // cascades event_templates
   if (track.variants.length)     await models.Variant.destroy({ where: { id: track.variants } });        // cascades joins
   if (track.brandSeries.length)  await models.BrandSeries.destroy({ where: { id: track.brandSeries } });  // cascades its taxonomy joins
   if (track.variantBadges.length)      await models.VariantBadge.destroy({ where: { id: track.variantBadges } });
@@ -2305,6 +2306,81 @@ test('admin faq-categories: validates name and rejects case-insensitive duplicat
   assert.equal(dupe.body.error.code, 'CONFLICT');
 });
 
+// ---------- Special events: the type enum after the 043 re-cut ----------
+test('admin special-events: accepts the new types and rejects the dropped observance', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+
+  // The two new buckets round-trip; `holiday` (Public Days) is unchanged.
+  let lastUid;
+  for (const type of ['festival', 'celebration', 'holiday']) {
+    const created = await h.request('POST', `${P}/admin/special-events`, {
+      token, body: { name: `TST Event ${type} ${stamp}`, type, event_date: '11-08' },
+    });
+    assert.equal(created.status, 201, `${type}: ${JSON.stringify(created.body)}`);
+    assert.equal(created.body.data.type, type);
+    track.specialEvents.push(created.body.data.id);
+    lastUid = created.body.data.uid;
+  }
+
+  // `observance` is gone from the enum -> clean 400 from Joi, not a DB error.
+  const dropped = await h.request('POST', `${P}/admin/special-events`, {
+    token, body: { name: `TST Event observance ${stamp}`, type: 'observance', event_date: '11-08' },
+  });
+  assert.equal(dropped.status, 400);
+  assert.equal(dropped.body.error.code, 'VALIDATION_ERROR');
+
+  // Same gate on update.
+  const badUpdate = await h.request('PATCH', `${P}/admin/special-events/${lastUid}`, { token, body: { type: 'observance' } });
+  assert.equal(badUpdate.status, 400);
+  const okUpdate = await h.request('PATCH', `${P}/admin/special-events/${lastUid}`, { token, body: { type: 'awareness' } });
+  assert.equal(okUpdate.status, 200);
+  assert.equal(okUpdate.body.data.type, 'awareness');
+});
+
+// ---------- Public /special-events: filter by type, range=year ----------
+test('catalog special-events: filters by type (single or comma list) over a year window', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+  // Recurring, so they land in the rolling year exactly once whatever today is.
+  const mine = {};
+  for (const type of ['festival', 'celebration', 'holiday']) {
+    const created = await h.request('POST', `${P}/admin/special-events`, {
+      token, body: { name: `TST Filter ${type} ${stamp}`, type, event_date: '03-15' },
+    });
+    assert.equal(created.status, 201);
+    track.specialEvents.push(created.body.data.id);
+    mine[type] = created.body.data.id;
+  }
+  const idsOf = (res) => new Set(res.body.data.map((e) => e.id));
+
+  // Single type: only festivals, and meta echoes the filter.
+  const fest = await h.request('GET', `${P}/special-events?type=festival&range=year`);
+  assert.equal(fest.status, 200);
+  assert.deepEqual(fest.body.meta.types, ['festival']);
+  assert.ok(fest.body.data.every((e) => e.type === 'festival'), 'only festivals');
+  assert.ok(idsOf(fest).has(mine.festival) && !idsOf(fest).has(mine.celebration));
+
+  // Comma list narrows to the union.
+  const two = await h.request('GET', `${P}/special-events?type=festival,holiday&range=year`);
+  assert.equal(two.status, 200);
+  assert.ok(two.body.data.every((e) => e.type === 'festival' || e.type === 'holiday'));
+  assert.ok(idsOf(two).has(mine.festival) && idsOf(two).has(mine.holiday) && !idsOf(two).has(mine.celebration));
+
+  // No filter: meta.types is null and the window is 365 days.
+  const all = await h.request('GET', `${P}/special-events?range=year`);
+  assert.equal(all.status, 200);
+  assert.equal(all.body.meta.types, null);
+  const days = (new Date(all.body.meta.range.to) - new Date(all.body.meta.range.from)) / 86400000 + 1;
+  assert.equal(days, 365);
+  assert.ok(idsOf(all).has(mine.celebration));
+
+  // Unknown type -> 400, not a silent empty list.
+  const bad = await h.request('GET', `${P}/special-events?type=observance`);
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error.code, 'VALIDATION_ERROR');
+});
+
 // ---------- FAQs: validation + nested category in responses ----------
 test('admin faqs: validates required fields and nests its category', async () => {
   const token = h.adminToken(['*']);
@@ -2453,6 +2529,50 @@ test('admin template list carries tag/size/industry counts and bundle flags', as
   assert.equal(Number(row.has_thumbnail), 0);
   assert.equal(row.content, undefined, 'heavy content blob still excluded from list rows');
   assert.equal(typeof list.body.meta.total, 'number');
+});
+
+// ---------- Templates: is_popular flag + filter ----------
+test('templates: is_popular is admin-settable and filters both the public and admin lists', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+
+  // Defaults to 0; only 0/1 is accepted.
+  const created = await h.request('POST', `${P}/admin/templates`, { token, body: { name: `TST Popular ${stamp}` } });
+  assert.equal(created.status, 201);
+  track.templates.push(created.body.data.id);
+  assert.equal(Number(created.body.data.is_popular), 0, 'defaults to not popular');
+
+  const bad = await h.request('PATCH', `${P}/admin/templates/${created.body.data.uid}`, { token, body: { is_popular: 2 } });
+  assert.equal(bad.status, 400);
+
+  const flagged = await h.request('PATCH', `${P}/admin/templates/${created.body.data.uid}`, { token, body: { is_popular: 1 } });
+  assert.equal(flagged.status, 200, JSON.stringify(flagged.body));
+  assert.equal(Number(flagged.body.data.is_popular), 1);
+
+  // Two active rows in the same category, one popular, one not.
+  const pop = await Template.create({ uid: uuid(), name: `TST Pop Yes ${stamp}`, content: '{"c":1}', status: 'active', category_id: 2, is_popular: 1 });
+  const not = await Template.create({ uid: uuid(), name: `TST Pop No ${stamp}`,  content: '{"c":1}', status: 'active', category_id: 2, is_popular: 0 });
+  track.templates.push(pop.id, not.id);
+
+  const uids = (r) => new Set(r.body.data.map((t) => t.uid));
+
+  const pubAll = await h.request('GET', `${P}/templates?category_id=2&limit=100`);
+  assert.equal(pubAll.status, 200);
+  assert.ok(uids(pubAll).has(pop.uid) && uids(pubAll).has(not.uid), 'no filter -> both listed');
+  const pubRow = pubAll.body.data.find((t) => t.uid === pop.uid);
+  assert.equal(Number(pubRow.is_popular), 1, 'flag is exposed on public rows');
+
+  const pubPop = await h.request('GET', `${P}/templates?category_id=2&is_popular=1&limit=100`);
+  assert.ok(uids(pubPop).has(pop.uid), 'is_popular=1 keeps the popular one');
+  assert.ok(!uids(pubPop).has(not.uid), 'is_popular=1 drops the other');
+  assert.ok(pubPop.body.data.every((t) => Number(t.is_popular) === 1));
+
+  const pubNot = await h.request('GET', `${P}/templates?category_id=2&is_popular=0&limit=100`);
+  assert.ok(!uids(pubNot).has(pop.uid) && uids(pubNot).has(not.uid), 'is_popular=0 is the complement');
+
+  const admPop = await h.request('GET', `${P}/admin/templates?search=${encodeURIComponent(`TST Pop`)}&is_popular=1&limit=100`, { token });
+  assert.equal(admPop.status, 200);
+  assert.ok(uids(admPop).has(pop.uid) && !uids(admPop).has(not.uid), 'admin list honours is_popular=1');
 });
 
 // ---------- Templates: relations naming ----------
@@ -5863,6 +5983,61 @@ test('a subscription.charged webhook records the renewal payment and extends the
 
   const replay = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
   assert.equal(replay.body.idempotent, true);
+});
+
+test('the first charge of a recurring subscription grants one cycle, whichever webhook lands first', async () => {
+  // Regression: Razorpay fires subscription.activated AND subscription.charged
+  // for the first payment. charged was treated as a renewal and extended
+  // ends_at by a further cycle, so a 1-month signup showed a renewal date two
+  // months out. Only a later charge (one with a successful payment already on
+  // the row) is a renewal.
+  const send = async (evt) => {
+    const { raw, sig } = signWebhook(evt);
+    const r = await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+    assert.equal(r.status, 200);
+    return r.body;
+  };
+  const mkRecurring = async (u) => UserSubscription.create({
+    uid: uuid(), user_id: u.id, plan_id: 2, plan_billing_option_id: 1, sub_type: 'regular', status: 'pending',
+    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), auto_renew: 1, amount_paid: 352.82,
+    razorpay_subscription_id: `sub_first_${u.id}`,
+  });
+  const activated = (sub) => ({ event: 'subscription.activated', payload: { subscription: { entity: { id: sub.razorpay_subscription_id } } } });
+  const charged   = (sub, payId) => ({
+    event: 'subscription.charged',
+    payload: { subscription: { entity: { id: sub.razorpay_subscription_id } }, payment: { entity: { id: payId, amount: 35282 } } },
+  });
+  // One calendar month, with a day's slack for the seconds between the two events.
+  const oneCycleOut = (endsAt) => {
+    const days = (new Date(endsAt) - Date.now()) / 864e5;
+    assert.ok(days >= 27 && days <= 32, `ends_at is one month out, got ${days.toFixed(1)} days`);
+  };
+
+  // activated first, then charged — the order seen on staging.
+  const u1 = await mkUser('FirstChargeA');
+  const s1 = await mkRecurring(u1);
+  await send(activated(s1));
+  await send(charged(s1, `pay_first_a_${u1.id}`));
+  let after = await s1.reload();
+  assert.equal(after.status, 'active');
+  oneCycleOut(after.ends_at);
+  assert.ok(await Payment.findOne({ where: { razorpay_payment_id: `pay_first_a_${u1.id}` } }), 'the first charge is still recorded');
+
+  // charged first, then activated.
+  const u2 = await mkUser('FirstChargeB');
+  const s2 = await mkRecurring(u2);
+  await send(charged(s2, `pay_first_b_${u2.id}`));
+  assert.equal((await send(activated(s2))).idempotent, true);
+  after = await s2.reload();
+  assert.equal(after.status, 'active');
+  oneCycleOut(after.ends_at);
+
+  // A second charge IS a renewal: it extends from the current end date.
+  const firstEnd = new Date(after.ends_at);
+  await send(charged(s2, `pay_renew_b_${u2.id}`));
+  after = await s2.reload();
+  const extendedDays = (new Date(after.ends_at) - firstEnd) / 864e5;
+  assert.ok(extendedDays >= 27 && extendedDays <= 32, `renewal adds one month to ends_at, got ${extendedDays.toFixed(1)} days`);
 });
 
 // ---------- Billing & Payments: method capture, history, documents, cancel renewal ----------
