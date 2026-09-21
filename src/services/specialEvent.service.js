@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { SpecialEvent, Template } = require('../models');
 const { ValidationError } = require('../errors');
+const { SPECIAL_EVENT_TYPES } = require('../constants/specialEventTypes');
 
 const MAX_WINDOW_DAYS = 366; // guard against unbounded ranges
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -24,7 +25,11 @@ function enumerateDates(from, to) {
 }
 
 // Resolve the requested window. Priority: explicit from/to > range shortcut >
-// default (this week). `range=month` = the calendar month containing `from`.
+// default (this week). `range=month` = the calendar month containing today;
+// `range=year` = the rolling next 365 days, which is the "browse a type"
+// window: every recurring event lands exactly once and upcoming one-offs
+// come along, so `?type=festival&range=year` is the full festival list in
+// upcoming order.
 function resolveWindow({ from, to, range } = {}) {
   if (from || to) {
     const f = from || todayISO();
@@ -40,11 +45,23 @@ function resolveWindow({ from, to, range } = {}) {
     const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
     return { from: first, to: last };
   }
+  if (range === 'year') return { from: base, to: addDaysISO(base, 364) };
   return { from: base, to: addDaysISO(base, 6) }; // default: this week (rolling 7 days)
+}
+
+// `?type=festival` or `?type=festival,holiday`. Unknown values are a 400 rather
+// than a silent empty list, so a stale FE constant shows up in development.
+function resolveTypes(type) {
+  if (type === undefined || type === '') return null;
+  const types = [...new Set(String(type).split(',').map((t) => t.trim()).filter(Boolean))];
+  const bad = types.filter((t) => !SPECIAL_EVENT_TYPES.includes(t));
+  if (bad.length) throw new ValidationError(`unknown type: ${bad.join(', ')} (expected one of ${SPECIAL_EVENT_TYPES.join(', ')})`);
+  return types.length ? types : null;
 }
 
 async function listSpecialEvents(query = {}, viewer = null) {
   const { from, to } = resolveWindow(query);
+  const types = resolveTypes(query.type);
   const dates   = enumerateDates(from, to);
   const mmddSet = [...new Set(dates.map((d) => d.slice(5)))];           // ["06-14", ...]
   const mmddToDate = new Map();                                         // "06-14" -> "2026-06-14"
@@ -53,6 +70,7 @@ async function listSpecialEvents(query = {}, viewer = null) {
   const rows = await SpecialEvent.findAll({
     where: {
       is_active: 1,
+      ...(types ? { type: { [Op.in]: types } } : {}),
       [Op.or]: [
         { event_date: { [Op.in]: mmddSet } },          // recurring annual (MM-DD)
         { full_date:  { [Op.between]: [from, to] } },   // one-off concrete date
@@ -81,7 +99,7 @@ async function listSpecialEvents(query = {}, viewer = null) {
   events.sort((a, b) =>
     String(a.occurs_on).localeCompare(String(b.occurs_on)) || a.name.localeCompare(b.name));
 
-  return { range: { from, to }, events };
+  return { range: { from, to }, types, events };
 }
 
 module.exports = { listSpecialEvents };

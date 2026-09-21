@@ -13,7 +13,11 @@ class ProductRepository extends BaseRepository {
     const where = { business_id: businessId };
     if (type !== undefined)      where.type      = type;
     if (is_active !== undefined) where.is_active = is_active;
-    return this.findMany(where, { include: [{ model: ProductImage }], order: [['id', 'DESC']] });
+    // Images in display_order so ProductImages[0] is the card image.
+    return this.findMany(where, {
+      include: [{ model: ProductImage }],
+      order:   [['id', 'DESC'], [ProductImage, 'display_order', 'ASC'], [ProductImage, 'id', 'ASC']],
+    });
   }
 
   // Storefront / Near Me: only what the owner has switched on.
@@ -22,7 +26,10 @@ class ProductRepository extends BaseRepository {
   }
 
   findByUidWithImages(uid) {
-    return this.findByUid(uid, { include: [{ model: ProductImage }] });
+    return this.findByUid(uid, {
+      include: [{ model: ProductImage }],
+      order:   [[ProductImage, 'display_order', 'ASC'], [ProductImage, 'id', 'ASC']],
+    });
   }
 }
 

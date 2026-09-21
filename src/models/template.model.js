@@ -13,6 +13,8 @@ module.exports = (sequelize) => {
     content:          { type: DataTypes.TEXT('long'), allowNull: true },
     template_type:    { type: DataTypes.ENUM('image', 'video', 'animated'), defaultValue: 'image' },
     is_premium:       { type: DataTypes.TINYINT, defaultValue: 0 },
+    // Curated "Popular" badge set by admins — independent of trending_score/counters.
+    is_popular:       { type: DataTypes.TINYINT, allowNull: false, defaultValue: 0 },
     trending_score:   { type: DataTypes.FLOAT, defaultValue: 0 },
     views_count:      { type: DataTypes.INTEGER, defaultValue: 0 },
     downloads_count:  { type: DataTypes.INTEGER, defaultValue: 0 },

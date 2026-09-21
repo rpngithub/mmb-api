@@ -3504,6 +3504,16 @@
                     "disabled": true
                   },
                   {
+                    "key": "is_premium",
+                    "value": "0",
+                    "disabled": true
+                  },
+                  {
+                    "key": "is_popular",
+                    "value": "1",
+                    "disabled": true
+                  },
+                  {
                     "key": "category_id",
                     "value": "1",
                     "disabled": true
@@ -4443,10 +4453,15 @@
                     "key": "to",
                     "value": "2026-12-31",
                     "disabled": true
+                  },
+                  {
+                    "key": "type",
+                    "value": "festival,holiday",
+                    "disabled": true
                   }
                 ]
               },
-              "description": "Active events falling in a date window, each with `occurs_on` and its active `Templates`. Recurring events match on month-day, one-offs on `full_date`. Default window is a rolling week; use `range=month` or explicit `from`/`to`. The window is echoed in `meta.range`.",
+              "description": "Active events falling in a date window, each with `occurs_on` and its active `Templates`. Recurring events match on month-day, one-offs on `full_date`. Default window is a rolling week; use `range=month`, `range=year` (rolling 365 days) or explicit `from`/`to`. The window is echoed in `meta.range`. `type` narrows to one or more of holiday (Public Days) | festival | celebration | awareness | custom, comma-separated; `type=festival&range=year` is the full upcoming festival list. Applied filter echoed in `meta.types`.",
               "auth": {
                 "type": "noauth"
               }

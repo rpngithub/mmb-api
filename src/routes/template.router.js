@@ -70,6 +70,14 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *         name: template_type
  *         schema: { type: string, enum: [image, video, animated] }
  *       - in: query
+ *         name: is_premium
+ *         description: "1 = premium only, 0 = free only; omit for both."
+ *         schema: { type: integer, enum: [0, 1] }
+ *       - in: query
+ *         name: is_popular
+ *         description: "1 = only templates admins have flagged Popular, 0 = only the rest; omit for both."
+ *         schema: { type: integer, enum: [0, 1] }
+ *       - in: query
  *         name: limit
  *         schema: { type: integer, default: 30, maximum: 100 }
  *       - in: query

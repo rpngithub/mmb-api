@@ -14,6 +14,7 @@ const createTemplateSchema = Joi.object({
   language_id:   Joi.number().integer().allow(null).optional(),
   template_type: Joi.string().valid(...TEMPLATE_TYPES).optional(),
   is_premium:    Joi.number().valid(0, 1).optional(),
+  is_popular:    Joi.number().valid(0, 1).optional(),
   status:        Joi.string().valid(...STATUSES).optional(),
 });
 
@@ -26,6 +27,7 @@ const updateTemplateSchema = Joi.object({
   language_id:   Joi.number().integer().allow(null).optional(),
   template_type: Joi.string().valid(...TEMPLATE_TYPES).optional(),
   is_premium:    Joi.number().valid(0, 1).optional(),
+  is_popular:    Joi.number().valid(0, 1).optional(),
   status:        Joi.string().valid(...STATUSES).optional(),
 }).min(1);
 

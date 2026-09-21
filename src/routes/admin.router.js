@@ -619,6 +619,8 @@ router.use('/roles', adminCrud({
  *       - { in: query, name: size_id,              schema: { type: integer } }
  *       - { in: query, name: tags,                 schema: { type: string }, description: Comma-separated tag ids (ANY) }
  *       - { in: query, name: template_type,        schema: { type: string, enum: [image, video, animated] } }
+ *       - { in: query, name: is_premium,           schema: { type: integer, enum: [0, 1] } }
+ *       - { in: query, name: is_popular,           schema: { type: integer, enum: [0, 1] }, description: "1 = flagged Popular, 0 = not; omit for both" }
  *       - { in: query, name: limit,                schema: { type: integer, default: 30, maximum: 100 } }
  *       - { in: query, name: offset,               schema: { type: integer, default: 0 } }
  *     responses:

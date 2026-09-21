@@ -541,25 +541,34 @@ router.get('/banners', controller.banners);
  * @swagger
  * /special-events:
  *   get:
- *     summary: List special events occurring in a date window, with their templates
+ *     summary: List special events occurring in a date window, optionally by type, with their templates
  *     description: >-
  *       Returns active events that fall within the window — recurring events matched on month-day
  *       (so a Dec→Jan window correctly surfaces Christmas and New Year), one-offs on full_date.
  *       Each event includes an `occurs_on` concrete date (for per-day grouping) and its active
  *       `Templates` (premium ones marked `is_locked`, content withheld). The window is `meta.range`.
- *       Default window is this week (rolling 7 days); use `range=month` or explicit `from`/`to`.
+ *       Default window is this week (rolling 7 days); use `range=month`, `range=year` (rolling
+ *       next 365 days) or explicit `from`/`to`. `type` narrows to one or more event types
+ *       (comma-separated); `type=festival&range=year` is the full upcoming festival list.
+ *       `meta.types` echoes the applied filter (null when unfiltered).
  *     tags: [Catalog]
  *     security: []
  *     parameters:
  *       - { in: query, name: from,  schema: { type: string, format: date }, description: Window start (YYYY-MM-DD) }
  *       - { in: query, name: to,    schema: { type: string, format: date }, description: Window end (YYYY-MM-DD) }
- *       - { in: query, name: range, schema: { type: string, enum: [week, month] }, description: Shortcut when from/to omitted (default week) }
+ *       - { in: query, name: range, schema: { type: string, enum: [week, month, year] }, description: Shortcut when from/to omitted (default week) }
+ *       - in: query
+ *         name: type
+ *         schema: { type: string, example: "festival,holiday" }
+ *         description: >-
+ *           Event type(s), comma-separated. One of holiday (Public Days), festival, celebration,
+ *           awareness, custom. Omit for all types.
  *     responses:
  *       200:
- *         description: Events in the window (each with occurs_on + Templates); meta.range echoes the window
+ *         description: Events in the window (each with occurs_on + Templates); meta.range echoes the window, meta.types the type filter
  *         content: { application/json: { schema: { $ref: '#/components/schemas/SpecialEventListResponse' } } }
  *       400:
- *         description: Invalid from/to
+ *         description: Invalid from/to, or an unknown type
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.get('/special-events', controller.specialEvents);

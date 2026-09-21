@@ -1,4 +1,5 @@
 const Joi = require('joi');
+const { SPECIAL_EVENT_TYPES } = require('../constants/specialEventTypes');
 
 // Recurring events store month-day "MM-DD" (e.g. "12-25"); one-offs store a
 // concrete "YYYY-MM-DD". The public /special-events matching keys off these
@@ -11,7 +12,7 @@ const fields = {
   description:      Joi.string().allow('').optional(),
   thumbnail_s3_key: Joi.string().max(500).allow(null, '').optional(),
   banner_s3_key:    Joi.string().max(500).allow(null, '').optional(),
-  type:         Joi.string().valid('holiday', 'observance', 'awareness', 'custom'),
+  type:         Joi.string().valid(...SPECIAL_EVENT_TYPES),
   event_date:   Joi.string().pattern(MMDD).message('event_date must be in MM-DD format (e.g. 12-25)'),
   full_date:    Joi.string().pattern(ISO_DATE).message('full_date must be in YYYY-MM-DD format'),
   is_recurring: Joi.number().valid(0, 1),
