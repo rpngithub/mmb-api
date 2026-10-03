@@ -49,6 +49,8 @@ const templatePublish = require('../services/templatePublish');
 const framePublish    = require('../services/framePublish');
 const quotaPackService = require('../services/quotaPack.service');
 const couponRules     = require('../services/couponRules');
+const planRules       = require('../services/planRules');
+const quotaMeters     = require('../constants/quotaMeters');
 const { createAppSettingSchema, updateAppSettingSchema } = require('../validators/appSetting.validator');
 const {
   createFaqCategorySchema, updateFaqCategorySchema,
@@ -75,6 +77,7 @@ const {
   createAssetCategorySchema, updateAssetCategorySchema, setAssetTagsSchema,
 } = require('../validators/asset.validator');
 const {
+  createFamilySchema, updateFamilySchema, moveTemplateSchema, mergeFamilySchema,
   createTemplateSchema, updateTemplateSchema, setTemplateRelationsSchema,
   createTemplateSizeSchema, updateTemplateSizeSchema,
 } = require('../validators/template.validator');
@@ -555,9 +558,13 @@ router.use('/roles', adminCrud({
  *   post:
  *     summary: "Create (requires <resource>.create; audit-logged)"
  *     description: >-
- *       Templates specifically: a new template is always a draft. `status: active` is rejected
- *       here because the bundle and thumbnail are written by the bundle flow, which needs the
- *       uid this call returns — see the publish gate on PATCH.
+ *       Templates specifically: a template is one VERSION of a design (template family) — one
+ *       language × size. Create takes `family_id`, `language_id` (null = text-free) and
+ *       `size_id`; `name` defaults to the family's. A new version is always a draft:
+ *       `status: active` is rejected here because the bundle and thumbnail are written by the
+ *       bundle flow, which needs the uid this call returns — see the publish gate on PATCH.
+ *       409 when the family already has a version in that language and size; 400 when a
+ *       text-free version would join a family with languages, or vice versa.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
@@ -565,8 +572,9 @@ router.use('/roles', adminCrud({
  *       201:
  *         description: Created record
  *         content: { application/json: { schema: { $ref: '#/components/schemas/TemplateAdminResponse' } } }
- *       400: { description: "Validation error (templates: creating straight into `active`)", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+ *       400: { description: "Validation error (templates: creating straight into `active`, or mixing text-free and language versions)", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
  *       403: { description: Missing permission }
+ *       409: { description: "Templates: the family already has a version in that language and size", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
  * /admin/templates/{id}:
  *   get:
  *     summary: "Get one by id/uid (requires <resource>.read)"
@@ -577,13 +585,15 @@ router.use('/roles', adminCrud({
  *   patch:
  *     summary: "Update (requires <resource>.update; audit-logged)"
  *     description: >-
- *       Templates specifically — **publish gate**: setting `status: active` is rejected with 400
- *       `VALIDATION_ERROR` unless the template has a bundle (`content`), a `thumbnail_s3_key`,
- *       a `category_id` **or** at least one industry, at least one size and at least one tag.
- *       Each unmet requirement is one `error.details[]` entry keyed by `field`
- *       (`content` · `thumbnail_s3_key` · `category_id` · `size_ids` · `tag_ids` · `name`).
- *       Moving back to `draft`/`inactive` is never gated, and editing a template that is
- *       already `active` does not re-run the check.
+ *       Templates (versions) specifically — **publish gate**: setting `status: active` is
+ *       rejected with 400 `VALIDATION_ERROR` unless the version has a bundle (`content`), a
+ *       `thumbnail_s3_key` and a `size_id`; each unmet requirement is one `error.details[]`
+ *       entry keyed by `field`. Category, industries and tags belong to the family and are
+ *       gated there (see /admin/template-families). Moving back to `draft`/`inactive` is never
+ *       gated. If a change (unpublish, delete, new size or language) leaves a LIVE family
+ *       without an active English (or text-free) version in any size, the family
+ *       goes back to `draft` automatically. A version changes family only via
+ *       `POST /admin/templates/{uid}/move`.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
@@ -597,15 +607,24 @@ router.use('/roles', adminCrud({
  *     parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
  *     responses: { 200: { description: Deleted } }
  */
-// Dedicated admin template list — paginated + filterable, sees every status, and
-// drops the heavy `content` blob. Registered before the generic /templates mount
-// so it overrides only the list GET; create/update/delete and GET /:uid (full
-// content, any status) still come from the generic CRUD factory below.
+// Dedicated admin lists — paginated + filterable, see every status, and drop the heavy
+// `content` blob. Registered before the generic mounts so they override only the list
+// GET; create/update/delete and GET /:uid still come from the CRUD factory below.
 /**
  * @swagger
- * /admin/templates:
+ * /admin/template-families:
  *   get:
- *     summary: List templates for admin (all statuses, paginated, filterable)
+ *     summary: List designs (template families) for admin — all statuses, paginated, filterable
+ *     description: >-
+ *       A design owns everything its versions share: name (unique), category, industries, tags,
+ *       variants, special events, `template_type`, `is_premium`, `is_popular`, status and the
+ *       counters. Create/update/delete use the generic CRUD at /admin/template-families (a new
+ *       family is always a draft). **Publish gate** (PATCH `status: active`): a category or an
+ *       industry, at least one tag, and an ACTIVE English version — or a text-free one, for a
+ *       text-free family — in ANY size. The default size (`default_template_size` app setting) is
+ *       not required, since some designs exist in one format only (YouTube thumbnail, WhatsApp
+ *       status); the catalogue merely prefers it when picking the version a card shows. Unmet requirements come back as `error.details[]` keyed by `field`
+ *       (`name` · `category_id` · `tag_ids` · `versions`).
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
@@ -616,23 +635,111 @@ router.use('/roles', adminCrud({
  *       - { in: query, name: business_category_id, deprecated: true, schema: { type: integer }, description: "Deprecated alias of industry_id" }
  *       - { in: query, name: variant_id,           schema: { type: integer } }
  *       - { in: query, name: theme_id,             deprecated: true, schema: { type: integer }, description: "Deprecated alias of variant_id" }
- *       - { in: query, name: size_id,              schema: { type: integer } }
  *       - { in: query, name: tags,                 schema: { type: string }, description: Comma-separated tag ids (ANY) }
  *       - { in: query, name: template_type,        schema: { type: string, enum: [image, video, animated] } }
  *       - { in: query, name: is_premium,           schema: { type: integer, enum: [0, 1] } }
- *       - { in: query, name: is_popular,           schema: { type: integer, enum: [0, 1] }, description: "1 = flagged Popular, 0 = not; omit for both" }
+ *       - { in: query, name: is_popular,           schema: { type: integer, enum: [0, 1] } }
+ *       - { in: query, name: single_version,       schema: { type: integer, enum: [1] }, description: "Only families with exactly one version — candidates for merging after the migration" }
+ *       - { in: query, name: missing_default_size, schema: { type: integer, enum: [1] }, description: "Only families with no version in the default size (e.g. after the setting changed)" }
  *       - { in: query, name: limit,                schema: { type: integer, default: 30, maximum: 100 } }
  *       - { in: query, name: offset,               schema: { type: integer, default: 0 } }
  *     responses:
  *       200:
  *         description: >-
- *           Paged templates (meta.total); `content` excluded from list rows. Each row carries
- *           the completeness signals `tag_count`, `size_count`, `industry_count`, `has_content`
- *           and `has_thumbnail` — the same requirements the publish gate enforces, so an
- *           "incomplete" column needs no extra request per row.
+ *           Paged families (meta.total). Each row carries `version_count`, `active_version_count`,
+ *           `tag_count`, `industry_count`, the `languages` and `sizes` it covers, `text_free`, a
+ *           `thumbnail_s3_key` (the English/text-free default-size version's when there is one)
+ *           and `readiness` — the publish gate's unmet requirements (empty = publishable).
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/TemplateFamilyListResponse' } } }
+ *       403: { description: Missing templates.read }
+ *   post:
+ *     summary: Create a design (template family) — generic CRUD; requires templates.create
+ *     description: >-
+ *       Always created as a `draft`: with no versions it cannot meet the publish gate, so
+ *       `status: active` is a 400. Then add versions with `POST /admin/templates` and set the
+ *       design's tags/industries/variants with `PUT /admin/template-families/{uid}/relations`.
+ *       `name` is unique (case-insensitive, 409).
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name]
+ *             properties:
+ *               name:          { type: string, maxLength: 200 }
+ *               category_id:   { type: integer, nullable: true }
+ *               template_type: { type: string, enum: [image, video, animated] }
+ *               is_premium:    { type: integer, enum: [0, 1] }
+ *               is_popular:    { type: integer, enum: [0, 1] }
+ *     responses:
+ *       201:
+ *         description: Created design
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/TemplateFamilyResponse' } } }
+ *       400: { description: "Validation error (incl. creating straight into `active`)", content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+ *       409: { description: Name already taken, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+ * /admin/template-families/{id}:
+ *   get:
+ *     summary: Get one design by id/uid (requires templates.read)
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+ *     responses:
+ *       200:
+ *         description: Design
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/TemplateFamilyResponse' } } }
+ *       404: { description: Not found }
+ *   patch:
+ *     summary: Update a design (requires templates.update; audit-logged)
+ *     description: >-
+ *       Any of `name`, `category_id`, `template_type`, `is_premium`, `is_popular`, `status`.
+ *       **Publish gate** on `status: active`: a category or an industry, at least one tag, and
+ *       an ACTIVE English version — or a text-free one, for a text-free design — in the default
+ *       size. Each unmet requirement is one `error.details[]` entry keyed by `field`
+ *       (`name` · `category_id` · `tag_ids` · `versions`). Changes here apply to every version.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+ *     responses:
+ *       200:
+ *         description: Updated design
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/TemplateFamilyResponse' } } }
+ *       400: { description: Publishing an incomplete design, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+ *   delete:
+ *     summary: Delete a design (requires templates.delete; audit-logged)
+ *     description: >-
+ *       Permanent, and **deletes every version of the design** with it (database cascade).
+ *       To retire a design but keep its history, PATCH `status: inactive`; to fold it into
+ *       another, use `POST /admin/template-families/{uid}/merge`.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: string } }]
+ *     responses: { 200: { description: Deleted } }
+ * /admin/templates:
+ *   get:
+ *     summary: List template VERSIONS for admin (all statuses, paginated, filterable)
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: family_uid,  schema: { type: string, format: uuid }, description: "One design's versions (the family screen's grid)" }
+ *       - { in: query, name: family_id,   schema: { type: integer } }
+ *       - { in: query, name: status,      schema: { type: string, enum: [active, inactive, draft] }, description: Omit to list all statuses }
+ *       - { in: query, name: language_id, schema: { type: string }, description: "Language id, or `null` for text-free versions" }
+ *       - { in: query, name: size_id,     schema: { type: integer } }
+ *       - { in: query, name: search,      schema: { type: string }, description: Version name contains }
+ *       - { in: query, name: limit,       schema: { type: integer, default: 30, maximum: 100 } }
+ *       - { in: query, name: offset,      schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: >-
+ *           Paged versions (meta.total); `content` excluded. Each row carries `family`, `Language`,
+ *           `TemplateSize` and the completeness flags `has_content` / `has_thumbnail`.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/TemplateAdminListResponse' } } }
  *       403: { description: Missing templates.read }
  */
+router.get('/template-families', authenticate, authorizeAdmin('templates.read'), controller.listTemplateFamilies);
 router.get('/templates', authenticate, authorizeAdmin('templates.read'), controller.listTemplates);
 
 // Same override for frames: the generic factory's list has no paging or search,
@@ -816,6 +923,9 @@ router.delete('/quota-grants/:uid', authenticate, authorizeAdmin('quota_packs.de
  * /admin/templates/{uid}/bundle/reset:
  *   post:
  *     summary: Delete all objects under templates/{uid}/ for a clean re-upload
+ *     description: >-
+ *       409 while another version still uses these files — versions cloned by migration 045
+ *       (one per extra size of a multi-size template) point at their original's bundle.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -825,12 +935,12 @@ router.delete('/quota-grants/:uid', authenticate, authorizeAdmin('quota_packs.de
 router.post('/templates/:uid/bundle/confirm', authenticate, authorizeAdmin('templates.update'), validate(bundleConfirmSchema), controller.confirmTemplateBundle);
 router.post('/templates/:uid/bundle/reset',   authenticate, authorizeAdmin('templates.update'), controller.resetTemplateBundle);
 
-// ---- Template relations (unified M2M assignment: tags / sizes / industries / variants) ----
+// ---- Template family relations (unified M2M assignment: tags / industries / variants) ----
 /**
  * @swagger
- * /admin/templates/{uid}/relations:
+ * /admin/template-families/{uid}/relations:
  *   get:
- *     summary: Read a template's relations (tags, sizes, variants, industries)
+ *     summary: Read a design's relations (tags, variants, industries)
  *     description: >-
  *       Industries are returned as `Industries` (matching the `industry_ids` key the PUT takes).
  *       `BusinessCategories` is returned as a deprecated duplicate of the same list.
@@ -838,9 +948,10 @@ router.post('/templates/:uid/bundle/reset',   authenticate, authorizeAdmin('temp
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
- *       200: { description: "Template with Tags, TemplateSizes, Variants, Industries (+ deprecated BusinessCategories)" }
+ *       200: { description: "Family with Tags, Variants, Industries (+ deprecated BusinessCategories)" }
  *   put:
- *     summary: Set a template's relations (any subset; each provided key is a full replace)
+ *     summary: Set a design's relations (any subset; each provided key is a full replace)
+ *     description: "`size_ids` is rejected with 400: sizes are per version now (`size_id`)."
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -852,16 +963,87 @@ router.post('/templates/:uid/bundle/reset',   authenticate, authorizeAdmin('temp
  *             type: object
  *             properties:
  *               tag_ids:               { type: array, items: { type: integer } }
- *               size_ids:              { type: array, items: { type: integer } }
  *               industry_ids:          { type: array, items: { type: integer } }
  *               business_category_ids: { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of industry_ids" }
  *               variant_ids:           { type: array, items: { type: integer } }
  *               theme_ids:             { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of variant_ids" }
  *     responses:
- *       200: { description: Updated template with its relations }
+ *       200: { description: Updated family with its relations }
+ * /admin/templates/{uid}/relations:
+ *   get:
+ *     summary: "[Deprecated] Read the relations of a version's family"
+ *     deprecated: true
+ *     description: "Same as GET /admin/template-families/{uid}/relations, addressed by a VERSION uid."
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: "The version's family with Tags, Variants, Industries" }
+ *   put:
+ *     summary: "[Deprecated] Set the relations of a version's family"
+ *     deprecated: true
+ *     description: "Same as PUT /admin/template-families/{uid}/relations, addressed by a VERSION uid. `size_ids` → 400."
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody: { required: true, content: { application/json: { schema: { type: object } } } }
+ *     responses:
+ *       200: { description: Updated family with its relations }
  */
+router.get('/template-families/:uid/relations', authenticate, authorizeAdmin('templates.read'),   controller.getFamilyRelations);
+router.put('/template-families/:uid/relations', authenticate, authorizeAdmin('templates.update'), validate(setTemplateRelationsSchema), controller.setFamilyRelations);
 router.get('/templates/:uid/relations', authenticate, authorizeAdmin('templates.read'),   controller.getTemplateRelations);
 router.put('/templates/:uid/relations', authenticate, authorizeAdmin('templates.update'), validate(setTemplateRelationsSchema), controller.setTemplateRelations);
+
+// ---- Regrouping versions between designs ----
+/**
+ * @swagger
+ * /admin/templates/{uid}/move:
+ *   post:
+ *     summary: Move one version into another design (template family)
+ *     description: >-
+ *       Rejected with 409 (details per conflict) when the target already has a version in the
+ *       same language and size, or when a text-free version would join a family with languages
+ *       (or vice versa). The TARGET's shared details win — the version takes on its category,
+ *       industries, tags, access level, variants and events; `changes` lists what that means
+ *       (e.g. "Becomes Premium"). `source.outcome`: `unchanged`; `draft` — a live source lost
+ *       the version its publish gate needs and went back to draft; `archived` — the source was
+ *       left empty, so it became `inactive` and its views/downloads/likes/trending were added
+ *       to the target. The version keeps its uid, so projects and links still work.
+ *       `?dry_run=1` returns the same plan without doing anything (`applied: false`, conflicts
+ *       listed instead of a 409).
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path,  name: uid,     required: true, schema: { type: string, format: uuid }, description: The version to move }
+ *       - { in: query, name: dry_run, schema: { type: integer, enum: [1] } }
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [family_uid], properties: { family_uid: { type: string, format: uuid } } } } }
+ *     responses:
+ *       200: { description: "The plan: version, source (with outcome), target, changes, conflicts, applied" }
+ *       409: { description: Slot taken or text-free/language mismatch, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+ * /admin/template-families/{uid}/merge:
+ *   post:
+ *     summary: Merge a whole design into another (every version, all-or-nothing)
+ *     description: >-
+ *       Moves every version of `{uid}` into `into_family_uid` under the same rules as a move.
+ *       One conflict and nothing moves (409 listing every conflict). The emptied source is
+ *       archived (`inactive`) with its counters added to the target. `?dry_run=1` previews.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path,  name: uid,     required: true, schema: { type: string, format: uuid }, description: The family to merge away }
+ *       - { in: query, name: dry_run, schema: { type: integer, enum: [1] } }
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [into_family_uid], properties: { into_family_uid: { type: string, format: uuid } } } } }
+ *     responses:
+ *       200: { description: "The plan: source (versions, outcome), target, changes, conflicts, applied" }
+ *       409: { description: At least one version conflicts, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+ */
+router.post('/templates/:uid/move',          authenticate, authorizeAdmin('templates.update'), validate(moveTemplateSchema), controller.moveTemplateVersion);
+router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templates.update'), validate(mergeFamilySchema),  controller.mergeTemplateFamily);
 
 // ---- S3 direct uploads (presigned, Design B: upload straight to final key tagged
 //      status=pending; confirm flips the tag to active. Single PUT for small files,
@@ -1154,14 +1336,22 @@ router.post('/page-sections/clone', authenticate, authorizeAdmin('page_content.c
  * @swagger
  * /admin/variants/{uid}/templates:
  *   get:
- *     summary: List templates assigned to a variant
+ *     summary: List the designs (template families) assigned to a variant
+ *     description: >-
+ *       Variants link DESIGNS, so the list is under `TemplateFamilies` (previously `Templates`),
+ *       each `{ id, uid, name, status, template_type, is_premium }`. Every language and size of
+ *       a linked design is in the variant.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
- *       200: { description: "Variant with its Templates (lightweight fields)" }
+ *       200: { description: "Variant with its TemplateFamilies (lightweight fields)" }
  *   put:
- *     summary: Replace the templates assigned to a variant
+ *     summary: Replace the designs (template families) assigned to a variant
+ *     description: >-
+ *       Full replace. Send `family_ids`; the deprecated `template_ids` (version ids) is still
+ *       accepted and each is resolved to its design. Sending both, or neither, is a 400; an
+ *       unknown id is a 400. Responds with the variant and its `TemplateFamilies`.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -1169,7 +1359,7 @@ router.post('/page-sections/clone', authenticate, authorizeAdmin('page_content.c
  *       required: true
  *       content:
  *         application/json:
- *           schema: { type: object, required: [template_ids], properties: { template_ids: { type: array, items: { type: integer } } } }
+ *           schema: { type: object, description: "Exactly one of family_ids / template_ids", properties: { family_ids: { type: array, items: { type: integer }, description: Design (template family) ids }, template_ids: { type: array, items: { type: integer }, deprecated: true, description: "Version ids; each is resolved to its family" } } }
  *     responses:
  *       200: { description: "Updated variant with its Templates" }
  */
@@ -1279,7 +1469,7 @@ router.put('/brand-series/:uid/relations', authenticate, authorizeAdmin('brand_s
  *       required: true
  *       content:
  *         application/json:
- *           schema: { type: object, required: [template_ids], properties: { template_ids: { type: array, items: { type: integer } } } }
+ *           schema: { type: object, description: "Exactly one of family_ids / template_ids", properties: { family_ids: { type: array, items: { type: integer }, description: Design (template family) ids }, template_ids: { type: array, items: { type: integer }, deprecated: true, description: "Version ids; each is resolved to its family" } } }
  *     responses:
  *       200: { description: Updated variant with its templates }
  * /admin/themes/{uid}/relations:
@@ -1397,14 +1587,22 @@ router.delete('/assets/missing-files', authenticate, authorizeAdmin('assets.dele
  * @swagger
  * /admin/special-events/{uid}/templates:
  *   get:
- *     summary: List templates linked to a special event
+ *     summary: List the designs (template families) linked to a special event
+ *     description: >-
+ *       Events link DESIGNS, so the list is under `TemplateFamilies` (previously `Templates`),
+ *       each `{ id, uid, name, status, template_type, is_premium }`. The public
+ *       `GET /special-events` still calls them `Templates`, as design cards.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
- *       200: { description: "Special event with its Templates (lightweight fields)" }
+ *       200: { description: "Special event with its TemplateFamilies (lightweight fields)" }
  *   put:
- *     summary: Replace the templates linked to a special event
+ *     summary: Replace the designs (template families) linked to a special event
+ *     description: >-
+ *       Full replace. Send `family_ids`; the deprecated `template_ids` (version ids) is still
+ *       accepted and each is resolved to its design. Sending both, or neither, is a 400; an
+ *       unknown id is a 400. Responds with the event and its `TemplateFamilies`.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -1412,7 +1610,7 @@ router.delete('/assets/missing-files', authenticate, authorizeAdmin('assets.dele
  *       required: true
  *       content:
  *         application/json:
- *           schema: { type: object, required: [template_ids], properties: { template_ids: { type: array, items: { type: integer } } } }
+ *           schema: { type: object, description: "Exactly one of family_ids / template_ids", properties: { family_ids: { type: array, items: { type: integer }, description: Design (template family) ids }, template_ids: { type: array, items: { type: integer }, deprecated: true, description: "Version ids; each is resolved to its family" } } }
  *     responses:
  *       200: { description: "Updated special event with its Templates" }
  */
@@ -1491,10 +1689,13 @@ const C = (path, opts) => router.use(path, adminCrud(opts));
 // Deprecated path serving the same resource, annotated with RFC 8594 headers.
 const COld = (path, successor, opts) => router.use(path, deprecated(successor), adminCrud(opts));
 
-// `beforeWrite` is the server-side publish gate: status may only become `active`
-// once the template is complete (bundle + thumbnail + anchor + size + tag). Without
-// it the admin panel's checklist is bypassable with a direct PATCH.
-C('/templates',           { model: models.Template,         resource: 'template',          permission: 'templates', unique: ['name'], createSchema: createTemplateSchema, updateSchema: updateTemplateSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => templatePublish.assertPublishable(row, payload) });
+// `beforeWrite` is the server-side publish gate: status may only become `active` once
+// the family is complete (anchor + tag + an active English/text-free version, any
+// size) or the version is (bundle + thumbnail + size). Without it the admin
+// panel's checklist is bypassable with a direct PATCH. A version's `afterWrite` keeps
+// its family honest: a live family that loses its required version goes to draft.
+C('/template-families',   { model: models.TemplateFamily,   resource: 'template_family',   permission: 'templates', unique: ['name'], createSchema: createFamilySchema, updateSchema: updateFamilySchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => templatePublish.assertFamilyPublishable(row, payload) });
+C('/templates',           { model: models.Template,         resource: 'template',          permission: 'templates', createSchema: createTemplateSchema, updateSchema: updateTemplateSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => templatePublish.versionBeforeWrite(payload, row), afterWrite: (row) => templatePublish.reconcileFamily(row.family_id) });
 C('/template-categories', { model: models.TemplateCategory, resource: 'template_category', permission: 'categories', unique: ['name', 'slug'], autoSlug: true, reorderable: true, createSchema: createTemplateCategorySchema, updateSchema: updateTemplateCategorySchema });
 // Frames are authored like templates and gated the same way, but paid for per
 // frame rather than by plan — so the publish gate also insists price and
@@ -1570,10 +1771,17 @@ C('/testimonials',        { model: models.Testimonial,      resource: 'testimoni
 // panel needs drag-reorder rather than a PATCH per row.
 C('/page-sections',       { model: models.PageSection,      resource: 'page_section',      permission: 'page_content', reorderable: true, filterable: ['page_key', 'business_category_id', 'section_key', 'is_active'], filterAlias: { industry_id: 'business_category_id' }, beforeWrite: pageContent.assertSectionScope, createSchema: createPageSectionSchema, updateSchema: updatePageSectionSchema, listOptions: { order: [['display_order', 'ASC'], ['id', 'ASC']] }, include: [{ model: models.PageSectionItem, as: 'items', separate: true, order: [['display_order', 'ASC'], ['id', 'ASC']] }, { model: models.BusinessCategory, attributes: ['id', 'uid', 'slug', 'name'] }] });
 C('/page-section-items',  { model: models.PageSectionItem,  resource: 'page_section_item', permission: 'page_content', reorderable: true, filterable: ['section_id', 'is_active'], beforeWrite: pageContent.assertItemSection, createSchema: createPageSectionItemSchema, updateSchema: updatePageSectionItemSchema, listOptions: { order: [['display_order', 'ASC'], ['id', 'ASC']] } });
-C('/plans',               { model: models.Plan,             resource: 'plan',             permission: 'plans', createSchema: createPlanSchema, updateSchema: updatePlanSchema });
-C('/plan-billing-options',{ model: models.PlanBillingOption, resource: 'plan_billing_option', permission: 'plans', idField: 'id', hasUid: false, filterable: ['plan_id'], createSchema: createBillingOptionSchema, updateSchema: updateBillingOptionSchema });
+C('/plans',               { model: models.Plan,             resource: 'plan',             permission: 'plans', createSchema: createPlanSchema, updateSchema: updatePlanSchema, beforeWrite: (payload, row) => planRules.assertPlanWritable(payload, row) });
+C('/plan-billing-options',{ model: models.PlanBillingOption, resource: 'plan_billing_option', permission: 'plans', idField: 'id', hasUid: false, filterable: ['plan_id'], createSchema: createBillingOptionSchema, updateSchema: updateBillingOptionSchema, beforeWrite: (payload, row) => planRules.assertBillingOptionWritable(payload, row) });
 C('/plan-features',       { model: models.PlanFeature,      resource: 'plan_feature',     permission: 'plans', idField: 'id', hasUid: false, filterable: ['plan_id', 'feature_type_id'], createSchema: createPlanFeatureSchema, updateSchema: updatePlanFeatureSchema });
-C('/feature-types',       { model: models.FeatureType,      resource: 'feature_type',     permission: 'features', idField: 'id', hasUid: false, createSchema: createFeatureTypeSchema, updateSchema: updateFeatureTypeSchema });
+// An integer feature is a limit, so it has to be one the app actually meters —
+// otherwise the plan card promises "500 a month" and nothing holds anyone to it.
+// The key list comes from constants/quotaMeters.js; /meters serves it to the
+// admin FE's key dropdown and must be registered before the CRUD's `/:id`.
+router.get('/feature-types/meters', authenticate, authorizeAdmin('features.read'), (req, res) => {
+  res.json({ success: true, data: quotaMeters.listMeters() });
+});
+C('/feature-types',       { model: models.FeatureType,      resource: 'feature_type',     permission: 'features', idField: 'id', hasUid: false, unique: ['key'], createSchema: createFeatureTypeSchema, updateSchema: updateFeatureTypeSchema, beforeWrite: (payload, row) => quotaMeters.assertMeterable({ ...(row ? row.toJSON() : {}), ...payload }) });
 C('/coupons',             { model: models.Coupon,           resource: 'coupon',           permission: 'coupons', unique: ['code'], filterable: ['status', 'applicable_to', 'target_audience'], createSchema: createCouponSchema, updateSchema: updateCouponSchema, beforeWrite: (payload, row) => couponRules.assertCouponConsistent(payload, row) });
 // Top-up packs sit with plans and coupons, NOT with the content domains: pricing a
 // pack is a commerce decision, so `quota_packs` is deliberately absent from

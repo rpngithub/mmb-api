@@ -4,22 +4,14 @@ const { AssetCategory, Tag } = require('../models');
 const { resolveRef, resolveRefList, pick } = require('../utils/catalogRef');
 const { ASSET_TYPES } = require('../utils/assetTypes');
 const { ValidationError } = require('../errors');
+const { lockAsset } = require('../utils/assetLock');
+const favourites = require('./favourite.service');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT     = 100;
 
 // Paid viewers get the asset file (s3_key); guests/free see premium assets locked.
 const isPaidViewer = (viewer) => viewer?.tier === 'paid';
-
-// What a locked row keeps. `s3_key` is the deliverable and goes; `thumbnail_s3_key`
-// is the browse image and STAYS — the lock is meant to stop the file being used,
-// not to stop the asset being seen. A locked card with nothing to draw is the
-// reason this column exists, so withholding it here would defeat it.
-//
-// This only holds because the thumbnail is a degraded copy by construction (see
-// the migration and upload.service's `asset_thumbnail` slot). Store the original's
-// key in that column and the delete below stops protecting anything.
-const lock = (a) => { delete a.s3_key; return a; };
 
 // Tag membership via the asset_tags join. EXISTS keeps pagination correct and
 // avoids duplicate rows; tag ids are resolved to ints below (injection-safe).
@@ -79,11 +71,12 @@ async function listAssets(filters = {}, viewer = null) {
   });
 
   const paid = isPaidViewer(viewer);
-  return rows.map((row) => {
+  const items = rows.map((row) => {
     const a = row.toJSON();
     a.is_locked = Boolean(a.is_premium) && !paid;
-    return a.is_locked ? lock(a) : a;   // withhold the file until upgrade
+    return a.is_locked ? lockAsset(a) : a;   // withhold the file until upgrade (see utils/assetLock)
   });
+  return favourites.markFavourited(items, viewer, 'asset');
 }
 
 module.exports = { listAssets };

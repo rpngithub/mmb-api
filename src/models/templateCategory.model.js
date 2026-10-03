@@ -17,7 +17,7 @@ module.exports = (sequelize) => {
   TemplateCategory.associate = (models) => {
     TemplateCategory.belongsTo(TemplateCategory, { as: 'parent', foreignKey: 'parent_id' });
     TemplateCategory.hasMany(TemplateCategory,   { as: 'children', foreignKey: 'parent_id' });
-    TemplateCategory.hasMany(models.Template,    { foreignKey: 'category_id' });
+    TemplateCategory.hasMany(models.TemplateFamily, { foreignKey: 'category_id' });
   };
 
   return TemplateCategory;

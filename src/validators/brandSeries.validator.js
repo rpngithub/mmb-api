@@ -93,8 +93,11 @@ const updateVariantBadgeSchema = Joi.object({
 
 // ---- Variant <-> template assignment (full replace) ----
 const setVariantTemplatesSchema = Joi.object({
-  template_ids: Joi.array().items(Joi.number().integer()).required(),
-});
+  // Designs (template family ids). `template_ids` is the pre-family key, still
+  // accepted: each is resolved to its version's family.
+  family_ids:   Joi.array().items(Joi.number().integer()),
+  template_ids: Joi.array().items(Joi.number().integer()),
+}).xor('family_ids', 'template_ids');
 
 // ---- Variant relations (plan entitlements + industries; each key a full replace) ----
 const setVariantRelationsSchema = Joi.object({

@@ -55,6 +55,10 @@ const clean = (body) => {
  *                                     insert/update. `row` is null on create. Throw an
  *                                     AppError to reject the write (e.g. a state-transition
  *                                     guard the Joi schema can't express).
+ * @param {function}[opts.afterWrite] async (row, req, { action }) => void — runs after a
+ *                                     create/update/delete is persisted ('created' |
+ *                                     'updated' | 'deleted'), for keeping a parent row
+ *                                     consistent with the change.
  * @param {boolean}[opts.autoSlug]     when true, derive `slug` from `name` on create if the
  *                                     payload doesn't already carry one (slugify()). The slug is
  *                                     NOT re-derived on update — renaming must not silently break
@@ -79,7 +83,7 @@ function adminCrud(opts) {
     model, resource, permission, idField = 'uid', hasUid = true,
     softDelete = null, createSchema = null, updateSchema = null, listOptions = {},
     protect = null, filterable = [], include = null, injectOnCreate = null, unique = [],
-    autoSlug = false, filterAlias = {}, reorderable = false, beforeWrite = null,
+    autoSlug = false, filterAlias = {}, reorderable = false, beforeWrite = null, afterWrite = null,
   } = opts;
 
   const router = express.Router();
@@ -165,6 +169,7 @@ function adminCrud(opts) {
     if (hasUid && !payload.uid) payload.uid = uuid();
     if (injectOnCreate) Object.assign(payload, injectOnCreate(req));
     const row = await model.create(payload);
+    if (afterWrite) await afterWrite(row, req, { action: 'created' });
     await activity.log(req, { action: `${resource}.created`, entityType: resource, entityId: row.id });
     res.status(201).json({ success: true, data: row });
   });
@@ -179,6 +184,7 @@ function adminCrud(opts) {
     const patch = clean(req.body);
     if (beforeWrite) await beforeWrite(patch, row, req);
     await row.update(patch);
+    if (afterWrite) await afterWrite(row, req, { action: 'updated' });
     await activity.log(req, { action: `${resource}.updated`, entityType: resource, entityId: row.id });
     res.json({ success: true, data: row });
   });
@@ -189,6 +195,7 @@ function adminCrud(opts) {
     if (protect) { const reason = protect(row); if (reason) throw new ForbiddenError(reason); }
     if (softDelete) await row.update({ [softDelete]: 0 });
     else await row.destroy();
+    if (afterWrite) await afterWrite(row, req, { action: 'deleted' });
     await activity.log(req, { action: `${resource}.deleted`, entityType: resource, entityId: row.id });
     res.json({ success: true, data: null });
   });

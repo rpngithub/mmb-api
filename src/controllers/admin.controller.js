@@ -1,5 +1,6 @@
 const adminService    = require('../services/admin.service');
 const templateService = require('../services/template.service');
+const familyAdmin     = require('../services/templateFamilyAdmin.service');
 const frameService    = require('../services/frame.service');
 const quotaPackService = require('../services/quotaPack.service');
 const activity        = require('../services/activity.service');
@@ -8,16 +9,18 @@ const feedbackService = require('../services/feedback.service');
 const pageContent     = require('../services/pageContent.service');
 const assetAudit      = require('../services/assetAudit.service');
 const s3              = require('../utils/s3Helper');
-const { BusinessCategory, Tag, Template, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
-const { NotFoundError, ValidationError } = require('../errors');
+const { BusinessCategory, Tag, Template, TemplateFamily, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
+const { NotFoundError, ValidationError, ConflictError } = require('../errors');
+const { Op } = require('sequelize');
 
-// A template's relations, as compact id-bearing lists (for the editor to load/preselect).
-const findTemplateWithRelations = (uid) => Template.findOne({
-  where: { uid },
+// A design's (template family's) shared relations, as compact id-bearing lists (for
+// the editor to load/preselect). Sizes are not a relation any more: each version
+// has exactly one `size_id`.
+const findFamilyWithRelations = (where) => TemplateFamily.findOne({
+  where,
   attributes: ['id', 'uid', 'name'],
   include: [
     { model: Tag,              through: { attributes: [] }, attributes: ['id', 'slug', 'name'] },
-    { model: TemplateSize,     through: { attributes: [] }, attributes: ['id', 'slug', 'name', 'width', 'height'] },
     { model: Variant,          through: { attributes: [] }, attributes: ['id', 'uid', 'name'] },
     { model: BusinessCategory, through: { attributes: [] }, attributes: ['id', 'uid', 'slug', 'name'] },
   ],
@@ -28,12 +31,29 @@ const findAssetWithTags = (uid) => Asset.findOne({
   include: [{ model: Tag, through: { attributes: [] } }],
 });
 
-// Lightweight template shape for variant-assignment views (never pull the heavy `content` blob).
-const VARIANT_TEMPLATE_ATTRS = ['id', 'uid', 'name', 'thumbnail_s3_key', 'status', 'template_type'];
+// Lightweight design shape for variant/event-assignment views (never a version's
+// heavy `content`).
+const FAMILY_LINK_ATTRS = ['id', 'uid', 'name', 'status', 'template_type', 'is_premium'];
 const findVariantWithTemplates = (uid) => Variant.findOne({
   where: { uid },
-  include: [{ model: Template, through: { attributes: [] }, attributes: VARIANT_TEMPLATE_ATTRS }],
+  include: [{ model: TemplateFamily, through: { attributes: [] }, attributes: FAMILY_LINK_ATTRS }],
 });
+
+// Variants and special events link DESIGNS. `family_ids` is the current key;
+// `template_ids` (the pre-family name) is still accepted — each id is resolved to
+// its version's family, so an id from an old admin screen still links the design.
+async function linkedFamilyIds(body) {
+  if (body.family_ids !== undefined) {
+    const ids = [...new Set(body.family_ids)];
+    const found = ids.length ? await TemplateFamily.count({ where: { id: { [Op.in]: ids } } }) : 0;
+    if (found !== ids.length) throw new ValidationError('One or more family_ids do not exist');
+    return ids;
+  }
+  const wanted = [...new Set(body.template_ids)];
+  const rows = wanted.length ? await Template.findAll({ where: { id: { [Op.in]: wanted } }, attributes: ['family_id'] }) : [];
+  if (rows.length !== wanted.length) throw new ValidationError('One or more template_ids do not exist');
+  return [...new Set(rows.map((r) => r.family_id))];
+}
 
 // A variant's relations as compact id-bearing lists: the plans entitled to its
 // templates and the industries it's tagged with (for the admin editor).
@@ -285,9 +305,37 @@ const previewPageSections = async (req, res) => {
   res.json({ success: true, data });
 };
 
+// Versions (template rows) — of one family with ?family_uid=, or across families.
 const listTemplates = async (req, res) => {
   const result = await templateService.listTemplatesForAdmin(req.query);
   res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+// Designs (template families), with version counts, languages, sizes and readiness.
+const listTemplateFamilies = async (req, res) => {
+  const result = await templateService.listFamiliesForAdmin(req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+const isDryRun = (req) => ['1', 'true'].includes(String(req.query.dry_run));
+
+// Move one version into another family. ?dry_run=1 returns the plan (what changes,
+// what happens to the source, any conflict) without doing it.
+const moveTemplateVersion = async (req, res) => {
+  const plan = await familyAdmin.moveVersion(req.params.uid, req.body.family_uid, { dryRun: isDryRun(req) });
+  if (plan.applied) {
+    await activity.log(req, { action: 'template.moved', entityType: 'template', metadata: { version_uid: req.params.uid, from: plan.source.uid, to: plan.target.uid, source_outcome: plan.source.outcome } });
+  }
+  res.json({ success: true, data: plan });
+};
+
+// Merge a whole family into another (all versions, all-or-nothing). ?dry_run=1 previews.
+const mergeTemplateFamily = async (req, res) => {
+  const plan = await familyAdmin.mergeFamily(req.params.uid, req.body.into_family_uid, { dryRun: isDryRun(req) });
+  if (plan.applied) {
+    await activity.log(req, { action: 'template_family.merged', entityType: 'template_family', metadata: { from: plan.source.uid, into: plan.target.uid, versions: plan.source.versions } });
+  }
+  res.json({ success: true, data: plan });
 };
 
 const listFrames = async (req, res) => {
@@ -322,37 +370,61 @@ const revokeQuotaGrant = async (req, res) => {
 // `Industries` is the current public name for business categories (matching the
 // `industry_ids` key the PUT takes). `BusinessCategories` — the raw Sequelize include
 // key — is kept as a deprecated duplicate so existing clients don't break.
-const withIndustries = (tpl) => {
-  const data = tpl.toJSON();
+const withIndustries = (family) => {
+  const data = family.toJSON();
   data.Industries = data.BusinessCategories || [];
   return data;
 };
 
-// Read a template's current relations (tags / sizes / variants / industries).
-const getTemplateRelations = async (req, res) => {
-  const tpl = await findTemplateWithRelations(req.params.uid);
-  if (!tpl) throw new NotFoundError('template not found');
-  res.json({ success: true, data: withIndustries(tpl) });
-};
-
-// Unified relation assignment. Any provided key is a FULL REPLACE of that relation; omitted
-// keys are left untouched. The generic CRUD only writes scalar columns, so M2M lives here.
-const setTemplateRelations = async (req, res) => {
-  const tpl = await Template.findOne({ where: { uid: req.params.uid } });
-  if (!tpl) throw new NotFoundError('template not found');
-
-  const { tag_ids, size_ids } = req.body;
+// Unified relation assignment on a design. Any provided key is a FULL REPLACE of that
+// relation; omitted keys are left untouched. The generic CRUD only writes scalar
+// columns, so M2M lives here.
+async function applyFamilyRelations(req, family) {
+  const { tag_ids } = req.body;
   // `industry_ids` / `variant_ids` are the public names; `business_category_ids` and
   // `theme_ids` are the deprecated aliases.
   const industry_ids = req.body.industry_ids ?? req.body.business_category_ids;
   const variant_ids  = req.body.variant_ids  ?? req.body.theme_ids;
-  if (tag_ids !== undefined)       await tpl.setTags(tag_ids);
-  if (size_ids !== undefined)      await tpl.setTemplateSizes(size_ids);
-  if (industry_ids !== undefined)  await tpl.setBusinessCategories(industry_ids);
-  if (variant_ids !== undefined)   await tpl.setVariants(variant_ids);
+  if (req.body.size_ids !== undefined) {
+    throw new ValidationError('Sizes are no longer a relation: each version has one size_id. Add a version per size.');
+  }
+  if (tag_ids !== undefined)      await family.setTags(tag_ids);
+  if (industry_ids !== undefined) await family.setBusinessCategories(industry_ids);
+  if (variant_ids !== undefined)  await family.setVariants(variant_ids);
 
-  await activity.log(req, { action: 'template.relations_updated', entityType: 'template', entityId: tpl.id, metadata: { tag_ids, size_ids, industry_ids, variant_ids } });
-  res.json({ success: true, data: withIndustries(await findTemplateWithRelations(req.params.uid)) });
+  await activity.log(req, { action: 'template_family.relations_updated', entityType: 'template_family', entityId: family.id, metadata: { tag_ids, industry_ids, variant_ids } });
+}
+
+// Read a design's current relations (tags / variants / industries).
+const getFamilyRelations = async (req, res) => {
+  const family = await findFamilyWithRelations({ uid: req.params.uid });
+  if (!family) throw new NotFoundError('template family not found');
+  res.json({ success: true, data: withIndustries(family) });
+};
+
+const setFamilyRelations = async (req, res) => {
+  const family = await TemplateFamily.findOne({ where: { uid: req.params.uid } });
+  if (!family) throw new NotFoundError('template family not found');
+  await applyFamilyRelations(req, family);
+  res.json({ success: true, data: withIndustries(await findFamilyWithRelations({ id: family.id })) });
+};
+
+// [Deprecated] The same, addressed by a VERSION uid — acts on that version's family.
+const familyOfVersion = async (uid) => {
+  const tpl = await Template.findOne({ where: { uid }, attributes: ['family_id'] });
+  if (!tpl) throw new NotFoundError('template not found');
+  return tpl.family_id;
+};
+
+const getTemplateRelations = async (req, res) => {
+  const family = await findFamilyWithRelations({ id: await familyOfVersion(req.params.uid) });
+  res.json({ success: true, data: withIndustries(family) });
+};
+
+const setTemplateRelations = async (req, res) => {
+  const family = await TemplateFamily.findByPk(await familyOfVersion(req.params.uid));
+  await applyFamilyRelations(req, family);
+  res.json({ success: true, data: withIndustries(await findFamilyWithRelations({ id: family.id })) });
 };
 
 // Finalize a template bundle: flip every object under templates/<uid>/ from pending to
@@ -407,41 +479,43 @@ const purgeMissingAssetFiles = async (req, res) => {
   res.json({ success: true, data: await assetAudit.purgeMissingFiles(auditFilters(req), req) });
 };
 
-// Lightweight template shape for event-assignment views (same as variant, no heavy `content`).
+// Designs linked to a special event (same lightweight shape as the variant view).
 const findEventWithTemplates = (uid) => SpecialEvent.findOne({
   where: { uid },
-  include: [{ model: Template, through: { attributes: [] }, attributes: THEME_TEMPLATE_ATTRS }],
+  include: [{ model: TemplateFamily, through: { attributes: [] }, attributes: FAMILY_LINK_ATTRS }],
 });
 
-// Read the templates currently linked to a special event (M2M not handled by generic CRUD).
+// Read the designs currently linked to a special event (M2M not handled by generic CRUD).
 const getEventTemplates = async (req, res) => {
   const event = await findEventWithTemplates(req.params.uid);
   if (!event) throw new NotFoundError('special_event not found');
   res.json({ success: true, data: event });
 };
 
-// Full-replace the templates linked to a special event (curates the calendar's "event -> designs").
+// Full-replace the designs linked to a special event (curates the calendar's "event -> designs").
 const setEventTemplates = async (req, res) => {
   const event = await SpecialEvent.findOne({ where: { uid: req.params.uid } });
   if (!event) throw new NotFoundError('special_event not found');
-  await event.setTemplates(req.body.template_ids);
-  await activity.log(req, { action: 'special_event.templates_updated', entityType: 'special_event', entityId: event.id, metadata: { template_ids: req.body.template_ids } });
+  const familyIds = await linkedFamilyIds(req.body);
+  await event.setTemplateFamilies(familyIds);
+  await activity.log(req, { action: 'special_event.templates_updated', entityType: 'special_event', entityId: event.id, metadata: { family_ids: familyIds } });
   res.json({ success: true, data: await findEventWithTemplates(req.params.uid) });
 };
 
-// Read the templates currently assigned to a variant (M2M not handled by generic CRUD).
+// Read the designs currently assigned to a variant (M2M not handled by generic CRUD).
 const getVariantTemplates = async (req, res) => {
   const variant = await findVariantWithTemplates(req.params.uid);
   if (!variant) throw new NotFoundError('variant not found');
   res.json({ success: true, data: variant });
 };
 
-// Full-replace the templates assigned to a variant.
+// Full-replace the designs assigned to a variant.
 const setVariantTemplates = async (req, res) => {
   const variant = await Variant.findOne({ where: { uid: req.params.uid } });
   if (!variant) throw new NotFoundError('variant not found');
-  await variant.setTemplates(req.body.template_ids);
-  await activity.log(req, { action: 'variant.templates_updated', entityType: 'variant', entityId: variant.id, metadata: { template_ids: req.body.template_ids } });
+  const familyIds = await linkedFamilyIds(req.body);
+  await variant.setTemplateFamilies(familyIds);
+  await activity.log(req, { action: 'variant.templates_updated', entityType: 'variant', entityId: variant.id, metadata: { family_ids: familyIds } });
   res.json({ success: true, data: await findVariantWithTemplates(req.params.uid) });
 };
 
@@ -543,9 +617,22 @@ const setCouponPlans = async (req, res) => {
 const resetTemplateBundle = async (req, res) => {
   const tpl = await Template.findOne({ where: { uid: req.params.uid } });
   if (!tpl) throw new NotFoundError('template not found');
-  await s3.deleteByPrefix(`templates/${tpl.uid}/`);
+  const prefix = `templates/${tpl.uid}/`;
+  // Versions cloned by migration 045 (one per extra size) point at their original's
+  // files. Wiping the original's prefix would break them, so refuse while any other
+  // version still references it.
+  const sharing = await Template.count({
+    where: {
+      id: { [Op.ne]: tpl.id },
+      [Op.or]: [{ thumbnail_s3_key: { [Op.like]: `${prefix}%` } }, { content: { [Op.like]: `%${prefix}%` } }],
+    },
+  });
+  if (sharing) {
+    throw new ConflictError(`${sharing} other version(s) still use this version's files. Upload their own bundles first, then reset this one.`);
+  }
+  await s3.deleteByPrefix(prefix);
   await activity.log(req, { action: 'template.bundle_reset', entityType: 'template', entityId: tpl.id });
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };
+module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

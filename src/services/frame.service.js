@@ -10,6 +10,7 @@ const { resolveRef, pick } = require('../utils/catalogRef');
 // the suite swaps this function out at call time.
 const razorpay      = require('../utils/razorpayHelper');
 const { withGst }     = require('../utils/gst');
+const quota         = require('./quota.service');
 const { NotFoundError, ForbiddenError, ConflictError, ValidationError } = require('../errors');
 
 const DEFAULT_LIMIT = 30;
@@ -113,18 +114,32 @@ async function addFrame(uid, userId) {
     throw new ForbiddenError('This is a premium frame — purchase it to add it to My Frames');
   }
 
-  if (owned) {
+  // The plan's frame allowance covers free adds only. A frame bought outright was
+  // paid for per frame, so the plan cap never stands between a user and it.
+  if (alreadyPaid) {
     await userFrameRepo.update(owned.id, { status: 'active' });
     return userFrameRepo.findById(owned.id);
   }
-  return userFrameRepo.create({
-    uid:          uuid(),
-    user_id:      userId,
-    frame_id:     frame.id,
-    acquired_via: 'free',
-    status:       'active',
-    acquired_at:  new Date(),
-  });
+
+  await quota.assertWithinQuota(userId, 'frames');
+
+  let row;
+  if (owned) {
+    await userFrameRepo.update(owned.id, { status: 'active' });
+    row = await userFrameRepo.findById(owned.id);
+  } else {
+    row = await userFrameRepo.create({
+      uid:          uuid(),
+      user_id:      userId,
+      frame_id:     frame.id,
+      acquired_via: 'free',
+      status:       'active',
+      acquired_at:  new Date(),
+    });
+  }
+
+  await quota.consume(userId, 'frames', 1, { source: 'frame_add', ref_type: 'user_frame', ref_id: row.id });
+  return row;
 }
 
 // Buy a premium frame. The ownership row is written up front as 'pending' with

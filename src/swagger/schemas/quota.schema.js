@@ -123,6 +123,6 @@
  *                 end:   { type: string, format: date, description: The "resets on" date to show the user. }
  *             features:
  *               type: array
- *               description: Empty for an account with no active subscription — the free tier is not metered against a plan.
+ *               description: The features of the plan the account is held to — its subscription's, or the free plan's. Empty only when there is neither.
  *               items: { $ref: '#/components/schemas/QuotaFeatureUsage' }
  */

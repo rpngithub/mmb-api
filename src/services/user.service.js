@@ -5,7 +5,7 @@ const userUpload  = require('./userUpload.service');
 const sessionService = require('./session.service');
 const accountPurge   = require('./accountPurge.service');
 const { Op } = require('sequelize');
-const { Business, UserPreference, Language, User } = require('../models');
+const { Business, UserPreference, Language, UserLanguage, sequelize } = require('../models');
 const { NotFoundError, ConflictError, ValidationError } = require('../errors');
 
 // The password hash must never leave the server, not even back to its own owner —
@@ -167,16 +167,22 @@ const NOTIFY_KEYS = ['notify_push', 'notify_email', 'notify_whatsapp'];
 
 const LANGUAGE_ATTRS = ['id', 'uid', 'code', 'name', 'native_name'];
 
-// The languages a user's browse feed is narrowed to. Falls back to the default
-// when they have chosen none — callers can therefore use this directly as a
-// filter without special-casing the empty set.
+// The languages a user's browse feed is narrowed to, IN THE USER'S RANKING: the
+// first is the language a design's card is shown in, the rest are fallbacks.
+// Falls back to the default when they have chosen none — callers can therefore
+// use this directly as a filter without special-casing the empty set.
 async function effectiveLanguages(userId) {
-  const chosen = userId == null ? [] : await Language.findAll({
-    attributes: LANGUAGE_ATTRS,
-    where:      { is_active: 1 },
-    include:    [{ model: User, attributes: [], through: { attributes: [] }, where: { id: userId }, required: true }],
-    order:      [['display_order', 'ASC'], ['name', 'ASC']],
-  });
+  let chosen = [];
+  if (userId != null) {
+    const picks = await UserLanguage.findAll({
+      where: { user_id: userId }, attributes: ['language_id'], order: [['position', 'ASC'], ['id', 'ASC']],
+    });
+    const ids = picks.map((p) => p.language_id);
+    if (ids.length) {
+      const rows = await Language.findAll({ attributes: LANGUAGE_ATTRS, where: { id: ids, is_active: 1 } });
+      chosen = rows.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+    }
+  }
   if (chosen.length) return { languages: chosen, is_default: false };
 
   const fallback = await Language.findAll({
@@ -233,12 +239,22 @@ async function resolveLanguages(refs) {
 
 // Partial update — only the keys sent are touched; the row is created on first
 // write so users who never open this screen cost nothing. `languages` is a FULL
-// REPLACE of the set (it is a multi-select), and `[]` resets to the default.
+// REPLACE of the list, in RANK ORDER (first = primary, the language a design's
+// card is shown in; the rest are fallbacks), and `[]` resets to the default.
 async function updatePreferences(userId, data) {
   if (data.languages !== undefined) {
     const user = await userRepo.findById(userId);
     if (!user) throw new NotFoundError('User not found');
-    await user.setLanguages(await resolveLanguages(data.languages));
+    const ids = await resolveLanguages(data.languages);
+    await sequelize.transaction(async (transaction) => {
+      await UserLanguage.destroy({ where: { user_id: userId }, transaction });
+      if (ids.length) {
+        await UserLanguage.bulkCreate(
+          ids.map((languageId, position) => ({ user_id: userId, language_id: languageId, position })),
+          { transaction },
+        );
+      }
+    });
   }
 
   const patch = {};

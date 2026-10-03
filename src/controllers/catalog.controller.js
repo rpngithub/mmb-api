@@ -14,7 +14,7 @@ const languages          = async (req, res) => send(res, await catalog.listLangu
 const templateSizes      = async (req, res) => send(res, await catalog.listTemplateSizes());
 const brandSeries        = async (req, res) => send(res, await catalog.listBrandSeries(req.query, req.user));
 const variants           = async (req, res) => send(res, await catalog.listVariants(req.query, req.user));
-const variantDetail      = async (req, res) => send(res, await catalog.getVariantDetail(req.params.uid, req.user));
+const variantDetail      = async (req, res) => send(res, await catalog.getVariantDetail(req.params.uid, req.user, req.query));
 const faqCategories      = async (req, res) => send(res, await catalog.listFaqCategories());
 const faqs               = async (req, res) => send(res, await catalog.listFaqs(req.query));
 const testimonials       = async (req, res) => send(res, await catalog.listTestimonials());

@@ -44,8 +44,16 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *       events, so a feature nothing has spent yet returns an empty array.
  *
  *
- *       An account with no active subscription gets `features: []` — the free tier is
- *       not metered against a plan.
+ *       An account with no active subscription is held to the free plan (plan_type
+ *       `free`) and gets its features; `features: []` only when no free plan is active.
+ *
+ *
+ *       Every integer feature is metered. Business Posts / Video Templates count projects
+ *       created from a template of that type, Brand Series counts distinct series adopted
+ *       across the user's businesses, Brand Frames counts frames added for free (bought
+ *       frames never count). A feature with `reset_period` monthly/annual is a tally of
+ *       adds for the cycle; `never` is a ceiling on what is currently held, so removing
+ *       something frees its slot.
  *     tags: [Quota]
  *     security: [{ bearerAuth: [] }]
  *     responses:
@@ -123,8 +131,8 @@ router.get('/packs/:uid', optionalAuth, rateLimiter.publicTiered, controller.get
  *
  *
  *       The sale is refused with 409 when the top-up would buy nothing: the account
- *       has no active subscription (the feature is not metered for it), or the plan
- *       already grants that feature without limit.
+ *       is held to no plan at all (no subscription and no active free plan), or its
+ *       plan — the free plan included — already grants that feature without limit.
  *     tags: [Quota]
  *     security: [{ bearerAuth: [] }]
  *     parameters:

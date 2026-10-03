@@ -4,7 +4,7 @@ const Joi = require('joi');
 const createPlanSchema = Joi.object({
   name:          Joi.string().min(1).max(100).required(),
   description:   Joi.string().allow('', null).optional(),
-  plan_type:     Joi.string().valid('subscription', 'access_pass').optional(),
+  plan_type:     Joi.string().valid('subscription', 'access_pass', 'free').optional(),
   trial_days:    Joi.number().integer().min(0).allow(null).optional(),
   pass_price:    Joi.number().precision(2).min(0).allow(null).optional(),
   pass_days:     Joi.number().integer().min(1).allow(null).optional(),
@@ -16,7 +16,7 @@ const createPlanSchema = Joi.object({
 const updatePlanSchema = Joi.object({
   name:          Joi.string().min(1).max(100).optional(),
   description:   Joi.string().allow('', null).optional(),
-  plan_type:     Joi.string().valid('subscription', 'access_pass').optional(),
+  plan_type:     Joi.string().valid('subscription', 'access_pass', 'free').optional(),
   trial_days:    Joi.number().integer().min(0).allow(null).optional(),
   pass_price:    Joi.number().precision(2).min(0).allow(null).optional(),
   pass_days:     Joi.number().integer().min(1).allow(null).optional(),
