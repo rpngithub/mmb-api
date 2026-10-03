@@ -718,6 +718,266 @@
                 }
               }
             ]
+          },
+          {
+            "name": "List Favourite Templates",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/favourites/templates",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "favourites",
+                  "templates"
+                ],
+                "query": [
+                  {
+                    "key": "language",
+                    "value": "ta,en",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "30",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Saved designs, newest first, as feed cards (`is_favourited: true`, `favourited_at`). A saved design is never hidden for language — it shows its best version. Premium stays locked for free users. Inactive designs drop out (and return if re-activated). `meta.total` counts what is listable."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Add Favourite Template",
+            "request": {
+              "method": "PUT",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/favourites/templates/{{family_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "favourites",
+                  "templates",
+                  "{{family_uid}}"
+                ]
+              },
+              "description": "Takes the DESIGN uid — a card's `family_uid`, not its `uid`. Every language and size shares one heart. Idempotent: a repeat is a 200 and does not count twice. Returns `{ favourited, likes_count }` so the card can update without a refetch. Locked premium designs may be saved."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Remove Favourite Template",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/favourites/templates/{{family_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "favourites",
+                  "templates",
+                  "{{family_uid}}"
+                ]
+              },
+              "description": "Idempotent — removing one that is not saved is a 200. Works on a design that has since gone inactive."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Favourite Assets",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/favourites/assets",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "favourites",
+                  "assets"
+                ],
+                "query": [
+                  {
+                    "key": "asset_type",
+                    "value": "icon",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "50",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Saved assets, newest first. Locked premium rows keep `thumbnail_s3_key` and omit `s3_key`, exactly as in GET /assets."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Add Favourite Asset",
+            "request": {
+              "method": "PUT",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/favourites/assets/{{asset_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "favourites",
+                  "assets",
+                  "{{asset_uid}}"
+                ]
+              },
+              "description": "Idempotent. Any active asset, including locked premium ones."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Remove Favourite Asset",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/favourites/assets/{{asset_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "favourites",
+                  "assets",
+                  "{{asset_uid}}"
+                ]
+              },
+              "description": "Idempotent — removing one that is not saved is a 200."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
           }
         ]
       },
@@ -3458,7 +3718,7 @@
       },
       {
         "name": "Templates (public)",
-        "description": "Optional auth — send `access_token` to unlock premium content and raise the rate-limit tier, or none for anonymous.\n\nThe browse view **must be anchored**: at least one of `category` or `industry` is required (400 otherwise). All taxonomy filters accept a friendly slug, a uid, or a legacy numeric id.\n\nVariant templates are NOT browsable here — they are premium and plan-gated, served only via `GET /variants/{uid}`.",
+        "description": "Optional auth — send `access_token` to unlock premium content and raise the rate-limit tier, or none for anonymous.\n\nThe browse view **must be anchored**: at least one of `category` or `industry` is required (400 otherwise). All taxonomy filters accept a friendly slug, a uid, or a legacy numeric id.\n\nVariant templates are NOT browsable here — they are premium and plan-gated, served only via `GET /variants/{uid}`.\n\n**Designs and versions:** a design is a template FAMILY with one version per language × size. Lists return ONE card per design, showing the version picked for the viewer — the card's `uid` is that version's, `family_uid` names the design. Pick order: highest-ranked language (`language`, else the user's Preferred Languages, else English; text-free versions show to everyone), then the default size (`default_template_size` in `GET /config`), then the lowest size id. Language beats size.",
         "item": [
           {
             "name": "List Templates",
@@ -3491,6 +3751,16 @@
                   {
                     "key": "size",
                     "value": "square",
+                    "disabled": true
+                  },
+                  {
+                    "key": "language",
+                    "value": "ta,en",
+                    "disabled": true
+                  },
+                  {
+                    "key": "all_languages",
+                    "value": "1",
                     "disabled": true
                   },
                   {
@@ -3540,6 +3810,7 @@
                   }
                 ]
               },
+              "description": "One card per design. A design is listed only if it has an active version in one of the viewer's languages (or a text-free one) and, with `size`, in that size. Each card carries `family_uid`, `Language`, `TemplateSize`, `available_languages` and `available_sizes`. `language=ta,en` overrides the saved Preferred Languages (order = rank); `all_languages=1` switches the language rule off (SEO pages).",
               "auth": {
                 "type": "noauth"
               }
@@ -3558,14 +3829,15 @@
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
                     "}",
                     "const d = (pm.response.json() || {}).data; const first = Array.isArray(d) ? d[0] : (d && d.items && d.items[0]);",
-                    "if (first && first.uid) pm.environment.set('template_uid', first.uid);"
+                    "if (first && first.uid) pm.environment.set('template_uid', first.uid);",
+                    "if (first && first.family_uid) pm.environment.set('family_uid', first.family_uid);"
                   ]
                 }
               }
             ]
           },
           {
-            "name": "Get Template",
+            "name": "Get Template (one version)",
             "request": {
               "method": "GET",
               "header": [],
@@ -3577,9 +3849,55 @@
                 "path": [
                   "templates",
                   "{{template_uid}}"
+                ],
+                "query": [
+                  {
+                    "key": "switch",
+                    "value": "1",
+                    "disabled": true
+                  }
                 ]
               },
-              "description": "Premium templates return `is_locked=true` with `content` withheld unless the caller is a paid user.",
+              "description": "Premium designs return `is_locked=true` with `content` withheld unless the caller is a paid user. Also returns `family` and `versions` — every active language × size of the design (not filtered by Preferred Languages) — for the editor's switcher. Switching opens another version's uid with `switch=1`: served the same, but not counted as another view. Every uid ever issued for a template still works.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Design by Family (share link)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/templates/families/{{family_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "templates",
+                  "families",
+                  "{{family_uid}}"
+                ]
+              },
+              "description": "Opens a design by its `family_uid` — picks the version exactly as a feed card would and returns the same shape as **Get Template**. Never hidden for language: a design with no version in the viewer's languages opens in its best one (English first). Counts one view; 404 when the design is not active.",
               "auth": {
                 "type": "noauth"
               }
@@ -3653,6 +3971,7 @@
                   }
                 ]
               },
+              "description": "Signed-in callers also get `is_favourited` on each row (absent for guests — this request runs without auth).",
               "auth": {
                 "type": "noauth"
               }
@@ -3669,7 +3988,9 @@
                     "if (ct.includes('application/json')) {",
                     "  const body = pm.response.json();",
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
-                    "}"
+                    "}",
+                    "const list = ((pm.response.json() || {}).data || []);",
+                    "if (list.length) pm.environment.set('asset_uid', list[0].uid);"
                   ]
                 }
               }
@@ -4241,9 +4562,21 @@
                 "path": [
                   "variants",
                   "{{variant_uid}}"
+                ],
+                "query": [
+                  {
+                    "key": "language",
+                    "value": "ta,en",
+                    "disabled": true
+                  },
+                  {
+                    "key": "all_languages",
+                    "value": "1",
+                    "disabled": true
+                  }
                 ]
               },
-              "description": "The variant card is public, and so is the TEMPLATE LIST — templates are always returned so a visitor can see what they would be buying. When the caller is not entitled, `is_locked=true` and every template comes back WITHOUT its `content` (thumbnails only). Send `Bearer {{access_token}}` to be entitled — guests are always locked. Opening a template or starting a project from one is still refused while locked.",
+              "description": "The variant card is public, and so is the TEMPLATE LIST — templates are always returned so a visitor can see what they would be buying. When the caller is not entitled, `is_locked=true` and every template comes back WITHOUT its `content` (thumbnails only). Send `Bearer {{access_token}}` to be entitled — guests are always locked. Opening a template or starting a project from one is still refused while locked.\n\nTemplates are one card per design, picked by the same language rules as `GET /templates` (`language` / `all_languages` behave the same; a design with no version in the viewer's languages is not listed).",
               "auth": {
                 "type": "noauth"
               }
@@ -4458,10 +4791,20 @@
                     "key": "type",
                     "value": "festival,holiday",
                     "disabled": true
+                  },
+                  {
+                    "key": "language",
+                    "value": "ta,en",
+                    "disabled": true
+                  },
+                  {
+                    "key": "all_languages",
+                    "value": "1",
+                    "disabled": true
                   }
                 ]
               },
-              "description": "Active events falling in a date window, each with `occurs_on` and its active `Templates`. Recurring events match on month-day, one-offs on `full_date`. Default window is a rolling week; use `range=month`, `range=year` (rolling 365 days) or explicit `from`/`to`. The window is echoed in `meta.range`. `type` narrows to one or more of holiday (Public Days) | festival | celebration | awareness | custom, comma-separated; `type=festival&range=year` is the full upcoming festival list. Applied filter echoed in `meta.types`.",
+              "description": "Active events falling in a date window, each with `occurs_on` and its active `Templates`. Recurring events match on month-day, one-offs on `full_date`. Default window is a rolling week; use `range=month`, `range=year` (rolling 365 days) or explicit `from`/`to`. The window is echoed in `meta.range`. `type` narrows to one or more of holiday (Public Days) | festival | celebration | awareness | custom, comma-separated; `type=festival&range=year` is the full upcoming festival list. Applied filter echoed in `meta.types`.\n\n`Templates` are one card per design, picked by the same language rules as `GET /templates` (`language` / `all_languages` behave the same).",
               "auth": {
                 "type": "noauth"
               }
@@ -4510,7 +4853,7 @@
                   }
                 ]
               },
-              "description": "Active plans with billing options, card-visible features, `trial_days`, and applicable coupons. Use `plan_type=access_pass` to fetch the one-time ₹10 pass.",
+              "description": "Active plans with billing options, card-visible features, `trial_days`, and applicable coupons. Use `plan_type=access_pass` to fetch the one-time ₹10 pass, or `plan_type=free` for the free plan (the limits a user without a subscription is held to; never listed by default).",
               "auth": {
                 "type": "noauth"
               }
@@ -5025,6 +5368,181 @@
             ]
           }
         ]
+      },
+      {
+        "name": "Quota",
+        "description": "The Plan Usage screen and AI-credit top-ups. Every integer plan feature is a metered limit: Business Posts / Video Templates count projects created from a template of that type, Brand Series counts distinct series adopted, Brand Frames counts frames added for free. A metered action over its limit returns **402 `QUOTA_EXCEEDED`**. Users without a subscription are held to the free plan.",
+        "item": [
+          {
+            "name": "My Usage",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/quota/usage",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "quota",
+                  "usage"
+                ]
+              },
+              "description": "Everything the Plan Usage screen renders. `period.end` is the \"Everything resets on\" date. One entry per feature of the plan the account is held to (its subscription's, or the free plan's): `limit` is the plan allowance, `used` this cycle (or currently held, for `reset_period: never`), `remaining` includes any top-up, and `breakdown` splits usage by tool (the AI card)."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List Top-up Packs",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/quota/packs?feature=ai_credits",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "quota",
+                  "packs"
+                ],
+                "query": [
+                  {
+                    "key": "feature",
+                    "value": "ai_credits",
+                    "description": "Feature key the packs top up"
+                  },
+                  {
+                    "key": "limit",
+                    "value": "30",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "The packs on sale for one feature, with the tax-inclusive total. Public.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const list = ((pm.response.json() || {}).data || []);",
+                    "if (list.length) pm.environment.set('quota_pack_uid', list[0].uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Top-up Pack",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/quota/packs/{{quota_pack_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "quota",
+                  "packs",
+                  "{{quota_pack_uid}}"
+                ]
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 404]));"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Buy Top-up Pack",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/quota/packs/{{quota_pack_uid}}/purchase",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "quota",
+                  "packs",
+                  "{{quota_pack_uid}}",
+                  "purchase"
+                ]
+              },
+              "description": "Creates a Razorpay order and a pending grant. Confirm with **Subscriptions → Verify Payment** using the Checkout response; the webhook is the source of truth. The balance then appears on My Usage. 409 when the top-up would buy nothing (no plan at all, or the plan already grants the feature without limit).",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 201, 404, 409]));"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       }
     ]
   },
@@ -5153,7 +5671,25 @@
         "enabled": true
       },
       {
+        "key": "quota_pack_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
         "key": "template_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "family_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "asset_uid",
         "value": "",
         "type": "default",
         "enabled": true

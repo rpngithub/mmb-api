@@ -17,7 +17,7 @@ module.exports = (sequelize) => {
   }, { tableName: 'special_events' });
 
   SpecialEvent.associate = (models) => {
-    SpecialEvent.belongsToMany(models.Template, { through: models.SpecialEventTemplate, foreignKey: 'event_id' });
+    SpecialEvent.belongsToMany(models.TemplateFamily, { through: models.SpecialEventTemplate, foreignKey: 'event_id', otherKey: 'family_id' });
   };
 
   return SpecialEvent;

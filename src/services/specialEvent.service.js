@@ -1,5 +1,7 @@
 const { Op } = require('sequelize');
-const { SpecialEvent, Template } = require('../models');
+const { SpecialEvent, TemplateFamily } = require('../models');
+const picker = require('./templateFamilyPicker');
+const favourites = require('./favourite.service');
 const { ValidationError } = require('../errors');
 const { SPECIAL_EVENT_TYPES } = require('../constants/specialEventTypes');
 
@@ -77,21 +79,32 @@ async function listSpecialEvents(query = {}, viewer = null) {
       ],
     },
     include: [{
-      model: Template,
+      model: TemplateFamily,
       through: { attributes: [] },
       required: false,
       where: { status: 'active' },
-      attributes: { exclude: ['content'] },             // browse view: no editable content
     }],
   });
 
+  // One card per design, picked for the viewer — the same rules as the browse feed,
+  // so a design with no version in the viewer's languages is not shown here either.
   const paid = isPaidViewer(viewer);
+  const families = new Map();
+  for (const row of rows) for (const f of row.TemplateFamilies || []) families.set(f.id, f);
+  const languageIds = await picker.resolveLanguageRank(query, viewer);
+  const cards = new Map((await favourites.markFavourited(
+    await picker.familiesToCards([...families.values()], { languageIds }, (f) => Boolean(f.is_premium) && !paid),
+    viewer, 'template',
+  )).map((c) => [c.family_id, c]));
+
   const events = rows.map((row) => {
     const e = row.toJSON();
     // Concrete date this event falls on within the window (for per-day grouping).
     e.occurs_on = (e.event_date && mmddToDate.get(e.event_date))
       || (e.full_date && e.full_date >= from && e.full_date <= to ? e.full_date : null);
-    e.Templates = (e.Templates || []).map((t) => ({ ...t, is_locked: Boolean(t.is_premium) && !paid }));
+    // `Templates` keeps its name: each entry is a design card (see GET /templates).
+    e.Templates = (e.TemplateFamilies || []).map((f) => cards.get(f.id)).filter(Boolean);
+    delete e.TemplateFamilies;
     return e;
   }).filter((e) => e.occurs_on); // every surfaced event must map to a day in the window
 

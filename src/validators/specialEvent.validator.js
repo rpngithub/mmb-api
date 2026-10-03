@@ -31,7 +31,10 @@ const updateSpecialEventSchema = Joi.object(fields).min(1);
 
 // Full-replace the templates linked to an event (curates the calendar's "event -> designs").
 const setEventTemplatesSchema = Joi.object({
-  template_ids: Joi.array().items(Joi.number().integer()).required(),
-});
+  // Designs (template family ids). `template_ids` is the pre-family key, still
+  // accepted: each is resolved to its version's family.
+  family_ids:   Joi.array().items(Joi.number().integer()),
+  template_ids: Joi.array().items(Joi.number().integer()),
+}).xor('family_ids', 'template_ids');
 
 module.exports = { createSpecialEventSchema, updateSpecialEventSchema, setEventTemplatesSchema };

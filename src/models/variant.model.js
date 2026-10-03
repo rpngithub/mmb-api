@@ -20,7 +20,7 @@ module.exports = (sequelize) => {
   Variant.associate = (models) => {
     Variant.belongsTo(models.BrandSeries,  { foreignKey: 'series_id' });
     Variant.belongsTo(models.VariantBadge, { foreignKey: 'badge_id' });
-    Variant.belongsToMany(models.Template, { through: models.VariantTemplate, foreignKey: 'variant_id' });
+    Variant.belongsToMany(models.TemplateFamily, { through: models.VariantTemplate, foreignKey: 'variant_id', otherKey: 'family_id' });
     // Plans entitled to this variant's templates. otherKey must be explicit: Plan has no
     // reverse belongsToMany(Variant), so Sequelize would default the join key to `PlanId`
     // (actual column is `plan_id`). Access = user's active plan_id ∈ this set.

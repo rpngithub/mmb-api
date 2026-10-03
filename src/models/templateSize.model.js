@@ -14,7 +14,7 @@ module.exports = (sequelize) => {
   }, { tableName: 'template_sizes', updatedAt: false });
 
   TemplateSize.associate = (models) => {
-    TemplateSize.belongsToMany(models.Template, { through: models.TemplateSizeMap, foreignKey: 'size_id' });
+    TemplateSize.hasMany(models.Template, { foreignKey: 'size_id' });
   };
 
   return TemplateSize;

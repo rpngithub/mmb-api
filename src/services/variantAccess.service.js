@@ -1,5 +1,5 @@
 const { Op } = require('sequelize');
-const { Business, BusinessVariant, VariantTemplate, VariantPlanRestriction } = require('../models');
+const { Business, BusinessVariant, Template, VariantTemplate, VariantPlanRestriction } = require('../models');
 const userSubRepo = require('../repositories/userSubscription.repository');
 
 // Central authority for premium-variant access. Gating sits on the VARIANT, not on its
@@ -77,22 +77,29 @@ async function unlockedVariantIds(variantIds, viewer) {
   return unlocked;
 }
 
-// Variant ids a template belongs to (empty = not a variant template).
-async function templateVariantIds(templateId) {
-  const rows = await VariantTemplate.findAll({ where: { template_id: templateId }, attributes: ['variant_id'] });
+// Variant ids a design (template family) belongs to (empty = not a variant design).
+// Membership is per family: every language and size of a design is in the variant.
+async function familyVariantIds(familyId) {
+  const rows = await VariantTemplate.findAll({ where: { family_id: familyId }, attributes: ['variant_id'] });
   return rows.map((r) => r.variant_id);
 }
 
-// Access decision for a single template, used by the public template endpoint and by
-// project creation. `variantGated` = the template belongs to ≥1 variant (so it must never
-// be publicly browsable); `allowed` = the viewer may use it (adopted any containing
-// variant, or entitled to any of them).
+// Same, for one version (template row) — resolved through its family.
+async function templateVariantIds(templateId) {
+  const tpl = await Template.findByPk(templateId, { attributes: ['family_id'] });
+  return tpl ? familyVariantIds(tpl.family_id) : [];
+}
+
+// Access decision for a design, used by the public template endpoint and by
+// project creation. `variantGated` = the design belongs to ≥1 variant (so it must
+// never be publicly browsable); `allowed` = the viewer may use it (adopted any
+// containing variant, or entitled to any of them).
 //
 // This is the HARD gate and is deliberately unchanged by the "show locked templates"
 // work: a locked template may now be *listed* on a variant page, but opening one still
 // fails here.
-async function canAccessTemplate(templateId, viewer) {
-  const variantIds = await templateVariantIds(templateId);
+async function canAccessFamily(familyId, viewer) {
+  const variantIds = await familyVariantIds(familyId);
   if (!variantIds.length) return { variantGated: false, allowed: true };
   if (!viewer?.userId)    return { variantGated: true, allowed: false };
 
@@ -104,7 +111,14 @@ async function canAccessTemplate(templateId, viewer) {
   return { variantGated: true, allowed: matches > 0 };
 }
 
+// Same gate for one version (template row), via its family.
+async function canAccessTemplate(templateId, viewer) {
+  const tpl = await Template.findByPk(templateId, { attributes: ['family_id'] });
+  if (!tpl) return { variantGated: false, allowed: false };
+  return canAccessFamily(tpl.family_id, viewer);
+}
+
 module.exports = {
   activePlanId, hasAdopted, isPlanEntitled, isVariantUnlocked, unlockedVariantIds,
-  templateVariantIds, canAccessTemplate,
+  familyVariantIds, templateVariantIds, canAccessFamily, canAccessTemplate,
 };

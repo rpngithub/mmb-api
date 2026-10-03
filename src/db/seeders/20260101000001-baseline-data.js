@@ -32,7 +32,9 @@ module.exports = {
 
     // --- plans ---
     await queryInterface.bulkInsert('plans', [
-      { id: 1, uid: uuid(), name: 'Free', description: 'Get started for free', plan_type: 'subscription', is_popular: 0, status: 'active', display_order: 1 },
+      // plan_type 'free': the limits an account WITHOUT a subscription is held to.
+      // Not for sale, so GET /plans (subscription plans by default) never lists it.
+      { id: 1, uid: uuid(), name: 'Free', description: 'Get started for free', plan_type: 'free', is_popular: 0, status: 'active', display_order: 1 },
       { id: 2, uid: uuid(), name: 'Pro',  description: 'For growing businesses', plan_type: 'subscription', trial_days: 15, is_popular: 1, status: 'active', display_order: 2 },
       // One-time ₹10 access pass: all features unlimited for pass_days, then expires.
       { id: 3, uid: uuid(), name: 'All-Access Pass', description: 'Try all features for 10 days', plan_type: 'access_pass', pass_price: 10.00, pass_days: 10, is_popular: 0, status: 'active', display_order: 99 },
@@ -44,13 +46,18 @@ module.exports = {
       { id: 2, plan_id: 2, billing_cycle: 'annual',  price: 2999.00, discounted_price: 2399.00, discount_label: 'Save 20%', currency: 'INR', is_active: 1 },
     ]);
 
-    // --- feature types (keys consumed by quotaCheck middleware) ---
+    // --- feature types (every integer key must be a meter in src/constants/quotaMeters.js) ---
     await queryInterface.bulkInsert('feature_types', [
       { id: 1, key: 'downloads',      label: 'Downloads',      reset_period: 'monthly', data_type: 'integer' },
       { id: 2, key: 'shares',         label: 'Shares',         reset_period: 'monthly', data_type: 'integer' },
       { id: 3, key: 'ai_credits',     label: 'AI Credits',     reset_period: 'monthly', data_type: 'integer' },
       { id: 4, key: 'template_views', label: 'Template Views', reset_period: 'never',   data_type: 'integer' },
       { id: 5, key: 'storage',        label: 'Storage (MB)',   reset_period: 'never',   data_type: 'integer' },
+      // Migration 048 adds these on an existing installation; a fresh one gets them here.
+      { id: 6, key: 'business_posts_templates', label: 'Business Posts Templates', reset_period: 'monthly', data_type: 'integer' },
+      { id: 7, key: 'video_templates',          label: 'Video Templates',          reset_period: 'monthly', data_type: 'integer' },
+      { id: 8, key: 'brand_series',             label: 'Brand Series',             reset_period: 'monthly', data_type: 'integer' },
+      { id: 9, key: 'frames',                   label: 'Brand Frames',             reset_period: 'never',   data_type: 'integer' },
     ]);
 
     // --- plan features (value -1 = unlimited) ---

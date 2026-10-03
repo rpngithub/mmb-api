@@ -17,6 +17,11 @@ const { createProjectSchema, updateProjectSchema, createExportSchema } = require
  * /projects:
  *   post:
  *     summary: Create a project
+ *     description: >-
+ *       `template_id` is a template VERSION (one language × size of a design) — the `id` of the
+ *       card or version being opened. Both the version and its design must be active (400
+ *       otherwise), and a design in a premium variant needs an entitled plan or an adopted
+ *       variant (403).
  *     tags: [Projects]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:

@@ -324,12 +324,16 @@ router.put('/:uid/brand-colors', authenticate, validate(setBrandColorsSchema), c
  * /businesses/{uid}/variants:
  *   get:
  *     summary: List variants adopted into this business (with template cards)
+ *     description: >-
+ *       `Templates` on each variant is one card per design (template family), picked for the
+ *       owner by their Preferred Languages then the default size — the same rules as
+ *       `GET /templates`. A design with no version in the owner's languages is not listed.
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
  *       200:
- *         description: Array of adopted variants, each with its active template cards
+ *         description: Array of adopted variants, each with its active design cards (`Templates`)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantListResponse' } } }
  *   post:
  *     summary: Adopt a variant into this business ("Use This Brand Series")

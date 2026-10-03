@@ -16,7 +16,7 @@ const dedupe            = require('../utils/dedupeKey');
 const razorpay          = require('../utils/razorpayHelper');
 const { verifyWebhookSignature, verifyPaymentSignature, paymentMethodFrom } = razorpay;
 const { withGst, GST_RATE } = require('../utils/gst');
-const { NotFoundError, AuthError, ForbiddenError, ConflictError, AppError } = require('../errors');
+const { NotFoundError, AuthError, ForbiddenError, ConflictError, ValidationError, AppError } = require('../errors');
 const { PlanBillingOption, Plan } = require('../models');
 
 function addCycle(date, cycle) {
@@ -101,7 +101,15 @@ async function verifyCoupon(code, planId, userId) {
 async function getMySubscription(userId) {
   const sub = await subRepo.findActiveDetailed(userId);
   if (!sub) {
-    return { has_active_subscription: false, is_on_trial: false, subscription: null, plan: null, billing: null, features: [] };
+    // No subscription: the account is held to the free plan, when one is active,
+    // so the app can gate on its limits exactly as it would on a paid plan's.
+    const free = await planRepo.findFree();
+    const { features, period } = await quota.usageSummary(userId, { sub: null });
+    return {
+      has_active_subscription: false, is_on_trial: false, period, subscription: null,
+      plan: free ? { uid: free.uid, name: free.name, description: free.description, plan_type: free.plan_type } : null,
+      billing: null, features,
+    };
   }
 
   const plan     = sub.Plan;
@@ -150,6 +158,9 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
   const option = await PlanBillingOption.findByPk(plan_billing_option_id);
   if (!option) throw new NotFoundError('Billing option not found');
   const plan = await Plan.findByPk(option.plan_id);
+  // The free plan is what an account without a subscription is held to — there is
+  // nothing to buy. Admin rules keep billing options off it; this is the backstop.
+  if (plan?.plan_type === 'free') throw new ValidationError('The free plan cannot be purchased');
 
   const listPrice = parseFloat(option.discounted_price || option.price);
 

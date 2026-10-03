@@ -17,7 +17,7 @@ class NotFoundError extends AppError {
 }
 
 class ConflictError extends AppError {
-  constructor(msg) { super(msg, 409, 'CONFLICT'); }
+  constructor(msg, details) { super(msg, 409, 'CONFLICT', details); }
 }
 
 class QuotaError extends AppError {

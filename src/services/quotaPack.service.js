@@ -4,7 +4,6 @@ const grantRepo       = require('../repositories/userQuotaGrant.repository');
 const featureTypeRepo = require('../repositories/featureType.repository');
 const paymentRepo     = require('../repositories/payment.repository');
 const userRepo        = require('../repositories/user.repository');
-const userSubRepo     = require('../repositories/userSubscription.repository');
 const quota           = require('./quota.service');
 const quotaPackPublish = require('./quotaPackPublish');
 // Imported as a namespace, not destructured: the gateway has no test double, so
@@ -86,8 +85,11 @@ async function purchasePack(uid, userId) {
       throw new ConflictError(`${ft.label} is not currently limited — there is nothing to top up`);
     }
 
-    const sub = await userSubRepo.findActiveByUser(userId);
-    throw new ConflictError(sub
+    // No plan at all (no subscription and no active free plan) means nothing is
+    // metered; otherwise the plan the account is held to — the free plan included —
+    // grants the feature without limit.
+    const held = await quota.effectivePlan(userId);
+    throw new ConflictError(held
       // The label as authored, not lower-cased: these are product names, and
       // "unlimited storage (mb)" reads like a typo where "Storage (MB)" does not.
       ? `Your plan already includes unlimited ${ft.label}`

@@ -46,6 +46,16 @@ class PlanRepository extends BaseRepository {
     });
   }
 
+  // The plan accounts WITHOUT a subscription are held to. At most one is active
+  // (enforced on write — see services/planRules.js); none means the free tier is
+  // not metered at all.
+  findFree({ withFeatures = false } = {}) {
+    return this.model.findOne({
+      where: { status: 'active', plan_type: 'free' },
+      ...(withFeatures ? { include: [{ model: PlanFeature, include: [{ model: FeatureType }] }] } : {}),
+    });
+  }
+
   findAccessPass() {
     return this.model.findOne({
       where: { status: 'active', plan_type: 'access_pass' },

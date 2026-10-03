@@ -28,7 +28,6 @@ module.exports = {
   UserLanguage:         { skip: true },   // join table behind Preferred Languages
   FontLanguage:         { skip: true },   // join table behind a font's script coverage
   TemplateTag:          { skip: true },
-  TemplateSizeMap:      { skip: true },
   VariantTemplate:      { skip: true },
   VariantPlanRestriction: { skip: true },
   VariantIndustry:      { skip: true },
@@ -38,6 +37,8 @@ module.exports = {
   BrandSeriesColor:     { skip: true },
   TemplateBusinessCategory: { skip: true },
   AssetTag:             { skip: true },
+  UserFavouriteTemplate: { skip: true },  // served as design cards / assets, see favourite.schema.js
+  UserFavouriteAsset:   { skip: true },
   SpecialEventTemplate: { skip: true },
   CouponPlanRestriction:{ skip: true },
 
@@ -96,6 +97,8 @@ module.exports = {
         nullable: true,
         description: 'Preview image for the browse grid, always present regardless of `is_locked`. Render `thumbnail_s3_key || s3_key` — a free asset usually has no separate thumbnail and falls back to its own file. Null on a locked asset means no preview has been uploaded yet; show a placeholder.',
       },
+      is_favourited: { type: 'boolean', description: 'Signed-in callers only: whether the asset is in My Favourites. ABSENT for guests.' },
+      favourited_at: { type: 'string', format: 'date-time', description: 'Only on GET /users/me/favourites/assets: when it was saved.' },
     },
   },
 
@@ -137,21 +140,55 @@ module.exports = {
   },
 
   // Example of field-level control + computed fields + multiple views.
+  // A Template is one VERSION of a design (TemplateFamily): a language × size.
   Template: {
     views: {
-      // Public/browse shape: hides the admin-only creator, adds the computed lock flag.
-      TemplatePublic: { exclude: ['created_by'], add: { is_locked: { type: 'boolean' } } },
-      // Admin shape: the full row, plus the completeness signals the list adds so the
-      // admin panel can flag incomplete templates without a request per row.
-      TemplateAdmin:  {
+      // Public shape: a design card / an opened version. Carries the version's fields
+      // plus the design's shared ones (name, category, access level, counters).
+      TemplatePublic: {
+        exclude: ['created_by'],
         add: {
-          tag_count:      { type: 'integer' },
-          size_count:     { type: 'integer' },
-          industry_count: { type: 'integer' },
-          has_content:    { type: 'integer', description: '1 when a bundle has been uploaded' },
-          has_thumbnail:  { type: 'integer', description: '1 when thumbnail_s3_key is set' },
+          is_locked:           { type: 'boolean' },
+          family_uid:          { type: 'string', format: 'uuid', description: 'The design this version belongs to (GET /templates/families/{uid})' },
+          category_id:         { type: 'integer', nullable: true },
+          template_type:       { type: 'string', enum: ['image', 'video', 'animated'] },
+          is_premium:          { type: 'integer' },
+          is_popular:          { type: 'integer' },
+          trending_score:      { type: 'number' },
+          views_count:         { type: 'integer' },
+          downloads_count:     { type: 'integer' },
+          likes_count:         { type: 'integer', description: 'How many users have this design in My Favourites' },
+          is_favourited:       { type: 'boolean', description: 'Signed-in callers only: whether the DESIGN (family) is in My Favourites — every version shares one heart. ABSENT for guests.' },
+          favourited_at:       { type: 'string', format: 'date-time', description: 'Only on GET /users/me/favourites/templates: when it was saved.' },
+          Language:           { type: 'object', nullable: true, description: 'null = text-free' },
+          TemplateSize:        { type: 'object', nullable: true },
+          available_languages: { type: 'array', items: { type: 'object' }, description: 'Every language the design is available in' },
+          available_sizes:     { type: 'array', items: { type: 'object' }, description: 'Every size the design is available in' },
+          family:              { type: 'object', description: 'Detail only: { id, uid, name }' },
+          versions:            { type: 'array', items: { type: 'object' }, description: 'Detail only: every active { uid, language_id, size_id, thumbnail_s3_key, Language, TemplateSize } — for the editor switcher' },
         },
       },
+      // Admin shape: the full row, plus the completeness signals the list adds so the
+      // admin panel can flag incomplete versions without a request per row.
+      TemplateAdmin:  {
+        add: {
+          has_content:   { type: 'integer', description: '1 when a bundle has been uploaded' },
+          has_thumbnail: { type: 'integer', description: '1 when thumbnail_s3_key is set' },
+          family:        { type: 'object', description: '{ id, uid, name, status }' },
+        },
+      },
+    },
+  },
+
+  // A design: everything its versions share. See /admin/template-families.
+  TemplateFamily: {
+    add: {
+      version_count:        { type: 'integer' },
+      active_version_count: { type: 'integer' },
+      tag_count:            { type: 'integer' },
+      industry_count:       { type: 'integer' },
+      text_free:            { type: 'boolean' },
+      readiness:            { type: 'array', items: { type: 'object' }, description: 'Unmet publish requirements ({ field, message }); empty = publishable' },
     },
   },
 

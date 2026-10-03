@@ -9,9 +9,12 @@ const productService  = require('./product.service');
 const fontService     = require('./font.service');
 const frameService    = require('./frame.service');
 const variantAccess   = require('./variantAccess.service');
-const { sequelize, Variant, VariantBadge, Plan, Template, Tag, Font, BusinessCategory, BusinessVariant, Product } = require('../models');
+const { sequelize, Variant, VariantBadge, Plan, TemplateFamily, Tag, Font, BusinessCategory, BusinessVariant, Product } = require('../models');
+const picker = require('./templateFamilyPicker');
+const favourites = require('./favourite.service');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const slugify         = require('../utils/slugify');
+const { heldSeriesCount } = require('../constants/quotaMeters');
 const { NotFoundError, ForbiddenError, ValidationError, ConflictError } = require('../errors');
 
 const DEFAULT_RADIUS_KM = 10;
@@ -477,18 +480,33 @@ async function getPublicProducts(uid, { type } = {}) {
 // The button reads "Use This Brand Series", but the grant is per-VARIANT: gating lives
 // on the variant, so adopting one does not unlock its siblings in the same series.
 
-// Lightweight template cards for the adopted collection (never the heavy `content`).
-const ADOPTED_TEMPLATE_ATTRS = ['id', 'uid', 'name', 'thumbnail_s3_key', 'template_type', 'status'];
-
-function loadVariantsWithTemplates(where) {
-  return Variant.findAll({
+// The adopted collection lists a variant's designs as cards (never the heavy
+// `content`), picked for the owner by the feed's rules — see templateFamilyPicker.
+async function loadVariantsWithTemplates(where, userId) {
+  const variants = await Variant.findAll({
     where,
     include: [
-      { model: Template,         through: { attributes: [] }, attributes: ADOPTED_TEMPLATE_ATTRS, where: { status: 'active' }, required: false },
+      { model: TemplateFamily,   through: { attributes: [] }, where: { status: 'active' }, required: false },
       { model: BusinessCategory, through: { attributes: [] }, attributes: ['id', 'uid', 'slug', 'name'] },
       { model: VariantBadge,     attributes: ['id', 'uid', 'slug', 'name', 'icon_s3_key'] },
     ],
     order: [['display_order', 'ASC'], ['name', 'ASC']],
+  });
+
+  const families = new Map();
+  for (const v of variants) for (const f of v.TemplateFamilies || []) families.set(f.id, f);
+  const languageIds = await picker.resolveLanguageRank({}, { userId });
+  // Adopted variants are unlocked for their business, so no card is locked here.
+  const cards = new Map((await favourites.markFavourited(
+    await picker.familiesToCards([...families.values()], { languageIds }),
+    { userId }, 'template',
+  )).map((c) => [c.family_id, c]));
+
+  return variants.map((v) => {
+    const data = v.toJSON();
+    data.Templates = (data.TemplateFamilies || []).map((f) => cards.get(f.id)).filter(Boolean);
+    delete data.TemplateFamilies;
+    return data;
   });
 }
 
@@ -515,8 +533,17 @@ async function adoptVariant(userId, businessUid, variantUid) {
     throw new ForbiddenError('Your plan does not include this variant');
   }
 
-  await BusinessVariant.findOrCreate({ where: { business_id: biz.id, variant_id: variant.id } });
-  const [shaped] = await loadVariantsWithTemplates({ id: variant.id });
+  // The plan's brand-series allowance counts distinct SERIES across all the
+  // user's businesses: a second variant of a series they already hold, or the
+  // same series in another business, is not a new one.
+  const newSeries = (await heldSeriesCount(userId, variant.series_id)) === 0;
+  if (newSeries) await quota.assertWithinQuota(userId, 'brand_series');
+
+  const [, created] = await BusinessVariant.findOrCreate({ where: { business_id: biz.id, variant_id: variant.id } });
+  if (newSeries && created) {
+    await quota.consume(userId, 'brand_series', 1, { source: 'brand_series_add', ref_type: 'brand_series', ref_id: variant.series_id });
+  }
+  const [shaped] = await loadVariantsWithTemplates({ id: variant.id }, userId);
   return shaped;
 }
 
@@ -524,7 +551,7 @@ async function listAdoptedVariants(userId, businessUid) {
   const biz   = await ownedBusiness(businessUid, userId);
   const links = await BusinessVariant.findAll({ where: { business_id: biz.id }, attributes: ['variant_id'] });
   if (!links.length) return [];
-  return loadVariantsWithTemplates({ id: links.map((l) => l.variant_id) });
+  return loadVariantsWithTemplates({ id: links.map((l) => l.variant_id) }, userId);
 }
 
 async function removeAdoptedVariant(userId, businessUid, variantUid) {

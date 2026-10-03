@@ -1,6 +1,7 @@
 const express      = require('express');
 const router       = express.Router();
 const controller   = require('../controllers/user.controller');
+const favourites   = require('../controllers/favourite.controller');
 const authenticate = require('../middlewares/authenticate');
 const validate     = require('../middlewares/validate');
 const { upsertBillingSchema } = require('../validators/billing.validator');
@@ -186,8 +187,9 @@ router.post('/me/deactivate', authenticate, controller.deactivate);
  *     description: >-
  *       Partial update — send only what changed. `languages` is "Preferred Languages": a
  *       MULTI-SELECT of CONTENT languages that decides which templates the user is shown
- *       (not the app's UI language). It is a full replace — send the whole set; `[]` resets
- *       to the default. Entries are codes ('ta'), uids or ids from `GET /languages`; an
+ *       (not the app's UI language). It is a full replace — send the whole list, IN RANK
+ *       ORDER: the first is the primary language (the one a design's card is shown in), the
+ *       rest are fallbacks, and GET returns them in that order. `[]` resets to the default. Entries are codes ('ta'), uids or ids from `GET /languages`; an
  *       unknown one is a 400 naming it. The notify_* flags cover TRANSACTIONAL messages
  *       (subscription expiry, order updates); they are not a marketing opt-in, and OTP
  *       delivery is part of signing in and ignores them.
@@ -251,5 +253,123 @@ router.patch('/me/preferences', authenticate, validate(updatePreferencesSchema),
  */
 router.get('/me/billing', authenticate, controller.getBilling);
 router.put('/me/billing', authenticate, validate(upsertBillingSchema), controller.upsertBilling);
+
+/**
+ * @swagger
+ * /users/me/favourites/templates:
+ *   get:
+ *     summary: List My Favourites — designs
+ *     description: >-
+ *       Saved designs (template families), newest favourite first, as feed cards. Each card
+ *       shows the version picked for the caller like the feed does, but a saved design is
+ *       never hidden for language — it shows its best version instead. Premium designs stay
+ *       locked for free users. A design that has gone inactive, or a premium-theme design the
+ *       caller can no longer open, is left out (and comes back if that changes).
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: language, schema: { type: string }, description: "Comma-separated language codes in rank order; overrides Preferred Languages for picking each card's version" }
+ *       - { in: query, name: limit,  schema: { type: integer, default: 30, maximum: 100 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Design cards, each with `is_favourited=true` and `favourited_at`
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FavouriteTemplateListResponse' } } }
+ */
+router.get('/me/favourites/templates', authenticate, favourites.listTemplates);
+
+/**
+ * @swagger
+ * /users/me/favourites/templates/{uid}:
+ *   put:
+ *     summary: Add a design to My Favourites
+ *     description: >-
+ *       `uid` is the DESIGN's — a card's `family_uid` (or `family.uid` on an opened template),
+ *       not the version `uid`. Every language and size of a design shares one heart.
+ *       Idempotent: adding one already saved is a 200 and does not count twice. Anything the
+ *       caller could open may be saved, including locked premium designs.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Saved; `likes_count` is the design's new total
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FavouriteToggleResponse' } } }
+ *       404:
+ *         description: No active design with that uid the caller can open
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *   delete:
+ *     summary: Remove a design from My Favourites
+ *     description: Idempotent — removing one that is not saved is a 200. Works even if the design has since gone inactive.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Removed; `likes_count` is the design's new total
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FavouriteToggleResponse' } } }
+ *       404:
+ *         description: No design with that uid
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.put('/me/favourites/templates/:uid', authenticate, favourites.addTemplate);
+router.delete('/me/favourites/templates/:uid', authenticate, favourites.removeTemplate);
+
+/**
+ * @swagger
+ * /users/me/favourites/assets:
+ *   get:
+ *     summary: List My Favourites — assets
+ *     description: >-
+ *       Saved assets, newest first. Locked premium assets keep `thumbnail_s3_key` and omit
+ *       `s3_key`, exactly as in GET /assets. Inactive assets are left out.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: asset_type, schema: { type: string, enum: [icon, emoji, shape, audio, video, animated, bg] } }
+ *       - { in: query, name: limit,  schema: { type: integer, default: 50, maximum: 100 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Assets, each with `is_favourited=true` and `favourited_at`
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FavouriteAssetListResponse' } } }
+ *       400:
+ *         description: Unknown asset_type
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.get('/me/favourites/assets', authenticate, favourites.listAssets);
+
+/**
+ * @swagger
+ * /users/me/favourites/assets/{uid}:
+ *   put:
+ *     summary: Add an asset to My Favourites
+ *     description: Idempotent. Any active asset may be saved, including locked premium ones.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Saved
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FavouriteToggleResponse' } } }
+ *       404:
+ *         description: No active asset with that uid
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *   delete:
+ *     summary: Remove an asset from My Favourites
+ *     description: Idempotent — removing one that is not saved is a 200.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Removed
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FavouriteToggleResponse' } } }
+ *       404:
+ *         description: No asset with that uid
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.put('/me/favourites/assets/:uid', authenticate, favourites.addAsset);
+router.delete('/me/favourites/assets/:uid', authenticate, favourites.removeAsset);
 
 module.exports = router;

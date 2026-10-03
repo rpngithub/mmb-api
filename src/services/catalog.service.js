@@ -7,6 +7,8 @@ const {
 const planRepo      = require('../repositories/plan.repository');
 const couponRepo    = require('../repositories/coupon.repository');
 const variantAccess = require('./variantAccess.service');
+const picker        = require('./templateFamilyPicker');
+const favourites    = require('./favourite.service');
 const pageContent   = require('./pageContent.service');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const { toCardFeatures }   = require('../utils/planFeatures');
@@ -37,18 +39,19 @@ function sortSeriesCollections(plain) {
   return plain;
 }
 
-// Distinct ACTIVE template counts, grouped by variant and by series. One query each,
-// regardless of how many rows are being listed. Series-level counts are DISTINCT across
-// the whole series: a template shared by two variants of one series is counted once.
+// Distinct ACTIVE design (template family) counts, grouped by variant and by series —
+// a design in three languages is one template on the card. One query each, regardless
+// of how many rows are being listed. Series-level counts are DISTINCT across the whole
+// series: a design shared by two variants of one series is counted once.
 async function templateCounts(seriesIds, variantIds) {
   const byVariant = new Map();
   const bySeries  = new Map();
 
   if (variantIds.length) {
     const [rows] = await sequelize.query(
-      `SELECT vt.variant_id AS k, COUNT(DISTINCT vt.template_id) AS n
+      `SELECT vt.variant_id AS k, COUNT(DISTINCT vt.family_id) AS n
          FROM variant_templates vt
-         JOIN templates t ON t.id = vt.template_id AND t.status = 'active'
+         JOIN template_families f ON f.id = vt.family_id AND f.status = 'active'
         WHERE vt.variant_id IN (:ids)
         GROUP BY vt.variant_id`,
       { replacements: { ids: variantIds } },
@@ -58,10 +61,10 @@ async function templateCounts(seriesIds, variantIds) {
 
   if (seriesIds.length) {
     const [rows] = await sequelize.query(
-      `SELECT v.series_id AS k, COUNT(DISTINCT vt.template_id) AS n
+      `SELECT v.series_id AS k, COUNT(DISTINCT vt.family_id) AS n
          FROM variant_templates vt
-         JOIN variants   v ON v.id = vt.variant_id AND v.is_active = 1
-         JOIN templates  t ON t.id = vt.template_id AND t.status = 'active'
+         JOIN variants          v ON v.id = vt.variant_id AND v.is_active = 1
+         JOIN template_families f ON f.id = vt.family_id AND f.status = 'active'
         WHERE v.series_id IN (:ids)
         GROUP BY v.series_id`,
       { replacements: { ids: seriesIds } },
@@ -372,7 +375,7 @@ async function listVariants({ series, series_id, group, group_id } = {}, viewer 
 //
 // A variant with no plan restrictions is locked to everyone. "Variant gate supersedes" —
 // an unlocked viewer gets every active template regardless of is_premium.
-async function getVariantDetail(uid, viewer = null) {
+async function getVariantDetail(uid, viewer = null, query = {}) {
   const variant = await Variant.findOne({
     where:   { uid, is_active: 1 },
     include: [
@@ -393,14 +396,20 @@ async function getVariantDetail(uid, viewer = null) {
   data.is_locked = !unlocked;
   if (data.BrandSeries) data.BrandSeries = sortSeriesCollections(data.BrandSeries);
 
-  const templates = await variant.getTemplates({
+  // One card per design, picked for the viewer by the feed's rules (a design with no
+  // version in their languages is not listed). Unlocked viewers get the picked
+  // version's design JSON; locked ones get the thumbnail only.
+  const families = await variant.getTemplateFamilies({
     where:               { status: 'active' },
-    attributes:          { exclude: ['created_by', ...(unlocked ? [] : ['content'])] },
     joinTableAttributes: [],
     order:               [['id', 'DESC']],
   });
-  data.Templates       = templates.map((t) => ({ ...t.toJSON(), is_locked: !unlocked }));
-  data.templates_count = templates.length;
+  const languageIds = await picker.resolveLanguageRank(query, viewer);
+  data.Templates       = await favourites.markFavourited(
+    await picker.familiesToCards(families, { languageIds, withContent: unlocked }, () => !unlocked),
+    viewer, 'template',
+  );
+  data.templates_count = data.Templates.length;
 
   return data;
 }
@@ -485,7 +494,8 @@ function listBanners(viewer = null) {
 // utils/planFeatures): a label that is never null, plus an on/off flag.
 async function listPlans({ plan_type, billing_option_type } = {}) {
   const filters = {
-    plan_type:           ['subscription', 'access_pass'].includes(plan_type) ? plan_type : 'subscription',
+    // 'free' only when asked for by name: the default grid is what can be bought.
+    plan_type:           ['subscription', 'access_pass', 'free'].includes(plan_type) ? plan_type : 'subscription',
     billing_option_type: ['monthly', 'annual'].includes(billing_option_type) ? billing_option_type : undefined,
   };
 

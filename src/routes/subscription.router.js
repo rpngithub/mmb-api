@@ -65,8 +65,10 @@ router.get('/plans', controller.listPlans);
  *       Returns the user's ACTIVE subscription with its plan, per-feature entitlements
  *       (limit/used/remaining, or enabled for booleans), and billing cycle. Poll this
  *       after checkout to detect activation (the webhook flips the sub to active). When
- *       there is no active subscription, `has_active_subscription` is false and the user
- *       should be treated as free tier. Pending/expired/overridden rows are not returned.
+ *       there is no active subscription, `has_active_subscription` is false, `plan` is the
+ *       free plan (plan_type `free`, or null when none is active) and `features` are its
+ *       limits — gate on them exactly as for a paid plan. Pending/expired/overridden rows
+ *       are not returned.
  *     tags: [Subscriptions]
  *     security: [{ bearerAuth: [] }]
  *     responses:
@@ -107,7 +109,7 @@ router.get('/plans', controller.listPlans);
  *                         uid:         { type: string }
  *                         name:        { type: string }
  *                         description: { type: string }
- *                         plan_type:   { type: string, enum: [subscription, access_pass] }
+ *                         plan_type:   { type: string, enum: [subscription, access_pass, free] }
  *                     billing:
  *                       type: object
  *                       nullable: true

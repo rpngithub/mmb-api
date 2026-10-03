@@ -383,6 +383,10 @@ router.get('/variants', controller.variants);
  *       their businesses to have adopted it. A variant with no plan restrictions is locked to
  *       everyone, and guests are always locked. Opening a template or starting a project from one
  *       is still refused outright while locked.
+ *       `Templates` is one card per design (template family), picked for the viewer by the same
+ *       rules as `GET /templates`: a design with no active version in the viewer's languages (or
+ *       a text-free one) is not listed, and the card shows the highest-ranked language, then the
+ *       default size. `templates_count` on the variant counts designs, not versions.
  *     tags: [Catalog]
  *     security: []
  *     parameters:
@@ -390,9 +394,17 @@ router.get('/variants', controller.variants);
  *         name: uid
  *         required: true
  *         schema: { type: string, format: uuid }
+ *       - in: query
+ *         name: language
+ *         description: "Comma-separated language codes in rank order (e.g. `ta,en`); overrides the saved Preferred Languages."
+ *         schema: { type: string }
+ *       - in: query
+ *         name: all_languages
+ *         description: "Any value: do not narrow by language (the card still prefers English)."
+ *         schema: { type: integer, enum: [1] }
  *     responses:
  *       200:
- *         description: Variant object (with `is_locked`; `Templates` always present, stripped when locked)
+ *         description: Variant object (with `is_locked`; `Templates` = design cards, always present, stripped when locked)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantResponse' } } }
  *       404:
  *         description: Variant not found
@@ -546,7 +558,9 @@ router.get('/banners', controller.banners);
  *       Returns active events that fall within the window — recurring events matched on month-day
  *       (so a Dec→Jan window correctly surfaces Christmas and New Year), one-offs on full_date.
  *       Each event includes an `occurs_on` concrete date (for per-day grouping) and its active
- *       `Templates` (premium ones marked `is_locked`, content withheld). The window is `meta.range`.
+ *       `Templates` — one card per design (template family), picked for the viewer by the same
+ *       language rules as `GET /templates` (a design with no version in the viewer's languages is
+ *       not shown; premium ones marked `is_locked`; cards carry no `content`). The window is `meta.range`.
  *       Default window is this week (rolling 7 days); use `range=month`, `range=year` (rolling
  *       next 365 days) or explicit `from`/`to`. `type` narrows to one or more event types
  *       (comma-separated); `type=festival&range=year` is the full upcoming festival list.
@@ -563,6 +577,8 @@ router.get('/banners', controller.banners);
  *         description: >-
  *           Event type(s), comma-separated. One of holiday (Public Days), festival, celebration,
  *           awareness, custom. Omit for all types.
+ *       - { in: query, name: language,      schema: { type: string }, description: "Comma-separated language codes in rank order (e.g. `ta,en`); overrides the saved Preferred Languages" }
+ *       - { in: query, name: all_languages, schema: { type: integer, enum: [1] }, description: "Any value: do not narrow designs by language" }
  *     responses:
  *       200:
  *         description: Events in the window (each with occurs_on + Templates); meta.range echoes the window, meta.types the type filter
@@ -591,8 +607,11 @@ router.get('/special-events', controller.specialEvents);
  *     parameters:
  *       - in: query
  *         name: plan_type
- *         schema: { type: string, enum: [subscription, access_pass], default: subscription }
- *         description: Defaults to subscription. Use access_pass to fetch the one-time ₹10 pass.
+ *         schema: { type: string, enum: [subscription, access_pass, free], default: subscription }
+ *         description: >
+ *           Defaults to subscription. Use access_pass to fetch the one-time ₹10 pass, or free
+ *           for the free plan (the limits an account without a subscription is held to — never
+ *           for sale, so it is only returned when asked for by name).
  *       - in: query
  *         name: billing_option_type
  *         schema: { type: string, enum: [monthly, annual] }

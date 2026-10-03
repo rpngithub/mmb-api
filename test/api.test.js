@@ -17,8 +17,24 @@ const bcrypt = require('bcryptjs');
 const { JWT_SECRET } = require('../src/config/jwt');
 
 const P = '/api/v1';
+
+// A design with one version, from the flat attributes a template used to take:
+// design-level ones (name, category_id, is_premium, is_popular, template_type,
+// status) go on the family, version-level ones (uid, content, thumbnail_s3_key,
+// language_id, size_id, status) on its version. Returns the VERSION, with its family
+// on `.fam`. Both are tracked for cleanup.
+const FAMILY_KEYS  = ['name', 'category_id', 'is_premium', 'is_popular', 'template_type', 'status'];
+const VERSION_KEYS = ['uid', 'name', 'content', 'thumbnail_s3_key', 'language_id', 'size_id', 'status'];
+const pickKeys = (obj, keys) => Object.fromEntries(Object.entries(obj).filter(([k]) => keys.includes(k)));
+async function createTemplate(attrs = {}) {
+  const fam = await models.TemplateFamily.create({ uid: uuid(), ...pickKeys(attrs, FAMILY_KEYS) });
+  track.templateFamilies.push(fam.id);
+  const tpl = await Template.create({ uid: uuid(), ...pickKeys(attrs, VERSION_KEYS), family_id: fam.id });
+  tpl.fam = fam;
+  return tpl;
+}
 let startLogId = 0;
-const track = { users: [], templates: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [], pageSections: [], specialEvents: [] };
+const track = { users: [], templates: [], templateFamilies: [], variants: [], brandSeries: [], variantBadges: [], stylePersonalities: [], colors: [], faqCategories: [], faqs: [], testimonials: [], tags: [], templateSizes: [], businessCategories: [], templateCategories: [], assets: [], assetCategories: [], coupons: [], fonts: [], frames: [], frameCategories: [], quotaPacks: [], notificationTemplates: [], notificationCategories: [], notificationCampaigns: [], pageSections: [], specialEvents: [] };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -36,7 +52,11 @@ after(async () => {
   if (track.variantBadges.length)      await models.VariantBadge.destroy({ where: { id: track.variantBadges } });
   if (track.stylePersonalities.length) await models.StylePersonality.destroy({ where: { id: track.stylePersonalities } });
   if (track.colors.length)             await models.Color.destroy({ where: { id: track.colors } });
-  if (track.templates.length) await Template.destroy({ where: { id: track.templates } }); // cascades template_tags / _sizes / _business_categories
+  if (track.templates.length) await Template.destroy({ where: { id: track.templates } });
+  // Families last among templates: destroying one cascades its versions and its
+  // tag / industry / variant / event links. Family names are unique and the test DB
+  // persists, so a leftover would collide on the next run.
+  if (track.templateFamilies.length) await models.TemplateFamily.destroy({ where: { id: track.templateFamilies } });
   if (track.tags.length)              await models.Tag.destroy({ where: { id: track.tags } });
   if (track.templateSizes.length)     await models.TemplateSize.destroy({ where: { id: track.templateSizes } });
   // Before the industries: an industry-scoped section cascades away with its
@@ -328,14 +348,18 @@ test('refresh issues an access token with identical claims to login', async () =
 });
 
 // ---------- Premium gating ----------
-test('premium template: locked for guest, unlocked for paid', async () => {
-  const prem = await Template.create({ uid: uuid(), name: 'TST Premium', content: '{"x":1}', is_premium: 1, status: 'active' });
+test('premium template: locked badge for guest, content still served; unlocked for paid', async () => {
+  const prem = await createTemplate({ uid: uuid(), name: 'TST Premium', content: '{"x":1}', is_premium: 1, status: 'active' });
   track.templates.push(prem.id);
 
   const guest = await h.request('GET', `${P}/templates/${prem.uid}`);
   assert.equal(guest.status, 200);
   assert.equal(guest.body.data.is_locked, true);
-  assert.equal(guest.body.data.content, undefined, 'content withheld from guest');
+  assert.equal(guest.body.data.content, '{"x":1}', 'content served so the editor can open it; the client gates export');
+
+  const free = await h.request('GET', `${P}/templates/${prem.uid}`, { token: h.userTokenFor(1, 'free') });
+  assert.equal(free.body.data.is_locked, true);
+  assert.equal(free.body.data.content, '{"x":1}');
 
   const paid = await h.request('GET', `${P}/templates/${prem.uid}`, { token: h.userTokenFor(1, 'paid') });
   assert.equal(paid.body.data.is_locked, false);
@@ -368,9 +392,9 @@ async function makeSeriesWithVariant(label, variantAttrs = {}) {
 
 test('variant detail: card is public and templates are always listed, but locked ones are stripped', async () => {
   const { variant } = await makeSeriesWithVariant('Pro', { description: 'Premium variant', likes_count: 42 });
-  const tpl = await Template.create({ uid: uuid(), name: 'TST Variant Tpl', content: '{"a":1}', status: 'active' });
+  const tpl = await createTemplate({ uid: uuid(), name: 'TST Variant Tpl', content: '{"a":1}', status: 'active' });
   track.templates.push(tpl.id);
-  await variant.setTemplates([tpl.id]);
+  await variant.setTemplateFamilies([tpl.family_id]);
   await variant.setPlans([2]);                 // entitled: Pro (plan id 2)
   await variant.setBusinessCategories([1, 5]); // display tags
 
@@ -405,9 +429,9 @@ test('variant detail: card is public and templates are always listed, but locked
 
 test('variant with no plan restrictions is locked to everyone (incl. subscribers)', async () => {
   const { variant } = await makeSeriesWithVariant('Unrestricted');
-  const tpl = await Template.create({ uid: uuid(), name: 'TST T2', content: '{}', status: 'active' });
+  const tpl = await createTemplate({ uid: uuid(), name: 'TST T2', content: '{}', status: 'active' });
   track.templates.push(tpl.id);
-  await variant.setTemplates([tpl.id]); // no setPlans -> no rows -> nobody
+  await variant.setTemplateFamilies([tpl.family_id]); // no setPlans -> no rows -> nobody
 
   const proUserId = await userWithActivePlan(2, 33);
   const r = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
@@ -420,11 +444,11 @@ test('brand series list: counts, rollup lock state and the variant preview slice
   const second = await models.Variant.create({ uid: uuid(), series_id: series.id, name: 'TST Counts Variant 2', is_active: 1 });
   track.variants.push(second.id);
 
-  const shared = await Template.create({ uid: uuid(), name: 'TST Shared Tpl', content: '{}', status: 'active' });
-  const only   = await Template.create({ uid: uuid(), name: 'TST Only Tpl',   content: '{}', status: 'active' });
+  const shared = await createTemplate({ uid: uuid(), name: 'TST Shared Tpl', content: '{}', status: 'active' });
+  const only   = await createTemplate({ uid: uuid(), name: 'TST Only Tpl',   content: '{}', status: 'active' });
   track.templates.push(shared.id, only.id);
-  await variant.setTemplates([shared.id, only.id]);
-  await second.setTemplates([shared.id]);          // shared across both variants of the series
+  await variant.setTemplateFamilies([shared.family_id, only.family_id]);
+  await second.setTemplateFamilies([shared.family_id]);          // shared across both variants of the series
   await variant.setPlans([2]);
 
   const guest = await h.request('GET', `${P}/brand-series`);
@@ -556,9 +580,9 @@ test('admin variant relations: set plan entitlements + industries, read back', a
 // ---------- "Use This Brand Series" (variant adoption) ----------
 test('add to your business: only an entitled owner can adopt; adoption is durable', async () => {
   const { variant } = await makeSeriesWithVariant('Adopt');
-  const tpl = await Template.create({ uid: uuid(), name: 'TST Adopt Tpl', content: '{"z":1}', status: 'active', category_id: 1 });
+  const tpl = await createTemplate({ uid: uuid(), name: 'TST Adopt Tpl', content: '{"z":1}', status: 'active', category_id: 1 });
   track.templates.push(tpl.id);
-  await variant.setTemplates([tpl.id]);
+  await variant.setTemplateFamilies([tpl.family_id]);
   await variant.setPlans([2]); // Pro-only
 
   const ownerId = (await User.create({ uid: uuid(), name: 'TST Owner', phone: `9${String((Date.now() + 41) % 1000000000).padStart(9, '0')}` })).id;
@@ -629,9 +653,9 @@ test('adoption is per-variant: it does not unlock siblings in the same brand ser
 test('variant templates never surface in the public catalog (category browse + direct fetch + project)', async () => {
   const { variant } = await makeSeriesWithVariant('Leak');
   // a variant template that ALSO carries a public category and is not is_premium — must still be hidden
-  const tpl = await Template.create({ uid: uuid(), name: 'TST Leak Tpl', content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
+  const tpl = await createTemplate({ uid: uuid(), name: 'TST Leak Tpl', content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
   track.templates.push(tpl.id);
-  await variant.setTemplates([tpl.id]);
+  await variant.setTemplateFamilies([tpl.family_id]);
   await variant.setPlans([2]);
 
   const browse = await h.request('GET', `${P}/templates?category_id=2`);
@@ -655,10 +679,10 @@ test('public /templates filters accept slug, uid, and legacy id (backward compat
   const tag = await models.Tag.create({ name: `TST Slug Tag ${stamp}`, slug: `tst-slug-tag-${stamp}` });
   track.tags.push(tag.id);
 
-  const tpl = await Template.create({ uid: uuid(), name: `TST Slug Tpl ${stamp}`, content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
+  const tpl = await createTemplate({ uid: uuid(), name: `TST Slug Tpl ${stamp}`, content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
   track.templates.push(tpl.id);
-  await tpl.setBusinessCategories([1]);
-  await tpl.setTags([tag.id]);
+  await tpl.fam.setBusinessCategories([1]);
+  await tpl.fam.setTags([tag.id]);
 
   const has = (r) => r.body.data.some((t) => t.uid === tpl.uid);
 
@@ -1499,9 +1523,9 @@ test('industry is the public alias for business_category (templates filter, /ind
   assert.ok(industries.body.data.some((c) => c.slug === 'restaurant-food'), '/industries returns rows with slug');
 
   // templates filter: industry=<slug> anchors the browse
-  const tpl = await Template.create({ uid: uuid(), name: `TST Ind Tpl ${Date.now()}`, content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
+  const tpl = await createTemplate({ uid: uuid(), name: `TST Ind Tpl ${Date.now()}`, content: '{"c":1}', status: 'active', category_id: 2, is_premium: 0 });
   track.templates.push(tpl.id);
-  await tpl.setBusinessCategories([1]); // Restaurant & Food (id 1)
+  await tpl.fam.setBusinessCategories([1]); // Restaurant & Food (id 1)
   const byIndustry = await h.request('GET', `${P}/templates?industry=restaurant-food`);
   assert.ok(byIndustry.body.data.some((t) => t.uid === tpl.uid), 'templates?industry=<slug> finds it');
 
@@ -2265,12 +2289,19 @@ test('admin templates: 401 no token, 403 for user, 201 for super admin (audited)
   assert.equal((await h.request('GET', `${P}/admin/templates`)).status, 401);
   assert.equal((await h.request('GET', `${P}/admin/templates`, { token: h.userTokenFor(1) })).status, 403);
 
-  // No `status` here: templates are born as drafts and publishing is gated separately.
+  // No `status` here: families and versions are born as drafts; publishing is gated separately.
+  const fam = await h.request('POST', `${P}/admin/template-families`, {
+    token: h.adminToken(['*']), body: { name: `TST Admin Tpl ${Date.now()}` },
+  });
+  assert.equal(fam.status, 201);
+  track.templateFamilies.push(fam.body.data.id);
+  const size = await models.TemplateSize.create({ uid: uuid(), name: `TST Admin Size ${Date.now()}`, slug: `tst-admin-size-${Date.now()}`, width: 1080, height: 1080 });
+  track.templateSizes.push(size.id);
   const created = await h.request('POST', `${P}/admin/templates`, {
-    token: h.adminToken(['*']), body: { name: 'TST Admin Tpl' },
+    token: h.adminToken(['*']), body: { family_id: fam.body.data.id, language_id: null, size_id: size.id },
   });
   assert.equal(created.status, 201);
-  track.templates.push(created.body.data.id);
+  assert.equal(created.body.data.name, fam.body.data.name, 'a version is named after its family by default');
 
   const logged = await ActivityLog.findOne({ where: { action: 'template.created', entity_id: created.body.data.id } });
   assert.ok(logged, 'mutation written to activity_logs');
@@ -2278,9 +2309,9 @@ test('admin templates: 401 no token, 403 for user, 201 for super admin (audited)
 
 test('limited admin is allowed in-domain but 403 out-of-domain', async () => {
   const token = h.adminToken(['templates.*']);
-  const okTpl = await h.request('POST', `${P}/admin/templates`, { token, body: { name: 'TST Limited Tpl' } });
+  const okTpl = await h.request('POST', `${P}/admin/template-families`, { token, body: { name: `TST Limited Tpl ${Date.now()}` } });
   assert.equal(okTpl.status, 201);
-  track.templates.push(okTpl.body.data.id);
+  track.templateFamilies.push(okTpl.body.data.id);
 
   const denied = await h.request('POST', `${P}/admin/plans`, { token, body: { name: 'TST Plan' } });
   assert.equal(denied.status, 403);
@@ -2428,107 +2459,134 @@ test('admin testimonials: missing name -> clean 400, rating bounded 1..5', async
 
 // ---------- Templates: server-side publish gate ----------
 // The admin panel gates publish in the UI; these assert the same rules server-side,
-// so a direct PATCH can't push an empty template live.
-test('admin templates: publish is gated on bundle + thumbnail + anchor + size + tag', async () => {
+// so a direct PATCH can't push an empty design live. Two levels: a VERSION needs a
+// bundle, a thumbnail and a size; a FAMILY needs an anchor, a tag and an active
+// English (or text-free) version in ANY size — the default size is only a catalogue
+// ranking preference, never a publish requirement.
+const withDefaultSize = async (slug, fn) => {
+  const setting = await models.AppSetting.findOne({ where: { key: 'default_template_size' } });
+  const before  = setting.value;
+  await setting.update({ value: slug });
+  try { return await fn(); } finally { await setting.update({ value: before }); }
+};
+
+test('admin templates: a version publishes on bundle + thumbnail + size; a family on anchor + tag + English version in any size', async () => {
   const token = h.adminToken(['*']);
   const stamp = Date.now();
+  const en = await models.Language.findOne({ where: { code: 'en' } });
+  const ta = await models.Language.findOne({ where: { code: 'ta' } });
+  const size   = await models.TemplateSize.create({ uid: uuid(), name: `TST Gate 4x5 ${stamp}`, slug: `tst-gate-4x5-${stamp}`, width: 1080, height: 1350 });
+  const square = await models.TemplateSize.create({ uid: uuid(), name: `TST Gate 1x1 ${stamp}`, slug: `tst-gate-1x1-${stamp}`, width: 1080, height: 1080 });
+  track.templateSizes.push(size.id, square.id);
 
-  // A new template can never be complete — content/thumbnail are written by the bundle
-  // flow, which needs the uid that create returns. So creating straight into `active` fails.
-  const born = await h.request('POST', `${P}/admin/templates`, { token, body: { name: `TST Gate ${stamp}`, status: 'active' } });
-  assert.equal(born.status, 400);
-  assert.equal(born.body.error.code, 'VALIDATION_ERROR');
+  await withDefaultSize(size.slug, async () => {
+    // A new family can never be complete — it has no versions yet.
+    const born = await h.request('POST', `${P}/admin/template-families`, { token, body: { name: `TST Gate ${stamp}`, status: 'active' } });
+    assert.equal(born.status, 400);
+    assert.equal(born.body.error.code, 'VALIDATION_ERROR');
 
-  const created = await h.request('POST', `${P}/admin/templates`, { token, body: { name: `TST Gate ${stamp}` } });
-  assert.equal(created.status, 201);
-  assert.equal(created.body.data.status, 'draft', 'templates are born as drafts');
-  const tpl = created.body.data;
-  track.templates.push(tpl.id);
+    const fam = (await h.request('POST', `${P}/admin/template-families`, { token, body: { name: `TST Gate ${stamp}` } })).body.data;
+    track.templateFamilies.push(fam.id);
+    assert.equal(fam.status, 'draft', 'families are born as drafts');
 
-  // Name only -> refused, with one details entry per unmet requirement.
-  const blocked = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { status: 'active' } });
-  assert.equal(blocked.status, 400);
-  assert.equal(blocked.body.error.code, 'VALIDATION_ERROR');
-  assert.deepEqual(
-    blocked.body.error.details.map((d) => d.field).sort(),
-    ['category_id', 'content', 'size_ids', 'tag_ids', 'thumbnail_s3_key'],
-  );
+    const blocked = await h.request('PATCH', `${P}/admin/template-families/${fam.uid}`, { token, body: { status: 'active' } });
+    assert.equal(blocked.status, 400);
+    assert.deepEqual(blocked.body.error.details.map((d) => d.field).sort(), ['category_id', 'tag_ids', 'versions']);
 
-  // Un-publishing is never gated, even while incomplete.
-  const down = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { status: 'inactive' } });
-  assert.equal(down.status, 200);
+    // A version: born a draft; its own gate is bundle + thumbnail (+ size, given on create).
+    // Deliberately NOT the default size: a single-format design must still publish.
+    const v = (await h.request('POST', `${P}/admin/templates`, { token, body: { family_id: fam.id, language_id: en.id, size_id: square.id } })).body.data;
+    const vBlocked = await h.request('PATCH', `${P}/admin/templates/${v.uid}`, { token, body: { status: 'active' } });
+    assert.equal(vBlocked.status, 400);
+    assert.deepEqual(vBlocked.body.error.details.map((d) => d.field).sort(), ['content', 'thumbnail_s3_key']);
+    await Template.update({ content: '{"c":1}', thumbnail_s3_key: `templates/${v.uid}/cover.png` }, { where: { id: v.id } });
+    assert.equal((await h.request('PATCH', `${P}/admin/templates/${v.uid}`, { token, body: { status: 'active' } })).status, 200);
 
-  const tag  = await models.Tag.create({ name: `TST Gate Tag ${stamp}`, slug: `tst-gate-tag-${stamp}` });
-  track.tags.push(tag.id);
-  const size = await models.TemplateSize.create({ uid: uuid(), name: `TST Gate Size ${stamp}`, slug: `tst-gate-size-${stamp}`, width: 1080, height: 1080 });
-  track.templateSizes.push(size.id);
+    // Same language + size again -> 409; a text-free version cannot join a family with languages.
+    assert.equal((await h.request('POST', `${P}/admin/templates`, { token, body: { family_id: fam.id, language_id: en.id, size_id: square.id } })).status, 409);
+    assert.equal((await h.request('POST', `${P}/admin/templates`, { token, body: { family_id: fam.id, language_id: null, size_id: size.id } })).status, 400);
 
-  const row = await Template.findByPk(tpl.id);
-  await row.update({ content: '{"c":1}', thumbnail_s3_key: `templates/${tpl.uid}/cover.png` });
-  await row.setTemplateSizes([size.id]);
-  await row.setBusinessCategories([1]); // industry only, no category_id -> the "category OR industry" branch
+    const tag = await models.Tag.create({ name: `TST Gate Tag ${stamp}`, slug: `tst-gate-tag-${stamp}` });
+    track.tags.push(tag.id);
+    const famRow = await models.TemplateFamily.findByPk(fam.id);
+    await famRow.setBusinessCategories([1]); // industry only -> the "category OR industry" branch
 
-  // Everything but the tag.
-  const noTag = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { status: 'active' } });
-  assert.equal(noTag.status, 400);
-  assert.deepEqual(noTag.body.error.details.map((d) => d.field), ['tag_ids']);
+    const noTag = await h.request('PATCH', `${P}/admin/template-families/${fam.uid}`, { token, body: { status: 'active' } });
+    assert.deepEqual(noTag.body.error.details.map((d) => d.field), ['tag_ids']);
+    await famRow.setTags([tag.id]);
 
-  await row.setTags([tag.id]);
-  const published = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { status: 'active' } });
-  assert.equal(published.status, 200);
-  assert.equal(published.body.data.status, 'active', 'publishes once complete (industry satisfies the anchor)');
+    const live = await h.request('PATCH', `${P}/admin/template-families/${fam.uid}`, { token, body: { status: 'active' } });
+    assert.equal(live.status, 200);
+    assert.equal(live.body.data.status, 'active');
+
+    // A Tamil version alone would not have satisfied it: the gate wants English (or text-free).
+    const tamil = (await h.request('POST', `${P}/admin/templates`, { token, body: { family_id: fam.id, language_id: ta.id, size_id: size.id } })).body.data;
+    assert.equal(tamil.status, 'draft');
+
+    // Unpublishing the required version takes the live family back to draft.
+    assert.equal((await h.request('PATCH', `${P}/admin/templates/${v.uid}`, { token, body: { status: 'inactive' } })).status, 200);
+    await famRow.reload();
+    assert.equal(famRow.status, 'draft', 'a family that lost its only active English version is no longer live');
+  });
 });
 
-test('admin templates: the anchor may be satisfied by category_id in the same request as status', async () => {
+test('admin templates: the family anchor may be satisfied by category_id in the same request as status', async () => {
   const token = h.adminToken(['*']);
   const stamp = Date.now();
 
-  const tpl = await Template.create({
-    uid: uuid(), name: `TST Anchor ${stamp}`, content: '{"c":1}',
-    thumbnail_s3_key: 'templates/x/thumb.png', status: 'draft',
+  const tpl = await createTemplate({
+    name: `TST Anchor ${stamp}`, content: '{"c":1}', thumbnail_s3_key: 'templates/x/thumb.png', status: 'draft',
   });
-  track.templates.push(tpl.id);
+  await tpl.update({ status: 'active' });
   const tag = await models.Tag.create({ name: `TST Anchor Tag ${stamp}`, slug: `tst-anchor-tag-${stamp}` });
   track.tags.push(tag.id);
-  const size = await models.TemplateSize.create({ uid: uuid(), name: `TST Anchor Size ${stamp}`, slug: `tst-anchor-size-${stamp}`, width: 720, height: 720 });
-  track.templateSizes.push(size.id);
-  await tpl.setTags([tag.id]);
-  await tpl.setTemplateSizes([size.id]);
+  await tpl.fam.setTags([tag.id]);
 
-  // No category and no industry yet -> the anchor is the only thing missing.
-  const blocked = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { status: 'active' } });
+  // No category and no industry yet -> the anchor is the only thing missing (no default
+  // size is set in the test DB, so the text-free version satisfies the version rule).
+  const blocked = await h.request('PATCH', `${P}/admin/template-families/${tpl.fam.uid}`, { token, body: { status: 'active' } });
   assert.equal(blocked.status, 400);
   assert.deepEqual(blocked.body.error.details.map((d) => d.field), ['category_id']);
 
   // Setting the category alongside status is judged on the post-update state, not the old row.
-  const ok = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { category_id: 2, status: 'active' } });
+  const ok = await h.request('PATCH', `${P}/admin/template-families/${tpl.fam.uid}`, { token, body: { category_id: 2, status: 'active' } });
   assert.equal(ok.status, 200);
   assert.equal(ok.body.data.status, 'active');
 });
 
 // ---------- Templates: admin list completeness signals ----------
-test('admin template list carries tag/size/industry counts and bundle flags', async () => {
+test('admin family list carries counts, languages/sizes and readiness; version list carries bundle flags', async () => {
   const token = h.adminToken(['*']);
   const stamp = Date.now();
 
-  const tpl = await Template.create({ uid: uuid(), name: `TST Counts ${stamp}`, content: '{"c":1}', status: 'draft', category_id: 2 });
-  track.templates.push(tpl.id);
+  const tpl = await createTemplate({ name: `TST Counts ${stamp}`, content: '{"c":1}', status: 'draft', category_id: 2 });
   const tag = await models.Tag.create({ name: `TST Counts Tag ${stamp}`, slug: `tst-counts-tag-${stamp}` });
   track.tags.push(tag.id);
-  await tpl.setTags([tag.id]);
-  await tpl.setBusinessCategories([1]);
+  await tpl.fam.setTags([tag.id]);
+  await tpl.fam.setBusinessCategories([1]);
 
-  const list = await h.request('GET', `${P}/admin/templates?search=${encodeURIComponent(`TST Counts ${stamp}`)}`, { token });
+  const list = await h.request('GET', `${P}/admin/template-families?search=${encodeURIComponent(`TST Counts ${stamp}`)}`, { token });
   assert.equal(list.status, 200);
-  const row = list.body.data.find((t) => t.uid === tpl.uid);
-  assert.ok(row, 'template present in the admin list');
+  const row = list.body.data.find((t) => t.uid === tpl.fam.uid);
+  assert.ok(row, 'family present in the admin list');
   assert.equal(Number(row.tag_count), 1);
-  assert.equal(Number(row.size_count), 0, 'no sizes assigned -> not publishable');
   assert.equal(Number(row.industry_count), 1);
-  assert.equal(Number(row.has_content), 1);
-  assert.equal(Number(row.has_thumbnail), 0);
-  assert.equal(row.content, undefined, 'heavy content blob still excluded from list rows');
+  assert.equal(Number(row.version_count), 1);
+  assert.equal(Number(row.active_version_count), 0);
+  assert.equal(row.text_free, true);
+  assert.deepEqual(row.readiness.map((r) => r.field), ['versions'], 'only the live version is missing');
   assert.equal(typeof list.body.meta.total, 'number');
+
+  const single = await h.request('GET', `${P}/admin/template-families?single_version=1&search=${encodeURIComponent(`TST Counts ${stamp}`)}`, { token });
+  assert.ok(single.body.data.some((f) => f.uid === tpl.fam.uid), 'single_version finds merge candidates');
+
+  const versions = await h.request('GET', `${P}/admin/templates?family_uid=${tpl.fam.uid}`, { token });
+  assert.equal(versions.status, 200);
+  const v = versions.body.data.find((t) => t.uid === tpl.uid);
+  assert.equal(Number(v.has_content), 1);
+  assert.equal(Number(v.has_thumbnail), 0);
+  assert.equal(v.content, undefined, 'heavy content blob still excluded from list rows');
+  assert.equal(v.family.uid, tpl.fam.uid);
 });
 
 // ---------- Templates: is_popular flag + filter ----------
@@ -2536,23 +2594,22 @@ test('templates: is_popular is admin-settable and filters both the public and ad
   const token = h.adminToken(['*']);
   const stamp = Date.now();
 
-  // Defaults to 0; only 0/1 is accepted.
-  const created = await h.request('POST', `${P}/admin/templates`, { token, body: { name: `TST Popular ${stamp}` } });
+  // Defaults to 0; only 0/1 is accepted. It is a design-level flag.
+  const created = await h.request('POST', `${P}/admin/template-families`, { token, body: { name: `TST Popular ${stamp}` } });
   assert.equal(created.status, 201);
-  track.templates.push(created.body.data.id);
+  track.templateFamilies.push(created.body.data.id);
   assert.equal(Number(created.body.data.is_popular), 0, 'defaults to not popular');
 
-  const bad = await h.request('PATCH', `${P}/admin/templates/${created.body.data.uid}`, { token, body: { is_popular: 2 } });
+  const bad = await h.request('PATCH', `${P}/admin/template-families/${created.body.data.uid}`, { token, body: { is_popular: 2 } });
   assert.equal(bad.status, 400);
 
-  const flagged = await h.request('PATCH', `${P}/admin/templates/${created.body.data.uid}`, { token, body: { is_popular: 1 } });
+  const flagged = await h.request('PATCH', `${P}/admin/template-families/${created.body.data.uid}`, { token, body: { is_popular: 1 } });
   assert.equal(flagged.status, 200, JSON.stringify(flagged.body));
   assert.equal(Number(flagged.body.data.is_popular), 1);
 
-  // Two active rows in the same category, one popular, one not.
-  const pop = await Template.create({ uid: uuid(), name: `TST Pop Yes ${stamp}`, content: '{"c":1}', status: 'active', category_id: 2, is_popular: 1 });
-  const not = await Template.create({ uid: uuid(), name: `TST Pop No ${stamp}`,  content: '{"c":1}', status: 'active', category_id: 2, is_popular: 0 });
-  track.templates.push(pop.id, not.id);
+  // Two active designs in the same category, one popular, one not.
+  const pop = await createTemplate({ name: `TST Pop Yes ${stamp}`, content: '{"c":1}', status: 'active', category_id: 2, is_popular: 1 });
+  const not = await createTemplate({ name: `TST Pop No ${stamp}`,  content: '{"c":1}', status: 'active', category_id: 2, is_popular: 0 });
 
   const uids = (r) => new Set(r.body.data.map((t) => t.uid));
 
@@ -2570,28 +2627,33 @@ test('templates: is_popular is admin-settable and filters both the public and ad
   const pubNot = await h.request('GET', `${P}/templates?category_id=2&is_popular=0&limit=100`);
   assert.ok(!uids(pubNot).has(pop.uid) && uids(pubNot).has(not.uid), 'is_popular=0 is the complement');
 
-  const admPop = await h.request('GET', `${P}/admin/templates?search=${encodeURIComponent(`TST Pop`)}&is_popular=1&limit=100`, { token });
+  const admPop = await h.request('GET', `${P}/admin/template-families?search=${encodeURIComponent(`TST Pop`)}&is_popular=1&limit=100`, { token });
   assert.equal(admPop.status, 200);
-  assert.ok(uids(admPop).has(pop.uid) && !uids(admPop).has(not.uid), 'admin list honours is_popular=1');
+  assert.ok(uids(admPop).has(pop.fam.uid) && !uids(admPop).has(not.fam.uid), 'admin family list honours is_popular=1');
 });
 
 // ---------- Templates: relations naming ----------
-test('template relations return Industries (with BusinessCategories kept as a deprecated alias)', async () => {
+test('family relations return Industries (with BusinessCategories kept as a deprecated alias)', async () => {
   const token = h.adminToken(['*']);
-  const tpl = await Template.create({ uid: uuid(), name: `TST Rel ${Date.now()}`, status: 'draft' });
-  track.templates.push(tpl.id);
+  const tpl = await createTemplate({ name: `TST Rel ${Date.now()}`, status: 'draft' });
 
   // The PUT takes `industry_ids`...
-  const put = await h.request('PUT', `${P}/admin/templates/${tpl.uid}/relations`, { token, body: { industry_ids: [1] } });
+  const put = await h.request('PUT', `${P}/admin/template-families/${tpl.fam.uid}/relations`, { token, body: { industry_ids: [1] } });
   assert.equal(put.status, 200);
 
   // ...and the GET now answers with the matching `Industries` key.
-  const rel = await h.request('GET', `${P}/admin/templates/${tpl.uid}/relations`, { token });
+  const rel = await h.request('GET', `${P}/admin/template-families/${tpl.fam.uid}/relations`, { token });
   assert.equal(rel.status, 200);
   assert.equal(rel.body.data.Industries.length, 1);
   assert.equal(rel.body.data.Industries[0].id, 1);
   assert.deepEqual(rel.body.data.BusinessCategories, rel.body.data.Industries, 'deprecated alias mirrors it');
   assert.deepEqual(put.body.data.Industries, rel.body.data.Industries, 'PUT response has the same shape');
+
+  // The deprecated version-uid route acts on the version's family.
+  const old = await h.request('GET', `${P}/admin/templates/${tpl.uid}/relations`, { token });
+  assert.equal(old.body.data.uid, tpl.fam.uid);
+  // Sizes are per version now.
+  assert.equal((await h.request('PUT', `${P}/admin/template-families/${tpl.fam.uid}/relations`, { token, body: { size_ids: [1] } })).status, 400);
 });
 
 // ---------- Templates: thumbnail swap without re-uploading the bundle ----------
@@ -2604,7 +2666,7 @@ test('bundle/confirm accepts thumbnail_filename alone (no content) and rejects a
   s3.putObjectTagging = async (key, status) => { tagged.push([key, status]); };
 
   try {
-    const tpl = await Template.create({ uid: uuid(), name: `TST Thumb ${Date.now()}`, content: '{"c":1}', status: 'draft' });
+    const tpl = await createTemplate({ uid: uuid(), name: `TST Thumb ${Date.now()}`, content: '{"c":1}', status: 'draft' });
     track.templates.push(tpl.id);
 
     const empty = await h.request('POST', `${P}/admin/templates/${tpl.uid}/bundle/confirm`, { token, body: {} });
@@ -3327,9 +3389,22 @@ test('uploads require authentication', async () => {
 // ---------- Storage quota ----------
 const MB = 1024 * 1024;
 
-const storageUsed = async (userId) => {
-  const row = await models.UserQuotaUsage.findOne({ where: { user_id: userId } });
-  return row ? Number(row.storage_used_bytes) : 0;
+// A user's counter for one feature, in counter units (bytes for storage).
+const counterUsed = async (userId, key) => {
+  const ft  = await models.FeatureType.findOne({ where: { key } });
+  const row = await models.UserQuotaCounter.findOne({ where: { user_id: userId, feature_type_id: ft.id } });
+  return row ? Number(row.used) : 0;
+};
+const storageUsed = (userId) => counterUsed(userId, 'storage');
+
+// Run `fn` with no active free plan, i.e. with accounts that have no subscription
+// back to being unmetered. Restores whatever was active.
+const withoutFreePlan = async (fn) => {
+  const free = await models.Plan.findAll({ where: { plan_type: 'free', status: 'active' } });
+  await models.Plan.update({ status: 'inactive' }, { where: { id: free.map((p) => p.id) } });
+  try { return await fn(); } finally {
+    if (free.length) await models.Plan.update({ status: 'active' }, { where: { id: free.map((p) => p.id) } });
+  }
 };
 
 // Temporarily narrow the Free plan's storage allowance (feature_type 5) so the
@@ -3350,7 +3425,7 @@ const uploadOf = async (token, slot, size) => withStubbedS3(async () => {
   return { key, status: r.status, body: r.body };
 }, { size });
 
-test('storage is charged to storage_used_bytes on confirm, once per key', async () => {
+test('storage is charged to the storage counter on confirm, once per key', async () => {
   const userId = await userWithActivePlan(1, 9101);          // Free: 100 MB
   const token  = h.userTokenFor(userId);
 
@@ -3358,7 +3433,7 @@ test('storage is charged to storage_used_bytes on confirm, once per key', async 
 
   const { key, status } = await uploadOf(token, 'media_library', 2 * MB);
   assert.equal(status, 200);
-  assert.equal(await storageUsed(userId), 2 * MB, 'charged to the bytes column, not a phantom storage_count');
+  assert.equal(await storageUsed(userId), 2 * MB, 'charged in bytes');
 
   const ledger = await models.UserUpload.findOne({ where: { s3_key: key } });
   assert.equal(Number(ledger.bytes), 2 * MB);
@@ -3405,18 +3480,27 @@ test('an unenforced account reports its usage with no limit', async () => {
   const u     = await mkUser('QuotaFree');          // no subscription at all
   const token = h.userTokenFor(u.id);
 
-  const q = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
-  assert.equal(q.unlimited, true);
-  assert.equal(q.limit_bytes, null);
-  assert.equal(q.remaining_bytes, null);
-  assert.equal(q.used_bytes, 0, 'recorded even where it is not enforced');
-  assert.equal(q.max_upload_bytes, 10 * MB, 'the per-file cap still applies');
+  // No subscription AND no active free plan: nothing to hold the account to.
+  await withoutFreePlan(async () => {
+    const q = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+    assert.equal(q.unlimited, true);
+    assert.equal(q.limit_bytes, null);
+    assert.equal(q.remaining_bytes, null);
+    assert.equal(q.used_bytes, 0, 'recorded even where it is not enforced');
+    assert.equal(q.max_upload_bytes, 10 * MB, 'the per-file cap still applies');
 
-  // Usage is still counted, so switching enforcement on later needs no backfill.
-  await uploadOf(token, 'media_library', 1 * MB);
-  const after = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
-  assert.equal(after.used_bytes, 1 * MB);
-  assert.equal(after.remaining_bytes, null, 'still no ceiling to count down from');
+    // Usage is still counted, so switching enforcement on later needs no backfill.
+    await uploadOf(token, 'media_library', 1 * MB);
+    const after = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+    assert.equal(after.used_bytes, 1 * MB);
+    assert.equal(after.remaining_bytes, null, 'still no ceiling to count down from');
+  });
+
+  // With the free plan active, the same account is held to its allowance — and
+  // what it already used counts.
+  const held = (await h.request('GET', `${P}/uploads/quota`, { token })).body.data;
+  assert.equal(held.limit_bytes, 100 * MB, 'the free plan\'s 100 MB');
+  assert.equal(held.remaining_bytes, 99 * MB);
 });
 
 test('deleting the file that used the storage gives the bytes back', async () => {
@@ -4428,7 +4512,7 @@ test('template browse narrows to the viewer\'s languages, keeping language-neutr
   const ml = await models.Language.findOne({ where: { code: 'ml' } });
 
   const mk = async (label, languageId) => {
-    const t = await Template.create({
+    const t = await createTemplate({
       uid: uuid(), name: `TST Lang ${label} ${stamp}`, content: '{"c":1}', status: 'active',
       category_id: 2, language_id: languageId,
     });
@@ -4487,7 +4571,7 @@ test('admin can set a template language, and languages are admin-managed', async
     token, body: { code: 'zz', name: `TST Lang Dup ${stamp}`, native_name: 'ZZ2' },
   })).status, 409);
 
-  const tpl = await Template.create({ uid: uuid(), name: `TST LangSet ${stamp}`, content: '{"c":1}', status: 'draft' });
+  const tpl = await createTemplate({ uid: uuid(), name: `TST LangSet ${stamp}`, content: '{"c":1}', status: 'draft' });
   track.templates.push(tpl.id);
   const tagged = await h.request('PATCH', `${P}/admin/templates/${tpl.uid}`, { token, body: { language_id: langId } });
   assert.equal(tagged.status, 200);
@@ -5555,33 +5639,22 @@ const withPlanFeature = async (planId, key, value, fn) => {
   }
 };
 
-const creditsUsed = async (userId) => {
-  const row = await models.UserQuotaUsage.findOne({ where: { user_id: userId } });
-  return row ? Number(row.ai_credits_used) : 0;
-};
+const creditsUsed = (userId) => counterUsed(userId, 'ai_credits');
 
-test('MODE agrees with feature_types.reset_period for every metered feature', async () => {
-  // The map is hardcoded because a column name cannot be read out of a row, so
-  // this is what stops it drifting from the data it is meant to mirror. A feature
-  // that resets is a tally (top-ups debit it); one that never resets is a level
-  // (top-ups raise its ceiling).
-  //
-  // Checked over the keys the map declares, not over every row in the table: a
-  // feature type invented at runtime has no counter column either, so it is not
-  // metered at all and there is nothing for the map to be wrong about.
-  for (const key of Object.keys(quotaSvc.MODE)) {
+test('every meter exists as a feature type with a reset period it supports', async () => {
+  // A meter's shape is read off its feature type (reset 'never' = a level, else a
+  // tally), so the row has to exist and carry a period the meter can honour —
+  // storage reset monthly would hand out free space every month.
+  const { METERS, modeOf } = require('../src/constants/quotaMeters');
+  for (const [key, meter] of Object.entries(METERS)) {
     const ft = await models.FeatureType.findOne({ where: { key } });
-    assert.ok(ft, `${key} is in MODE but not in feature_types`);
-    const expected = ft.reset_period === 'never' ? 'gauge' : 'flow';
-    assert.equal(quotaSvc.MODE[key], expected,
-      `${key} resets ${ft.reset_period}, so it must be a ${expected}`);
+    assert.ok(ft, `${key} is a meter but not a feature type`);
+    assert.equal(ft.data_type, 'integer', `${key} is a meter, so an integer feature`);
+    assert.ok(meter.resets.includes(ft.reset_period), `${key} cannot reset ${ft.reset_period}`);
   }
-
-  // And every counter the service knows how to write has to declare its shape,
-  // or it would silently default to a tally and be zeroed every month.
-  for (const key of Object.keys(quotaSvc.FIELD)) {
-    assert.ok(quotaSvc.MODE[key], `${key} has a counter column but no MODE entry`);
-  }
+  assert.equal(modeOf({ reset_period: 'never' }), 'gauge');
+  assert.equal(modeOf({ reset_period: 'monthly' }), 'flow');
+  assert.equal(modeOf({ reset_period: 'annual' }), 'flow');
 });
 
 test('a storage top-up raises the ceiling, and freeing space returns the purchased headroom', async () => {
@@ -5672,21 +5745,62 @@ test('the cycle reset zeroes the flow counters, and leaves levels and grants alo
     const grant = await mkGrant(userId, 'ai_credits', 10);
     await quotaSvc.consume(userId, 'ai_credits', 3, { source: 'image_generation' });
 
+    const counters = require('../src/repositories/userQuotaCounter.repository');
+    await counters.increment(userId, await featureIdFor('storage'), 4 * MB);
+    await counters.increment(userId, await featureIdFor('template_views'), 7);
+
     const row = await models.UserQuotaUsage.findOne({ where: { user_id: userId } });
-    await row.update({
-      storage_used_bytes: 4 * MB, template_views_count: 7,
-      period_start: '2026-01-01', period_end: '2026-02-01',   // expired
-    });
+    await row.update({ period_start: '2026-01-01', period_end: '2026-02-01' });   // expired
 
     const window = await quotaSvc.ensureCurrentPeriod(userId);
     assert.ok(window && new Date(window.end) > new Date(), 'rolled onto the current window');
+    assert.deepEqual(Object.keys(window).sort(), ['end', 'start'], 'only the dates reach the API');
 
-    await row.reload();
-    assert.equal(Number(row.ai_credits_used), 0, 'the monthly tally starts again');
-    assert.equal(Number(row.storage_used_bytes), 4 * MB, 'storage is occupancy, not a tally — zeroing it would hand out free space');
-    assert.equal(Number(row.template_views_count), 7, 'reset_period never — a lifetime total, not a cycle one');
+    assert.equal(await creditsUsed(userId), 0, 'the monthly tally starts again');
+    assert.equal(await storageUsed(userId), 4 * MB, 'storage is occupancy, not a tally — zeroing it would hand out free space');
+    assert.equal(await counterUsed(userId, 'template_views'), 7, 'reset_period never — a lifetime total, not a cycle one');
     assert.equal(Number((await grant.reload()).consumed), 3, 'purchased credits stay spent across the boundary');
   });
+});
+
+test('an annual meter resets on the anniversary of the anchor, not every month', async () => {
+  const userId = await userWithActivePlan(1, 9306);
+  const sub    = await UserSubscription.findOne({ where: { user_id: userId, status: 'active' } });
+  const ft     = await models.FeatureType.findOne({ where: { key: 'downloads' } });
+  const counters = require('../src/repositories/userQuotaCounter.repository');
+  await ft.update({ reset_period: 'annual' });
+
+  try {
+    const roll = async (anchor, previousStart) => {
+      await sub.update({ starts_at: anchor });
+      await counters.increment(userId, ft.id, 4);
+      if (!(await models.UserQuotaUsage.findOne({ where: { user_id: userId } }))) {
+        await models.UserQuotaUsage.create({ user_id: userId });
+      }
+      await models.UserQuotaUsage.update(
+        { period_start: previousStart, period_end: '2000-01-02' },   // long expired
+        { where: { user_id: userId } },
+      );
+      await quotaSvc.ensureCurrentPeriod(userId);
+      return counterUsed(userId, 'downloads');
+    };
+
+    const now = new Date();
+    const ymd = (d) => [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+
+    // Anchored 3 months ago, last window 2 months ago: same year of the plan.
+    const anchorA = quotaSvc.addMonthsClamped(now, -3);
+    assert.equal(await roll(anchorA, ymd(quotaSvc.addMonthsClamped(anchorA, 1))), 4,
+      'a month boundary inside the plan year leaves an annual tally alone');
+
+    // Anchored 13 months ago, last window 11 months after it: the year rolled over.
+    await counters.reset(userId, [ft.id]);
+    const anchorB = quotaSvc.addMonthsClamped(now, -13);
+    assert.equal(await roll(anchorB, ymd(quotaSvc.addMonthsClamped(anchorB, 11))), 0,
+      'crossing the anniversary starts the annual tally again');
+  } finally {
+    await ft.update({ reset_period: 'monthly' });
+  }
 });
 
 test('the usage window is anchored to the subscription day-of-month, clamped at month ends', async () => {
@@ -5706,15 +5820,26 @@ test('the usage window is anchored to the subscription day-of-month, clamped at 
   assert.equal(window.end, '2026-02-28', 'the reset date the app shows is a real calendar day');
 });
 
-test('an account with no subscription has no window to reset against', async () => {
+test('an account with no subscription and no free plan has no window to reset against', async () => {
   const u = await mkUser('NoCycle');
-  await quotaSvc.consume(u.id, 'downloads', 1, { source: 'download' });
-  // Usage is still RECORDED for the free tier — it just is not enforced, and
-  // there is no anchor to compute an honest reset date from.
-  assert.equal(await quotaSvc.ensureCurrentPeriod(u.id), null);
-  const row = await models.UserQuotaUsage.findOne({ where: { user_id: u.id } });
-  assert.equal(row.period_end, null);
-  assert.equal(Number(row.downloads_count), 1);
+  await withoutFreePlan(async () => {
+    await quotaSvc.consume(u.id, 'downloads', 1, { source: 'download' });
+    // Usage is still RECORDED — it just is not enforced, and there is no anchor
+    // to compute an honest reset date from.
+    assert.equal(await quotaSvc.ensureCurrentPeriod(u.id), null);
+    const row = await models.UserQuotaUsage.findOne({ where: { user_id: u.id } });
+    assert.equal(row.period_end, null);
+    assert.equal(await counterUsed(u.id, 'downloads'), 1);
+  });
+});
+
+test('on the free plan the window is anchored to the signup date', async () => {
+  const u = await mkUser('FreeCycle');
+  await models.User.update({ created_at: new Date(2026, 0, 31) }, { where: { id: u.id } });
+
+  const window = await quotaSvc.currentWindow(u.id, new Date(2026, 1, 10));
+  assert.equal(window.start, '2026-01-31');
+  assert.equal(window.end, '2026-02-28');
 });
 
 test('the top-up store lists active packs for one feature with the tax-inclusive total', async () => {
@@ -5794,12 +5919,14 @@ test('buying a top-up creates a pending grant, and the webhook activates it once
 test('a top-up that would buy nothing is refused rather than sold', async () => {
   const pack = await mkQuotaPack();
 
-  // No subscription: the feature is not metered for this account at all, so extra
-  // headroom would sit on top of nothing.
+  // No subscription and no free plan: the feature is not metered for this account
+  // at all, so extra headroom would sit on top of nothing.
   const free = await mkUser('NoPlanTopup');
-  const noPlan = await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token: h.userTokenFor(free.id) });
-  assert.equal(noPlan.status, 409);
-  assert.match(noPlan.body.error.message, /paid plans/);
+  await withoutFreePlan(async () => {
+    const noPlan = await h.request('POST', `${P}/quota/packs/${pack.uid}/purchase`, { token: h.userTokenFor(free.id) });
+    assert.equal(noPlan.status, 409);
+    assert.match(noPlan.body.error.message, /paid plans/);
+  });
 
   // Subscribed, but the plan already grants the feature without limit (seeded Pro
   // is -1 for AI credits) — there is no ceiling to raise.
@@ -6819,4 +6946,639 @@ test('the notifications permission grant is additive and idempotent', async () =
   assert.deepEqual(again.permissions, before, 're-running must not duplicate the grant');
   // Campaigns are deliberately withheld from content_admin.
   assert.ok(!again.permissions.includes('notification_campaigns.*'));
+});
+
+// ---------- Template families: one card per design, versions per language × size ----------
+// Fixture: two sizes (a 4:5 made the default for the test, and a 1:1) and a design
+// with versions in several languages, built directly so each test states its own shape.
+async function familyFixture(label) {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const lang = Object.fromEntries((await models.Language.findAll({ where: { code: ['en', 'ta', 'ml'] } })).map((l) => [l.code, l.id]));
+  const portrait = await models.TemplateSize.create({ uid: uuid(), name: `TST ${label} 4x5 ${stamp}`, slug: `tst-${label.toLowerCase()}-4x5-${stamp}`, width: 1080, height: 1350 });
+  const square   = await models.TemplateSize.create({ uid: uuid(), name: `TST ${label} 1x1 ${stamp}`, slug: `tst-${label.toLowerCase()}-1x1-${stamp}`, width: 1080, height: 1080 });
+  track.templateSizes.push(portrait.id, square.id);
+
+  // A family with active versions: [[languageCode|null, size], ...]
+  const design = async (name, versions, familyAttrs = {}) => {
+    const fam = await models.TemplateFamily.create({ uid: uuid(), name: `TST ${label} ${name} ${stamp}`, status: 'active', category_id: 2, ...familyAttrs });
+    track.templateFamilies.push(fam.id);
+    const rows = {};
+    for (const [code, size] of versions) {
+      const v = await Template.create({
+        uid: uuid(), family_id: fam.id, name: fam.name, language_id: code ? lang[code] : null, size_id: size.id,
+        content: `{"v":"${code}-${size.width}x${size.height}"}`, thumbnail_s3_key: `templates/x/${code}.png`, status: 'active',
+      });
+      rows[`${code || 'none'}-${size === portrait ? '4x5' : '1x1'}`] = v;
+    }
+    return { fam, v: rows };
+  };
+  return { lang, portrait, square, design };
+}
+
+const cardsFor = async (token, qs = '') => {
+  const r = await h.request('GET', `${P}/templates?category_id=2&limit=100${qs}`, token ? { token } : {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.data;
+};
+
+test('families: one card per design, in the viewer\'s first language, hidden when none of theirs match', async () => {
+  const { portrait, square, design } = await familyFixture('Feed');
+  await withDefaultSize(portrait.slug, async () => {
+    const a = await design('A', [['en', portrait], ['ta', portrait], ['en', square]]);
+    const b = await design('B', [['en', portrait], ['ml', portrait]]);
+
+    const taFirst = await mkUser('TaFirst');
+    const enFirst = await mkUser('EnFirst');
+    const taOnly  = await mkUser('TaOnly');
+    const tok = (u) => h.userTokenFor(u.id);
+    await h.request('PATCH', `${P}/users/me/preferences`, { token: tok(taFirst), body: { languages: ['ta', 'en'] } });
+    await h.request('PATCH', `${P}/users/me/preferences`, { token: tok(enFirst), body: { languages: ['en', 'ta'] } });
+    await h.request('PATCH', `${P}/users/me/preferences`, { token: tok(taOnly),  body: { languages: ['ta'] } });
+
+    const byFamily = (cards, fam) => cards.filter((c) => c.family_uid === fam.uid);
+
+    // ta,en: one card for A, in Tamil; B has no Tamil, so its English version.
+    let cards = await cardsFor(tok(taFirst));
+    assert.equal(byFamily(cards, a.fam).length, 1, 'one card per design, not one per version');
+    assert.equal(byFamily(cards, a.fam)[0].uid, a.v['ta-4x5'].uid, 'the first-ranked language wins');
+    assert.equal(byFamily(cards, b.fam)[0].uid, b.v['en-4x5'].uid, 'the second language is the fallback');
+    const cardA = byFamily(cards, a.fam)[0];
+    assert.equal(cardA.name, a.fam.name, 'the card carries the design name');
+    assert.equal(cardA.available_languages.length, 2);
+    assert.equal(cardA.available_sizes.length, 2);
+    assert.equal(cardA.content, undefined, 'no design JSON on list cards');
+
+    // en,ta: English, and the default size beats the 1:1.
+    cards = await cardsFor(tok(enFirst));
+    assert.equal(byFamily(cards, a.fam)[0].uid, a.v['en-4x5'].uid);
+
+    // ta only: A in Tamil; B (English + Malayalam) is hidden.
+    cards = await cardsFor(tok(taOnly));
+    assert.equal(byFamily(cards, a.fam)[0].uid, a.v['ta-4x5'].uid);
+    assert.equal(byFamily(cards, b.fam).length, 0, 'a design with none of the viewer\'s languages is hidden');
+
+    // ?size= hides designs without that size, and picks within it: language still beats size.
+    cards = await cardsFor(tok(taFirst), `&size=${square.slug}`);
+    assert.equal(byFamily(cards, a.fam)[0].uid, a.v['en-1x1'].uid, 'only an English 1:1 exists');
+    assert.equal(byFamily(cards, b.fam).length, 0, 'B has no 1:1');
+
+    // ?language= overrides the saved ranking, in the order given.
+    cards = await cardsFor(tok(taFirst), '&language=ml,en');
+    assert.equal(byFamily(cards, b.fam)[0].uid, b.v['ml-4x5'].uid);
+  });
+});
+
+test('families: a version lists every version for the switcher; ?switch=1 is not a view; a family link picks for the viewer', async () => {
+  const { portrait, square, design } = await familyFixture('Open');
+  await withDefaultSize(portrait.slug, async () => {
+    const a = await design('A', [['en', portrait], ['ta', portrait], ['en', square]]);
+    const b = await design('B', [['en', portrait], ['ml', portrait]]);
+
+    const open = await h.request('GET', `${P}/templates/${a.v['en-1x1'].uid}`);
+    assert.equal(open.status, 200);
+    assert.equal(open.body.data.uid, a.v['en-1x1'].uid, 'the version asked for, not a re-pick');
+    assert.equal(open.body.data.versions.length, 3, 'every active language × size, for the switcher');
+    assert.equal(open.body.data.family.uid, a.fam.uid);
+    assert.equal(open.body.data.content, '{"v":"en-1080x1080"}');
+
+    await a.fam.reload();
+    const views = a.fam.views_count;
+    assert.equal(views, 1, 'opening counts one view on the DESIGN');
+    await h.request('GET', `${P}/templates/${a.v['ta-4x5'].uid}?switch=1`);
+    await a.fam.reload();
+    assert.equal(a.fam.views_count, views, 'switching versions is not another view');
+
+    const taOnly = await mkUser('LinkTa');
+    await h.request('PATCH', `${P}/users/me/preferences`, { token: h.userTokenFor(taOnly.id), body: { languages: ['ta'] } });
+    const link = await h.request('GET', `${P}/templates/families/${a.fam.uid}`, { token: h.userTokenFor(taOnly.id) });
+    assert.equal(link.body.data.uid, a.v['ta-4x5'].uid, 'a family link opens the viewer\'s version');
+    const guest = await h.request('GET', `${P}/templates/families/${a.fam.uid}`);
+    assert.equal(guest.body.data.uid, a.v['en-4x5'].uid, 'guests get English in the default size');
+    const hidden = await h.request('GET', `${P}/templates/families/${b.fam.uid}`, { token: h.userTokenFor(taOnly.id) });
+    assert.equal(hidden.status, 200, 'a link is never hidden for language: it opens the best version');
+    assert.equal(hidden.body.data.uid, b.v['en-4x5'].uid);
+
+    // An old-style draft version, or a draft family, stays hidden.
+    await a.fam.update({ status: 'draft' });
+    assert.equal((await h.request('GET', `${P}/templates/${a.v['en-4x5'].uid}`)).status, 404);
+  });
+});
+
+test('preferred languages keep the order the user ranked them in', async () => {
+  const u = await mkUser('Rank');
+  const token = h.userTokenFor(u.id);
+  const first = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['ta', 'en', 'ml'] } });
+  assert.deepEqual(first.body.data.languages.map((l) => l.code), ['ta', 'en', 'ml']);
+  const again = await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['ml', 'ta'] } });
+  assert.deepEqual(again.body.data.languages.map((l) => l.code), ['ml', 'ta']);
+  const read = await h.request('GET', `${P}/users/me/preferences`, { token });
+  assert.deepEqual(read.body.data.languages.map((l) => l.code), ['ml', 'ta']);
+});
+
+test('admin move: slot conflicts and text-free mismatches are refused; the target wins; sources revert or archive', async () => {
+  const token = h.adminToken(['*']);
+  const { portrait, square, design } = await familyFixture('Move');
+  await withDefaultSize(portrait.slug, async () => {
+    const x = await design('X', [['en', portrait], ['ta', portrait], ['ta', square]]);
+    const y = await design('Y', [['en', portrait]], { is_premium: 1 });
+    const z = await design('Z', [['ml', square]]);
+    const n = await design('N', [[null, portrait]]);
+    await x.fam.update({ views_count: 5 });
+
+    const move = (uid, familyUid, dry = false) => h.request('POST', `${P}/admin/templates/${uid}/move${dry ? '?dry_run=1' : ''}`, { token, body: { family_uid: familyUid } });
+
+    // Y already has English 4:5.
+    const dry = await move(x.v['en-4x5'].uid, y.fam.uid, true);
+    assert.equal(dry.status, 200);
+    assert.equal(dry.body.data.applied, false);
+    assert.equal(dry.body.data.conflicts.length, 1);
+    assert.equal((await move(x.v['en-4x5'].uid, y.fam.uid)).status, 409);
+
+    // A text-free version cannot join a family with languages.
+    assert.equal((await move(n.v['none-4x5'].uid, z.fam.uid)).status, 409);
+
+    // Tamil 4:5 joins Y: the target's details win (Y is premium), X still has English.
+    const ok = await move(x.v['ta-4x5'].uid, y.fam.uid);
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.ok(ok.body.data.changes.includes('Becomes Premium'));
+    assert.equal(ok.body.data.source.outcome, 'unchanged');
+    await x.v['ta-4x5'].reload();
+    assert.equal(x.v['ta-4x5'].family_id, y.fam.id);
+
+    // X loses its English default-size version -> back to draft.
+    const loses = await move(x.v['en-4x5'].uid, z.fam.uid);
+    assert.equal(loses.body.data.source.outcome, 'draft');
+    await x.fam.reload();
+    assert.equal(x.fam.status, 'draft');
+
+    // X's last version leaves -> archived, its views carried to the target.
+    const last = await move(x.v['ta-1x1'].uid, z.fam.uid);
+    assert.equal(last.body.data.source.outcome, 'archived');
+    await x.fam.reload();
+    await z.fam.reload();
+    assert.equal(x.fam.status, 'inactive', 'archived, never deleted');
+    assert.equal(z.fam.views_count, 5, 'the design keeps its popularity');
+
+    // The moved version keeps its uid: it still opens (Z is active).
+    assert.equal((await h.request('GET', `${P}/templates/${x.v['en-4x5'].uid}`)).status, 200);
+  });
+});
+
+test('admin merge: all versions move or none do; the emptied family is archived', async () => {
+  const token = h.adminToken(['*']);
+  const { portrait, square, design } = await familyFixture('Merge');
+  await withDefaultSize(portrait.slug, async () => {
+    const target = await design('Target', [['en', portrait]]);
+    const clean  = await design('Clean',  [['ta', portrait], ['ta', square]]);
+    const clash  = await design('Clash',  [['en', portrait], ['ml', square]]);
+    const merge = (src, dry = false) => h.request('POST', `${P}/admin/template-families/${src.fam.uid}/merge${dry ? '?dry_run=1' : ''}`, { token, body: { into_family_uid: target.fam.uid } });
+
+    const preview = await merge(clean, true);
+    assert.equal(preview.body.data.applied, false);
+    assert.equal(preview.body.data.conflicts.length, 0);
+    assert.equal(preview.body.data.source.versions, 2);
+
+    const done = await merge(clean);
+    assert.equal(done.status, 200);
+    await clean.fam.reload();
+    assert.equal(clean.fam.status, 'inactive');
+    assert.equal(await Template.count({ where: { family_id: target.fam.id } }), 3);
+
+    // One clash (English 4:5) and nothing moves — not even the Malayalam 1:1.
+    const refused = await merge(clash);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error.details.length, 1);
+    assert.equal(await Template.count({ where: { family_id: clash.fam.id } }), 2, 'all-or-nothing');
+
+    // Every language of the merged design is one card now.
+    const cards = (await cardsFor(null, '&all_languages=1')).filter((c) => c.family_uid === target.fam.uid);
+    assert.equal(cards.length, 1);
+  });
+});
+
+test('variant and special-event pages list one card per design', async () => {
+  const { portrait, design } = await familyFixture('Pages');
+  await withDefaultSize(portrait.slug, async () => {
+    const a = await design('A', [['en', portrait], ['ta', portrait]]);
+    const { variant } = await makeSeriesWithVariant('Families');
+    await variant.setTemplateFamilies([a.fam.id]);
+
+    const detail = await h.request('GET', `${P}/variants/${variant.uid}`);
+    assert.equal(detail.body.data.Templates.length, 1, 'two versions, one card');
+    assert.equal(detail.body.data.Templates[0].uid, a.v['en-4x5'].uid, 'guests see English');
+    assert.equal(detail.body.data.templates_count, 1);
+
+    // The admin still links designs by the pre-family key: a version id resolves to its family.
+    const token = h.adminToken(['*']);
+    const linked = await h.request('PUT', `${P}/admin/variants/${variant.uid}/templates`, { token, body: { template_ids: [a.v['ta-4x5'].id] } });
+    assert.equal(linked.status, 200);
+    assert.deepEqual(linked.body.data.TemplateFamilies.map((f) => f.uid), [a.fam.uid]);
+
+    // A variant design stays out of the public feed.
+    const cards = (await cardsFor(null, '&all_languages=1')).filter((c) => c.family_uid === a.fam.uid);
+    assert.equal(cards.length, 0);
+  });
+});
+
+// ---------- My Favourites (designs + assets) ----------
+const favT = (fam) => `${P}/users/me/favourites/templates/${fam.uid}`;
+const favA = (asset) => `${P}/users/me/favourites/assets/${asset.uid}`;
+
+test('favourite designs: idempotent add/remove keeps likes_count exact, and logs one like', async () => {
+  const { portrait, design } = await familyFixture('Fav');
+  await withDefaultSize(portrait.slug, async () => {
+    const d = await design('Heart', [['en', portrait], ['ta', portrait]]);
+    const u = await mkUser('FavDesign');
+    const token = h.userTokenFor(u.id);
+
+    const first = await h.request('PUT', favT(d.fam), { token });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body.data, { favourited: true, likes_count: 1 });
+    const again = await h.request('PUT', favT(d.fam), { token });
+    assert.deepEqual(again.body.data, { favourited: true, likes_count: 1 }, 'a retry does not count twice');
+
+    const likes = await ActivityLog.count({ where: { actor_id: u.id, action: 'template_like' } });
+    assert.equal(likes, 1, 'one like logged for the trending job');
+
+    const list = await h.request('GET', `${P}/users/me/favourites/templates`, { token });
+    assert.equal(list.status, 200);
+    assert.equal(list.body.meta.total, 1);
+    assert.equal(list.body.data[0].family_uid, d.fam.uid);
+    assert.equal(list.body.data[0].is_favourited, true);
+    assert.ok(list.body.data[0].favourited_at);
+
+    // The heart shows on the feed and on an opened version — of ANY language.
+    const card = (await cardsFor(token, '&all_languages=1')).find((c) => c.family_uid === d.fam.uid);
+    assert.equal(card.is_favourited, true);
+    assert.equal(card.likes_count, 1);
+    const opened = await h.request('GET', `${P}/templates/${d.v['ta-4x5'].uid}?switch=1`, { token });
+    assert.equal(opened.body.data.is_favourited, true, 'one heart per design, not per version');
+    const guestCard = (await cardsFor(null, '&all_languages=1')).find((c) => c.family_uid === d.fam.uid);
+    assert.equal(guestCard.is_favourited, undefined, 'guests get no flag at all');
+
+    const removed = await h.request('DELETE', favT(d.fam), { token });
+    assert.deepEqual(removed.body.data, { favourited: false, likes_count: 0 });
+    const removedAgain = await h.request('DELETE', favT(d.fam), { token });
+    assert.deepEqual(removedAgain.body.data, { favourited: false, likes_count: 0 }, 'never below zero');
+
+    const after = (await cardsFor(token, '&all_languages=1')).find((c) => c.family_uid === d.fam.uid);
+    assert.equal(after.is_favourited, false);
+
+    assert.equal((await h.request('PUT', `${P}/users/me/favourites/templates/${uuid()}`, { token })).status, 404);
+    assert.equal((await h.request('GET', `${P}/users/me/favourites/templates`)).status, 401);
+  });
+});
+
+test('favourite designs: never hidden for language, locked when premium, gone while inactive', async () => {
+  const { portrait, design } = await familyFixture('FavList');
+  await withDefaultSize(portrait.slug, async () => {
+    const english = await design('English', [['en', portrait]]);
+    const premium = await design('Premium', [['en', portrait]], { is_premium: 1 });
+    const retired = await design('Retired', [['en', portrait]]);
+    const u = await mkUser('FavList');
+    const token = h.userTokenFor(u.id);
+    await h.request('PATCH', `${P}/users/me/preferences`, { token, body: { languages: ['ta'] } });
+
+    for (const d of [english, premium, retired]) {
+      assert.equal((await h.request('PUT', favT(d.fam), { token })).status, 200, 'locked premium may be saved');
+    }
+    await retired.fam.update({ status: 'inactive' });
+
+    const list = await h.request('GET', `${P}/users/me/favourites/templates`, { token });
+    const byUid = Object.fromEntries(list.body.data.map((c) => [c.family_uid, c]));
+    assert.equal(list.body.meta.total, 2);
+    assert.ok(byUid[english.fam.uid], 'a Tamil-only user still sees their English favourite');
+    assert.equal(byUid[premium.fam.uid].is_locked, true, 'stays locked for a free user');
+    assert.equal(byUid[retired.fam.uid], undefined, 'an inactive design drops out');
+
+    // ...but its row is kept, comes back when re-activated, and can still be removed.
+    await retired.fam.update({ status: 'active' });
+    assert.equal((await h.request('GET', `${P}/users/me/favourites/templates`, { token })).body.meta.total, 3);
+    await retired.fam.update({ status: 'inactive' });
+    assert.equal((await h.request('PUT', favT(retired.fam), { token })).status, 404, 'cannot add an inactive design');
+    assert.equal((await h.request('DELETE', favT(retired.fam), { token })).status, 200, 'but can remove it');
+
+    const paid = await h.request('GET', `${P}/users/me/favourites/templates`, { token: h.userTokenFor(u.id, 'paid') });
+    assert.equal(paid.body.data.find((c) => c.family_uid === premium.fam.uid).is_locked, false);
+  });
+});
+
+test('favourite designs: a premium-theme design can be saved only by someone who can open it', async () => {
+  const { portrait, design } = await familyFixture('FavTheme');
+  await withDefaultSize(portrait.slug, async () => {
+    const d = await design('Theme', [['en', portrait]]);
+    const { variant } = await makeSeriesWithVariant('FavTheme');
+    await variant.setTemplateFamilies([d.fam.id]);
+    const u = await mkUser('FavTheme');
+
+    const res = await h.request('PUT', favT(d.fam), { token: h.userTokenFor(u.id, 'paid') });
+    assert.equal(res.status, 404, 'a variant design is not public — same answer as opening it');
+    assert.equal(await models.UserFavouriteTemplate.count({ where: { user_id: u.id } }), 0);
+  });
+});
+
+test('is_favourited also rides on variant, adopted-variant and special-event cards', async () => {
+  const { portrait, design } = await familyFixture('FavPages');
+  await withDefaultSize(portrait.slug, async () => {
+    const theme   = await design('Theme', [['en', portrait]]);
+    const festive = await design('Festive', [['en', portrait]]);
+    const { variant } = await makeSeriesWithVariant('FavPages');
+    await variant.setTemplateFamilies([theme.fam.id]);
+    await variant.setPlans([2]);
+    const ev = await models.SpecialEvent.create({ uid: uuid(), name: `TST FavPages ${Date.now()}`, type: 'festival', event_date: '03-15', is_active: 1 });
+    track.specialEvents.push(ev.id);
+    await ev.setTemplateFamilies([festive.fam.id]);
+
+    const ownerId = await userWithActivePlan(2, 77);
+    const token = h.userTokenFor(ownerId, 'paid');
+    const biz = await Business.create({ uid: uuid(), user_id: ownerId, name: 'TST FavPages Biz', is_active: 1 });
+    assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: variant.uid } })).status, 201);
+    for (const d of [theme, festive]) assert.equal((await h.request('PUT', favT(d.fam), { token })).status, 200);
+
+    const detail = await h.request('GET', `${P}/variants/${variant.uid}`, { token });
+    assert.equal(detail.body.data.Templates[0].is_favourited, true, 'variant page');
+
+    const adopted = await h.request('GET', `${P}/businesses/${biz.uid}/variants`, { token });
+    const adoptedCard = adopted.body.data.find((v) => v.uid === variant.uid).Templates[0];
+    assert.equal(adoptedCard.is_favourited, true, 'adopted variants on the business');
+
+    const events = await h.request('GET', `${P}/special-events?type=festival&range=year`, { token });
+    const card = events.body.data.find((e) => e.id === ev.id).Templates[0];
+    assert.equal(card.is_favourited, true, 'special-event page');
+
+    await h.request('DELETE', favT(festive.fam), { token });
+    const after = await h.request('GET', `${P}/special-events?type=festival&range=year`, { token });
+    assert.equal(after.body.data.find((e) => e.id === ev.id).Templates[0].is_favourited, false);
+
+    const guestDetail = await h.request('GET', `${P}/variants/${variant.uid}`);
+    assert.equal(guestDetail.body.data.Templates[0].is_favourited, undefined, 'guests get no flag');
+    const guestEvents = await h.request('GET', `${P}/special-events?type=festival&range=year`);
+    assert.equal(guestEvents.body.data.find((e) => e.id === ev.id).Templates[0].is_favourited, undefined);
+  });
+});
+
+test('favourite assets: idempotent, locked premium keeps its thumbnail, flag on the browse', async () => {
+  const stamp = Date.now();
+  const cat = await models.AssetCategory.create({ uid: uuid(), name: `TST Fav Cat ${stamp}`, slug: `tst-fav-cat-${stamp}`, is_active: 1 });
+  track.assetCategories.push(cat.id);
+  const premium = await models.Asset.create({
+    uid: uuid(), category_id: cat.id, name: `TST Fav Prem ${stamp}`, asset_type: 'icon',
+    s3_key: `assets/icon/fav-prem-${stamp}.svg`, thumbnail_s3_key: `assets/thumbnail/fav-${stamp}.png`, status: 'active', is_premium: 1,
+  });
+  const bg = await models.Asset.create({
+    uid: uuid(), category_id: cat.id, name: `TST Fav Bg ${stamp}`, asset_type: 'bg',
+    s3_key: `assets/bg/fav-${stamp}.png`, status: 'active', is_premium: 0,
+  });
+  const inactive = await models.Asset.create({
+    uid: uuid(), category_id: cat.id, name: `TST Fav Off ${stamp}`, asset_type: 'icon',
+    s3_key: `assets/icon/fav-off-${stamp}.svg`, status: 'inactive', is_premium: 0,
+  });
+  track.assets.push(premium.id, bg.id, inactive.id);
+
+  const u = await mkUser('FavAsset');
+  const token = h.userTokenFor(u.id);
+  for (const a of [premium, bg, premium]) {
+    const r = await h.request('PUT', favA(a), { token });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual(r.body.data, { favourited: true });
+  }
+  assert.equal((await h.request('PUT', favA(inactive), { token })).status, 404);
+
+  const list = await h.request('GET', `${P}/users/me/favourites/assets`, { token });
+  assert.equal(list.body.meta.total, 2, 'the repeated add did not duplicate');
+  const p = list.body.data.find((a) => a.uid === premium.uid);
+  assert.equal(p.is_locked, true);
+  assert.equal(p.s3_key, undefined, 'the file is withheld, as in the browse');
+  assert.equal(p.thumbnail_s3_key, premium.thumbnail_s3_key);
+  assert.equal(p.is_favourited, true);
+
+  const icons = await h.request('GET', `${P}/users/me/favourites/assets?asset_type=icon`, { token });
+  assert.deepEqual(icons.body.data.map((a) => a.uid), [premium.uid]);
+  assert.equal((await h.request('GET', `${P}/users/me/favourites/assets?asset_type=icons`, { token })).status, 400);
+
+  const browse = await h.request('GET', `${P}/assets?category=${cat.slug}`, { token });
+  assert.equal(browse.body.data.find((a) => a.uid === premium.uid).is_favourited, true);
+  assert.equal(browse.body.data.find((a) => a.uid === bg.uid).is_favourited, true);
+  const guest = await h.request('GET', `${P}/assets?category=${cat.slug}`);
+  assert.equal(guest.body.data[0].is_favourited, undefined);
+
+  assert.deepEqual((await h.request('DELETE', favA(bg), { token })).body.data, { favourited: false });
+  assert.equal((await h.request('DELETE', favA(bg), { token })).status, 200, 'idempotent');
+  assert.equal((await h.request('GET', `${P}/users/me/favourites/assets`, { token })).body.meta.total, 1);
+});
+
+test('favourites follow a merged design and are counted once; a purge takes its hearts off', async () => {
+  const { portrait, square, design } = await familyFixture('FavMerge');
+  await withDefaultSize(portrait.slug, async () => {
+    const target = await design('Target', [['en', portrait]]);
+    const source = await design('Source', [['ta', square]]);
+    const both = await mkUser('FavBoth');
+    const one  = await mkUser('FavOne');
+    await h.request('PUT', favT(target.fam), { token: h.userTokenFor(both.id) });
+    await h.request('PUT', favT(source.fam), { token: h.userTokenFor(both.id) });
+    await h.request('PUT', favT(source.fam), { token: h.userTokenFor(one.id) });
+
+    const merged = await h.request('POST', `${P}/admin/template-families/${source.fam.uid}/merge`, {
+      token: h.adminToken(['*']), body: { into_family_uid: target.fam.uid },
+    });
+    assert.equal(merged.status, 200, JSON.stringify(merged.body));
+
+    await target.fam.reload();
+    await source.fam.reload();
+    assert.equal(await models.UserFavouriteTemplate.count({ where: { family_id: target.fam.id } }), 2);
+    assert.equal(await models.UserFavouriteTemplate.count({ where: { family_id: source.fam.id } }), 0);
+    assert.equal(target.fam.likes_count, 2, 'two users, not three hearts');
+    assert.equal(source.fam.likes_count, 0);
+
+    await one.update({ is_active: 0, deactivated_at: hoursAgo(48) });
+    await withStubbedPurgeDeps(() => purgeSvc.purgeUser(one));
+    await target.fam.reload();
+    assert.equal(await models.UserFavouriteTemplate.count({ where: { user_id: one.id } }), 0);
+    assert.equal(target.fam.likes_count, 1, 'the purged user no longer counts');
+  });
+});
+
+// ---------- Plan meters: every integer plan feature is enforced ----------
+// Templates count projects created from them, brand series and frames count
+// adds. Whether removing gives the slot back follows the feature's reset period:
+// a monthly meter is a tally of adds, a 'never' meter is a ceiling on what is held.
+
+// Run `fn` with a feature type's reset period switched, restoring it after.
+const withResetPeriod = async (key, period, fn) => {
+  const ft = await models.FeatureType.findOne({ where: { key } });
+  const original = ft.reset_period;
+  await ft.update({ reset_period: period });
+  try { return await fn(); } finally { await ft.update({ reset_period: original }); }
+};
+
+const usageOf = async (token, key) => {
+  const r = await h.request('GET', `${P}/quota/usage`, { token });
+  return r.body.data.features.find((f) => f.key === key);
+};
+
+test('projects from templates count against Business Posts or Video by template type; blank projects are free', async () => {
+  const userId = await userWithActivePlan(2, 9501);
+  const token  = h.userTokenFor(userId, 'paid');
+  const tplOf  = async (template_type) => {
+    const t = await createTemplate({ uid: uuid(), name: `TST Meter ${template_type}`, content: '{}', status: 'active', template_type });
+    track.templates.push(t.id);
+    return t;
+  };
+  const image = await tplOf('image');
+  const video = await tplOf('video');
+  const anim  = await tplOf('animated');
+  const make  = (template_id) => h.request('POST', `${P}/projects`, { token, body: { name: 'TST Meter', content: '{}', ...(template_id ? { template_id } : {}) } });
+
+  await withPlanFeature(2, 'business_posts_templates', 2, () => withPlanFeature(2, 'video_templates', 1, async () => {
+    assert.equal((await make()).status, 201, 'a blank project uses no template allowance');
+    const first = await make(image.id);
+    assert.equal(first.status, 201);
+    assert.equal((await make(image.id)).status, 201);
+    const over = await make(image.id);
+    assert.equal(over.status, 402, 'the third image-template project is over a limit of 2');
+    assert.equal(over.body.error.code, 'QUOTA_EXCEEDED');
+    assert.match(over.body.error.message, /Business Posts Templates/);
+
+    assert.equal((await make(video.id)).status, 201);
+    assert.equal((await make(anim.id)).status, 402, 'animated shares the Video bucket');
+
+    const posts = await usageOf(token, 'business_posts_templates');
+    assert.equal(posts.used, 2);
+    assert.equal(posts.remaining, 0);
+
+    // Monthly (a tally of creations): deleting a project gives nothing back.
+    assert.equal((await h.request('DELETE', `${P}/projects/${first.body.data.uid}`, { token })).status, 200);
+    assert.equal((await make(image.id)).status, 402, 'a monthly allowance is spent, not held');
+
+    // Reset 'never' (a ceiling on kept projects): the deleted one freed its slot.
+    await withResetPeriod('business_posts_templates', 'never', async () => {
+      assert.equal((await usageOf(token, 'business_posts_templates')).used, 1, 'counted from the projects still kept');
+      assert.equal((await make(image.id)).status, 201);
+      // Full again, so bringing the archived project back has no room.
+      const restore = await h.request('PATCH', `${P}/projects/${first.body.data.uid}`, { token, body: { status: 'draft' } });
+      assert.equal(restore.status, 402, 'restoring a project re-occupies a slot');
+    });
+  }));
+});
+
+test('brand series count distinct series across businesses, not variants', async () => {
+  const userId = await userWithActivePlan(2, 9502);
+  const token  = h.userTokenFor(userId, 'paid');
+  const a  = await makeSeriesWithVariant('MeterA');
+  const a2 = await models.Variant.create({ uid: uuid(), series_id: a.series.id, name: 'TST MeterA Variant 2', is_active: 1 });
+  track.variants.push(a2.id);
+  const b  = await makeSeriesWithVariant('MeterB');
+  for (const v of [a.variant, a2, b.variant]) await v.setPlans([2]);
+
+  const biz1 = await Business.create({ uid: uuid(), user_id: userId, name: 'TST Meter Biz 1', is_active: 1 });
+  const biz2 = await Business.create({ uid: uuid(), user_id: userId, name: 'TST Meter Biz 2', is_active: 1 });
+  const adopt  = (biz, v) => h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: v.uid } });
+  const remove = (biz, v) => h.request('DELETE', `${P}/businesses/${biz.uid}/variants/${v.uid}`, { token });
+
+  await withPlanFeature(2, 'brand_series', 1, async () => {
+    assert.equal((await adopt(biz1, a.variant)).status, 201);
+    assert.equal((await adopt(biz1, a2)).status, 201, 'a second variant of a held series is not a new series');
+    assert.equal((await adopt(biz2, a.variant)).status, 201, 'nor is the same series in another business');
+    assert.equal((await adopt(biz1, a.variant)).status, 201, 're-adopting stays idempotent');
+    assert.equal((await adopt(biz1, b.variant)).status, 402, 'a second distinct series is over a limit of 1');
+    assert.equal((await usageOf(token, 'brand_series')).used, 1, 'charged once for series A');
+
+    for (const [biz, v] of [[biz1, a.variant], [biz1, a2], [biz2, a.variant]]) await remove(biz, v);
+    assert.equal((await adopt(biz1, b.variant)).status, 402, 'monthly: removing a series does not refund the add');
+
+    await withResetPeriod('brand_series', 'never', async () => {
+      assert.equal((await usageOf(token, 'brand_series')).used, 0, 'nothing held any more');
+      assert.equal((await adopt(biz1, b.variant)).status, 201, 'as a ceiling, removing series A freed the slot');
+    });
+  });
+});
+
+test('frames added for free count against the plan; frames bought outright never do', async () => {
+  const userId = await userWithActivePlan(2, 9503);
+  const token  = h.userTokenFor(userId, 'paid');
+  const f1 = await mkFrame();
+  const f2 = await mkFrame();
+  const paid = await mkFrame({ is_premium: 1, price: 49 });
+  await models.UserFrame.create({ uid: uuid(), user_id: userId, frame_id: paid.id, acquired_via: 'purchase', status: 'removed' });
+
+  await withPlanFeature(2, 'frames', 1, async () => {      // frames: reset 'never'
+    assert.equal((await h.request('POST', `${P}/frames/${f1.uid}/add`, { token })).status, 201);
+    assert.equal((await h.request('POST', `${P}/frames/${f2.uid}/add`, { token })).status, 402, 'one free frame on a limit of 1');
+    assert.equal((await h.request('POST', `${P}/frames/${paid.uid}/add`, { token })).status, 201,
+      'a frame paid for per frame goes back on the shelf regardless of the plan cap');
+    assert.equal((await usageOf(token, 'frames')).used, 1, 'only the free frame is counted');
+
+    assert.equal((await h.request('DELETE', `${P}/frames/mine/${f1.uid}`, { token })).status, 200);
+    assert.equal((await h.request('POST', `${P}/frames/${f2.uid}/add`, { token })).status, 201, 'removing a frame frees its slot');
+  });
+});
+
+test('an account with no subscription is held to the free plan, which is never for sale', async () => {
+  const u     = await mkUser('FreeHeld');
+  const token = h.userTokenFor(u.id);
+  const free  = await models.Plan.findOne({ where: { plan_type: 'free', status: 'active' } });
+  assert.ok(free, 'the seeded Free plan is the free plan');
+
+  const me = await h.request('GET', `${P}/subscriptions/me`, { token });
+  assert.equal(me.body.data.has_active_subscription, false);
+  assert.equal(me.body.data.plan.plan_type, 'free');
+  const downloads = me.body.data.features.find((f) => f.key === 'downloads');
+  assert.equal(downloads.limit, 10, 'the free plan\'s allowance, not unlimited');
+
+  await withPlanFeature(free.id, 'downloads', 1, async () => {
+    const proj = (await h.request('POST', `${P}/projects`, { token, body: { name: 'TST FreeHeld', content: '{}' } })).body.data;
+    const exp  = () => h.request('POST', `${P}/projects/${proj.uid}/exports`, { token, body: { export_type: 'download' } });
+    assert.equal((await exp()).status, 201);
+    assert.equal((await exp()).status, 402, 'the free plan\'s limit is enforced');
+  });
+
+  for (const path of ['/plans', '/subscriptions/plans']) {
+    const grid = await h.request('GET', `${P}${path}`);
+    assert.ok(!grid.body.data.some((p) => p.uid === free.uid), `${path} only lists what can be bought`);
+  }
+  const asked = await h.request('GET', `${P}/plans?plan_type=free`);
+  assert.ok(asked.body.data.some((p) => p.uid === free.uid), 'but it can be asked for by name');
+});
+
+test('the free plan is one plan with nothing to buy on it', async () => {
+  const token = h.adminToken(['plans.*']);
+  const free  = await models.Plan.findOne({ where: { plan_type: 'free', status: 'active' } });
+
+  const second = await h.request('POST', `${P}/admin/plans`, { token, body: { name: `TST Free ${Date.now()}`, plan_type: 'free' } });
+  assert.equal(second.status, 409, 'only one active free plan');
+
+  const trial = await h.request('PATCH', `${P}/admin/plans/${free.uid}`, { token, body: { trial_days: 7 } });
+  assert.equal(trial.status, 400, 'no trial on the free plan');
+
+  const price = await h.request('POST', `${P}/admin/plan-billing-options`, {
+    token, body: { plan_id: free.id, billing_cycle: 'monthly', price: 99 },
+  });
+  assert.equal(price.status, 400, 'no billing option on the free plan');
+});
+
+test('an integer feature type must be one the app meters', async () => {
+  const token = h.adminToken(['features.*']);
+  const stamp = Date.now();
+
+  const meters = await h.request('GET', `${P}/admin/feature-types/meters`, { token });
+  assert.equal(meters.status, 200);
+  const keys = meters.body.data.map((m) => m.key);
+  for (const k of ['business_posts_templates', 'video_templates', 'brand_series', 'frames', 'ai_credits']) assert.ok(keys.includes(k), k);
+
+  const unknown = await h.request('POST', `${P}/admin/feature-types`, {
+    token, body: { key: `tst_meterless_${stamp}`, label: 'TST Meterless', data_type: 'integer' },
+  });
+  assert.equal(unknown.status, 400, 'an integer nothing meters would be a promise nothing keeps');
+  assert.ok(unknown.body.error.details.metered_keys.includes('frames'), 'the error lists what is allowed');
+
+  const storageMonthly = await h.request('PATCH', `${P}/admin/feature-types/${await featureIdFor('storage')}`, {
+    token, body: { reset_period: 'monthly' },
+  });
+  assert.equal(storageMonthly.status, 400, 'storage is occupancy and cannot reset');
+
+  const flag = await h.request('POST', `${P}/admin/feature-types`, {
+    token, body: { key: `tst_flag_${stamp}`, label: 'TST Flag', data_type: 'boolean' },
+  });
+  assert.equal(flag.status, 201, 'boolean features are capabilities, free to add');
+  await models.FeatureType.destroy({ where: { id: flag.body.data.id } });
 });

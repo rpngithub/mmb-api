@@ -24,6 +24,19 @@ const SOURCES = {
   download:           { label: 'Downloads',          feature: 'downloads' },
   share:              { label: 'Shares',             feature: 'shares' },
   upload:             { label: 'Uploads',            feature: 'storage' },
+
+  // Holdings — see constants/quotaMeters.js. One source per meter because a
+  // source belongs to exactly one feature.
+  business_post_project: { label: 'Projects from templates', feature: 'business_posts_templates' },
+  video_project:         { label: 'Projects from templates', feature: 'video_templates' },
+  brand_series_add:      { label: 'Brand series added',      feature: 'brand_series' },
+  frame_add:             { label: 'Frames added',            feature: 'frames' },
+};
+
+// The source a template project is attributed to, by meter.
+const PROJECT_SOURCE = {
+  business_posts_templates: 'business_post_project',
+  video_templates:          'video_project',
 };
 
 const FALLBACK = 'other';
@@ -34,4 +47,4 @@ const labelFor = (source) => SOURCES[source]?.label || 'Other';
 
 const isKnown = (source) => Object.prototype.hasOwnProperty.call(SOURCES, source);
 
-module.exports = { SOURCES, FALLBACK, labelFor, isKnown };
+module.exports = { SOURCES, PROJECT_SOURCE, FALLBACK, labelFor, isKnown };

@@ -6,7 +6,7 @@ module.exports = (sequelize) => {
     uid:           { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, allowNull: false, unique: true },
     name:          { type: DataTypes.STRING(100), allowNull: false },
     description:   { type: DataTypes.TEXT, allowNull: true },
-    plan_type:     { type: DataTypes.ENUM('subscription', 'access_pass'), allowNull: false, defaultValue: 'subscription' },
+    plan_type:     { type: DataTypes.ENUM('subscription', 'access_pass', 'free'), allowNull: false, defaultValue: 'subscription' },
     trial_days:    { type: DataTypes.INTEGER, allowNull: true },   // free-trial length (subscription plans); null/0 = no trial
     pass_price:    { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // ₹ fee (access_pass plans)
     pass_days:     { type: DataTypes.INTEGER, allowNull: true },   // access-pass duration

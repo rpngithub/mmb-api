@@ -1,6 +1,6 @@
 const cron         = require('node-cron');
 const { Op }       = require('sequelize');
-const { Template, ActivityLog, sequelize } = require('../models');
+const { Template, TemplateFamily, ActivityLog, sequelize } = require('../models');
 
 const WEIGHT_VIEW     = 1;
 const WEIGHT_DOWNLOAD = 3;
@@ -20,9 +20,18 @@ async function recalculateTrendingScores() {
     raw:         true,
   });
 
+  // Activity names the VERSION a user opened; trending belongs to the DESIGN, so
+  // every language and size of a family scores together.
+  const versionIds = [...new Set(logs.map((row) => row.entity_id))];
+  const versions   = versionIds.length
+    ? await Template.findAll({ where: { id: { [Op.in]: versionIds } }, attributes: ['id', 'family_id'], raw: true })
+    : [];
+  const familyOf = new Map(versions.map((v) => [v.id, v.family_id]));
+
   const scores = {};
   for (const row of logs) {
-    const id = row.entity_id;
+    const id = familyOf.get(row.entity_id);
+    if (!id) continue; // version since deleted
     if (!scores[id]) scores[id] = 0;
     const w = row.action === 'template_view'     ? WEIGHT_VIEW
             : row.action === 'template_download' ? WEIGHT_DOWNLOAD
@@ -32,11 +41,11 @@ async function recalculateTrendingScores() {
 
   await Promise.all(
     Object.entries(scores).map(([id, score]) =>
-      Template.update({ trending_score: score }, { where: { id } })
+      TemplateFamily.update({ trending_score: score }, { where: { id } })
     )
   );
 
-  console.log(`[TrendingJob] Updated ${Object.keys(scores).length} templates`);
+  console.log(`[TrendingJob] Updated ${Object.keys(scores).length} template families`);
 }
 
 const job = cron.schedule('0 2 * * *', async () => {

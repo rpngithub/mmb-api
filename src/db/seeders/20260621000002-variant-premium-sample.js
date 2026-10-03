@@ -56,17 +56,24 @@ module.exports = {
         likes_count: 340, display_order: 2, is_active: 1 },
     ]);
 
+    // One family per design, each with a single text-free version (same ids for both,
+    // as migration 045 does for pre-existing templates).
+    await queryInterface.bulkInsert('template_families', [
+      { id: 9001, uid: uuid(), name: 'Diwali Greeting', status: 'active', is_premium: 1 },
+      { id: 9002, uid: uuid(), name: 'Diwali Sale',     status: 'active', is_premium: 1 },
+      { id: 9003, uid: uuid(), name: 'We Are Hiring',   status: 'active', is_premium: 1 },
+    ]);
     await queryInterface.bulkInsert('templates', [
-      { id: 9001, uid: uuid(), name: 'Diwali Greeting',  content: '{"sample":"diwali-1"}',  status: 'active', is_premium: 1 },
-      { id: 9002, uid: uuid(), name: 'Diwali Sale',      content: '{"sample":"diwali-2"}',  status: 'active', is_premium: 1 },
-      { id: 9003, uid: uuid(), name: 'We Are Hiring',    content: '{"sample":"corp-1"}',    status: 'active', is_premium: 1 },
+      { id: 9001, uid: uuid(), family_id: 9001, name: 'Diwali Greeting',  content: '{"sample":"diwali-1"}',  status: 'active' },
+      { id: 9002, uid: uuid(), family_id: 9002, name: 'Diwali Sale',      content: '{"sample":"diwali-2"}',  status: 'active' },
+      { id: 9003, uid: uuid(), family_id: 9003, name: 'We Are Hiring',    content: '{"sample":"corp-1"}',    status: 'active' },
     ]);
 
-    // variant <-> template assignments
+    // variant <-> family assignments
     await queryInterface.bulkInsert('variant_templates', [
-      { variant_id: 9001, template_id: 9001 },
-      { variant_id: 9001, template_id: 9002 },
-      { variant_id: 9002, template_id: 9003 },
+      { variant_id: 9001, family_id: 9001 },
+      { variant_id: 9001, family_id: 9002 },
+      { variant_id: 9002, family_id: 9003 },
     ]);
 
     // entitlement: which plans unlock each variant's templates
@@ -110,6 +117,7 @@ module.exports = {
     await queryInterface.bulkDelete('brand_series_colors',       seriesIds, {});
     await queryInterface.bulkDelete('brand_series_tags',         seriesIds, {});
     await queryInterface.bulkDelete('templates',           { id: { [Op.in]: [9001, 9002, 9003] } }, {});
+    await queryInterface.bulkDelete('template_families',   { id: { [Op.in]: [9001, 9002, 9003] } }, {});
     await queryInterface.bulkDelete('variants',            { id: { [Op.in]: [9001, 9002] } }, {});
     await queryInterface.bulkDelete('variant_badges',      { id: { [Op.in]: [9001, 9002] } }, {});
     await queryInterface.bulkDelete('style_personalities', { id: { [Op.in]: [9001, 9002, 9003] } }, {});
