@@ -73,12 +73,12 @@ async function dropForeignKeys(qi, table, column) {
   }
 }
 
-async function addForeignKey(qi, table, column, refTable, name, onDelete = 'CASCADE') {
+async function addForeignKey(qi, table, column, refTable, name, onDelete = 'CASCADE', onUpdate = 'CASCADE') {
   const existing = await foreignKeysOn(qi, table, column);
   if (existing.some((fk) => fk.ref === refTable)) return;
   await qi.sequelize.query(
     `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${name}\` FOREIGN KEY (\`${column}\`)
-       REFERENCES \`${refTable}\` (\`id\`) ON DELETE ${onDelete} ON UPDATE CASCADE`);
+       REFERENCES \`${refTable}\` (\`id\`) ON DELETE ${onDelete} ON UPDATE ${onUpdate}`);
 }
 
 async function defaultSizeId(qi) {
@@ -201,10 +201,19 @@ module.exports = {
     // 5. One version per (family, language, size). A plain unique key would let
     //    duplicate text-free (NULL language) versions through, so key on a generated
     //    column that maps NULL to 0. STORED works on both MySQL 5.7+ and MariaDB 10.2+.
+    //
+    //    A generated column may not be computed from a column whose FK cascades or
+    //    sets null — MariaDB 11.8 (staging) refuses with #1901; local 10.4 does not
+    //    check. language_id's FK (migration 020: SET NULL / CASCADE) is therefore
+    //    dropped first and re-added as RESTRICT, so deleting a language still in use
+    //    is a 409 rather than silently making its versions text-free (which could
+    //    now collide on uq_template_version anyway).
     if (!(await columnExists(qi, 'templates', 'language_key'))) {
+      await dropForeignKeys(qi, 'templates', 'language_id');
       await qi.sequelize.query(
         'ALTER TABLE `templates` ADD COLUMN `language_key` INT AS (IFNULL(`language_id`, 0)) STORED AFTER `language_id`');
     }
+    await addForeignKey(qi, 'templates', 'language_id', 'languages', 'fk_templates_language', 'RESTRICT', 'RESTRICT');
     if (!(await indexExists(qi, 'templates', 'uq_template_version'))) {
       await qi.addIndex('templates', ['family_id', 'language_key', 'size_id'], { unique: true, name: 'uq_template_version' });
     }
@@ -274,6 +283,9 @@ module.exports = {
 
     if (await indexExists(qi, 'templates', 'uq_template_version')) await qi.removeIndex('templates', 'uq_template_version');
     if (await columnExists(qi, 'templates', 'language_key')) await qi.removeColumn('templates', 'language_key');
+    // Back to migration 020's SET NULL / CASCADE, now that nothing is generated from it.
+    await dropForeignKeys(qi, 'templates', 'language_id');
+    await addForeignKey(qi, 'templates', 'language_id', 'languages', 'templates_language_id_foreign_idx', 'SET NULL');
     await dropForeignKeys(qi, 'templates', 'size_id');
     if (await columnExists(qi, 'templates', 'size_id')) await qi.removeColumn('templates', 'size_id');
     await dropForeignKeys(qi, 'templates', 'family_id');
