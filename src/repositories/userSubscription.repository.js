@@ -24,15 +24,29 @@ class UserSubscriptionRepository extends BaseRepository {
     );
   }
 
-  // Eligibility guards. Both count any status (incl. expired/cancelled) so a
-  // used-up trial/pass still blocks a repeat — the rules are "one pass ever"
-  // and "one trial per plan".
+  // Eligibility guards. Both return a row of any status (incl. expired/cancelled)
+  // so a used-up trial/pass still blocks a repeat — the rules are "one pass ever"
+  // and "one trial per plan". A 'pending' row is NOT a use: it is an abandoned or
+  // in-flight checkout, and the caller resumes it rather than refusing.
   findAccessPassByUser(userId) {
     return this.findOne({ user_id: userId, sub_type: 'access_pass' });
   }
 
   findTrialByUserAndPlan(userId, planId) {
     return this.findOne({ user_id: userId, plan_id: planId, sub_type: 'trial' });
+  }
+
+  // An unpaid one-time plan checkout the user can pick back up: same billing
+  // option and same coupon (the coupon is counted against this row on
+  // activation, so a different one is a different purchase).
+  findResumableOneTime(userId, planBillingOptionId, couponId) {
+    return this.findOne(
+      {
+        user_id: userId, plan_billing_option_id: planBillingOptionId, coupon_id: couponId,
+        sub_type: 'regular', auto_renew: 0, status: 'pending',
+      },
+      { order: [['id', 'DESC']] }
+    );
   }
 
   // Drives coupon target_audience (new_users vs existing_users): a user "has

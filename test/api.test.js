@@ -2054,6 +2054,157 @@ test('one-time webhook activates the subscription (and is idempotent)', async ()
   assert.equal(r2.body.idempotent, true, 'replay is idempotent');
 });
 
+// ---------- Abandoned checkouts: a pending pass / trial is not a used one ----------
+// Swaps gateway functions on the helper module for the duration of `fn`.
+const withGateway = async (overrides, fn) => {
+  const rzp      = require('../src/utils/razorpayHelper');
+  const original = Object.fromEntries(Object.keys(overrides).map((k) => [k, rzp[k]]));
+  Object.assign(rzp, overrides);
+  try { return await fn(); } finally { Object.assign(rzp, original); }
+};
+
+test('closing Checkout without paying does not use up the access pass', async () => {
+  const u     = await User.create({ uid: uuid(), name: 'TST Pass Abandon', phone: `7${String(Date.now() % 1000000000).padStart(9, '0')}` });
+  track.users.push(u.id);
+  const token = h.userTokenFor(u.id);
+  const pass  = await models.Plan.findOne({ where: { status: 'active', plan_type: 'access_pass' }, order: [['display_order', 'ASC']] });
+  const originalPrice = pass.pass_price;
+
+  let orders = 0;
+  const createOrder = async () => ({ id: `order_pass_${u.id}_${++orders}` });
+  const buy = () => withGateway({ createOrder }, () => h.request('POST', `${P}/subscriptions/access-pass`, { token }));
+
+  try {
+    const first = await buy();
+    assert.equal(first.status, 201);
+
+    // The FE's report: checkout closed, nothing paid, try again.
+    const again = await buy();
+    assert.equal(again.status, 201, 'an unpaid pass must not count as used');
+    assert.equal(again.body.data.order_id, first.body.data.order_id, 'the same Razorpay order is resumed');
+    assert.equal(again.body.data.payment_uid, first.body.data.payment_uid);
+    assert.equal(again.body.data.user_subscription_uid, first.body.data.user_subscription_uid);
+    assert.equal(orders, 1, 'no second order — so two open checkouts can never buy two passes');
+    assert.equal(await UserSubscription.count({ where: { user_id: u.id, sub_type: 'access_pass' } }), 1);
+
+    // Back after the "abandoned" threshold: the resumed order reads pending, not
+    // abandoned, while they pay it.
+    await agePayment((await Payment.findOne({ where: { uid: first.body.data.payment_uid } })).id);
+    await buy();
+    const hist = (await h.request('GET', `${P}/subscriptions/payments`, { token })).body.data.items;
+    assert.equal(hist.find((r) => r.uid === first.body.data.payment_uid).status, 'pending');
+
+    // Re-priced since: the old order would charge the old amount, so a new one
+    // is opened — still on the same subscription row.
+    await pass.update({ pass_price: parseFloat(originalPrice) + 1 });
+    const repriced = await buy();
+    assert.equal(repriced.status, 201);
+    assert.notEqual(repriced.body.data.order_id, first.body.data.order_id);
+    assert.equal(repriced.body.data.user_subscription_uid, first.body.data.user_subscription_uid);
+    assert.equal(orders, 2);
+    const row = await UserSubscription.findOne({ where: { uid: first.body.data.user_subscription_uid } });
+    assert.equal(parseFloat(row.amount_paid), repriced.body.data.amount, 'the row carries the new price');
+
+    // Paying is what uses it up.
+    const evt = {
+      event: 'payment.captured',
+      payload: { payment: { entity: { id: `pay_pass_${u.id}`, order_id: repriced.body.data.order_id, amount: Math.round(repriced.body.data.amount * 100) } } },
+    };
+    const { raw, sig } = signWebhook(evt);
+    assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } })).status, 200);
+    await row.reload();
+    assert.equal(row.status, 'active');
+
+    const used = await buy();
+    assert.equal(used.status, 409, 'a paid pass is one per user, ever');
+    assert.equal(orders, 2);
+  } finally {
+    await pass.update({ pass_price: originalPrice });
+  }
+});
+
+test('closing the mandate checkout does not use up the free trial', async () => {
+  const u     = await User.create({ uid: uuid(), name: 'TST Trial Abandon', phone: `8${String(Date.now() % 1000000000).padStart(9, '0')}` });
+  track.users.push(u.id);
+  const token = h.userTokenFor(u.id);
+  // Inactive so it never shows up in a catalogue assertion elsewhere; initiation
+  // does not look at plan status.
+  const plan = await models.Plan.create({ uid: uuid(), name: `TST Trial Plan ${Date.now()}`, trial_days: 7, status: 'inactive' });
+  const option = await models.PlanBillingOption.create({
+    plan_id: plan.id, billing_cycle: 'monthly', price: 299, razorpay_plan_id: `plan_TST${Date.now()}`,
+  });
+
+  let created = 0;
+  let gatewayStatus = 'created';
+  const cancelled = [];
+  const gateway = {
+    createSubscription: async () => { created += 1; return { id: `sub_trial_${u.id}_${created}`, short_url: `https://rzp.io/i/t${created}` }; },
+    fetchSubscription:  async () => {
+      if (gatewayStatus instanceof Error) throw gatewayStatus;
+      return { status: gatewayStatus };
+    },
+    cancelSubscription: async (id) => { cancelled.push(id); },
+  };
+  const start = () => withGateway(gateway, () =>
+    h.request('POST', `${P}/subscriptions`, { token, body: { plan_billing_option_id: option.id } }));
+  const rowFor = (uid) => UserSubscription.findOne({ where: { uid } });
+
+  try {
+    const first = await start();
+    assert.equal(first.status, 201);
+    assert.equal(first.body.data.type, 'trial');
+
+    // Abandoned (mandate still 'created'): the old mandate is cancelled and a
+    // fresh one, with a fresh trial window, is opened on the same row.
+    const again = await start();
+    assert.equal(again.status, 201, 'an unfinished trial checkout must not count as used');
+    assert.notEqual(again.body.data.subscription_id, first.body.data.subscription_id);
+    assert.equal(again.body.data.user_subscription_uid, first.body.data.user_subscription_uid);
+    assert.deepEqual(cancelled, [first.body.data.subscription_id], 'the stale mandate is cancelled first');
+    assert.equal(await UserSubscription.count({ where: { user_id: u.id, plan_id: plan.id } }), 1);
+    assert.equal((await rowFor(again.body.data.user_subscription_uid)).razorpay_subscription_id, again.body.data.subscription_id);
+
+    // A webhook for the retired mandate matches nothing.
+    const stale = signWebhook({ event: 'subscription.activated', payload: { subscription: { entity: { id: first.body.data.subscription_id } } } });
+    const ignored = await h.request('POST', `${P}/subscriptions/webhook`, { body: stale.raw, headers: { 'x-razorpay-signature': stale.sig } });
+    assert.ok(ignored.body.ignored, 'the retired mandate can never activate the trial');
+    assert.equal((await rowFor(again.body.data.user_subscription_uid)).status, 'pending');
+
+    // The user DID authorise it and the webhook is just late: no second mandate.
+    gatewayStatus = 'authenticated';
+    const inFlight = await start();
+    assert.equal(inFlight.status, 409);
+    assert.equal(created, 2, 'nothing new opened while a real trial is in flight');
+
+    // Gateway down: refuse rather than risk two live mandates.
+    gatewayStatus = Object.assign(new Error('gateway timeout'), { statusCode: 500 });
+    const down = await start();
+    assert.equal(down.status, 502);
+    assert.equal(created, 2);
+
+    // Already expired at Razorpay: nothing to cancel, just reopen.
+    gatewayStatus = 'expired';
+    const reopened = await start();
+    assert.equal(reopened.status, 201);
+    assert.equal(cancelled.length, 1, 'an ended mandate is not cancelled again');
+    assert.equal(created, 3);
+
+    // Activation is what uses the trial up.
+    const act = signWebhook({ event: 'subscription.activated', payload: { subscription: { entity: { id: reopened.body.data.subscription_id } } } });
+    assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: act.raw, headers: { 'x-razorpay-signature': act.sig } })).status, 200);
+    assert.equal((await rowFor(reopened.body.data.user_subscription_uid)).status, 'active');
+
+    gatewayStatus = 'created';
+    const used = await start();
+    assert.equal(used.status, 409, 'one trial per plan once it is real');
+    assert.equal(created, 3);
+  } finally {
+    await UserSubscription.destroy({ where: { plan_id: plan.id } });
+    await option.destroy();
+    await plan.destroy();
+  }
+});
+
 // ---------- Coupons: redemption rules ----------
 let couponSeq = 0;
 const mkCoupon = async (over = {}) => {
@@ -2999,6 +3150,73 @@ test('custom sub-industry can also be filed from PATCH /businesses/{uid}', async
     token, body: { industry: parent.slug, sub_industry: parent.slug, custom_sub_industry: 'TST Nope' },
   });
   assert.equal(both.status, 400);
+});
+
+// Changing industry after onboarding: the business holds ONE leaf id, so the old
+// sub-industry can never linger — but every path into that id has to keep the
+// leaf consistent with the industry the owner actually picked.
+test('changing industry via PATCH keeps the industry and sub-industry consistent', async () => {
+  const stamp = Date.now() + 13;
+  const a = await mkKeywordFixture(stamp);          // Industry A > child A
+  const b = await mkKeywordFixture(stamp + 1);      // Industry B > child B
+  const owner = await mkUser('IndChange');
+  const token = h.userTokenFor(owner.id);
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Ind Change ${stamp}`, industry: a.parent.slug, sub_industry: a.child.slug },
+  });
+  assert.equal(created.status, 201);
+  const uid   = created.body.data.uid;
+  const patch = (body) => h.request('PATCH', `${P}/businesses/${uid}`, { token, body });
+  const currentCategory = async () => (await Business.findOne({ where: { uid } })).category_id;
+
+  // Industry alone replaces the old sub-industry outright.
+  const moved = await patch({ industry: b.parent.slug });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.body.data.category_id, b.parent.id, 'attached to the new industry, old sub-industry gone');
+
+  // #1 — a custom name that already lives under ANOTHER industry is refused, not
+  // silently adopted (which would drag the business back under industry A).
+  const elsewhere = await patch({ industry: b.parent.slug, custom_sub_industry: a.child.name });
+  assert.equal(elsewhere.status, 400);
+  assert.ok(elsewhere.body.error.message.includes(a.parent.name), 'names where it lives');
+  assert.equal(await currentCategory(), b.parent.id, 'business untouched');
+
+  const topLevel = await patch({ industry: b.parent.slug, custom_sub_industry: a.parent.name });
+  assert.equal(topLevel.status, 400, 'a top-level industry name is not a sub-industry');
+
+  const pendingA = await models.BusinessCategory.create({
+    uid: uuid(), parent_id: a.parent.id, name: `TST Pending A ${stamp}`, slug: `tst-pending-a-${stamp}`, status: 'pending', is_active: 0,
+  });
+  track.businessCategories.push(pendingA.id);
+  const pendingElsewhere = await patch({ industry: b.parent.slug, custom_sub_industry: pendingA.name });
+  assert.equal(pendingElsewhere.status, 400, 'a pending suggestion under another industry is refused');
+  assert.ok(!pendingElsewhere.body.error.message.includes(a.parent.name), 'a pending row\'s placement is not disclosed');
+
+  // ...while the same name under the SAME industry still converges.
+  const same = await patch({ industry: a.parent.slug, custom_sub_industry: pendingA.name });
+  assert.equal(same.status, 200);
+  assert.equal(same.body.data.category_id, pendingA.id, 'joins the existing suggestion');
+
+  // #3 — the legacy category_id is held to published industries...
+  const otherPending = await models.BusinessCategory.create({
+    uid: uuid(), parent_id: b.parent.id, name: `TST Pending B ${stamp}`, slug: `tst-pending-b-${stamp}`, status: 'pending', is_active: 0,
+  });
+  track.businessCategories.push(otherPending.id);
+  assert.equal((await patch({ category_id: otherPending.id })).status, 400, 'cannot attach to a pending row by raw id');
+  assert.equal((await patch({ category_id: 999999999 })).status, 400, 'unknown id is a clean 400');
+  // ...except the business's own current id, so an echoed form still saves.
+  assert.equal((await patch({ category_id: pendingA.id, name: `TST Ind Change2 ${stamp}` })).status, 200, 're-sending the current pending id is fine');
+  const legacy = await patch({ category_id: b.child.id });
+  assert.equal(legacy.status, 200);
+  assert.equal(legacy.body.data.category_id, b.child.id);
+
+  // #4 — sub_industry on its own must actually be a sub-industry.
+  assert.equal((await patch({ sub_industry: a.parent.slug })).status, 400, 'a top-level industry is not a sub_industry');
+  const subOnly = await patch({ sub_industry: a.child.slug });
+  assert.equal(subOnly.status, 200);
+  assert.equal(subOnly.body.data.category_id, a.child.id);
+  assert.equal(subOnly.body.data.BusinessCategory.parent.id, a.parent.id, 'industry follows from the leaf');
 });
 
 // ---------- Signup step 2: BUSINESS vs PERSONAL ----------
@@ -6310,6 +6528,124 @@ test('payment history describes each purchase and exposes documents for successf
   const other = await mkUser('Other');
   assert.equal((await h.request('GET', `${P}/subscriptions/payments/${paid.uid}/document`, { token: h.userTokenFor(other.id) })).status, 403);
   assert.equal((await h.request('GET', `${P}/subscriptions/payments/${uuid()}/document`, { token })).status, 404);
+});
+
+// Pushes a payment's timestamps past the "abandoned" threshold. The timestamps are
+// not writable through the model, so this goes direct — as a UTC string, because a
+// raw-query Date replacement is formatted in LOCAL time while the models store
+// UTC, which on an IST machine lands the row 5½ hours in the future.
+const agePayment = async (id) => {
+  const { ABANDONED_AFTER_MS } = require('../src/services/billing.service');
+  const aged = new Date(Date.now() - ABANDONED_AFTER_MS - 60e3).toISOString().slice(0, 19).replace('T', ' ');
+  await models.sequelize.query('UPDATE payments SET created_at = ?, updated_at = ? WHERE id = ?', { replacements: [aged, aged, id] });
+};
+
+test('payment history shows failed and abandoned checkouts, and a later payment still succeeds', async () => {
+  const u     = await mkUser('HistoryFail');
+  const token = h.userTokenFor(u.id);
+
+  const { payment: fresh }     = await mkPendingPlanPayment(u);
+  const { payment: walkedOff } = await mkPendingPlanPayment(u);
+  const { payment: declined }  = await mkPendingPlanPayment(u);
+  await agePayment(walkedOff.id);
+
+  const failedEvt = signWebhook({
+    event: 'payment.failed',
+    payload: { payment: { entity: { id: `pay_fail_${declined.id}`, order_id: declined.razorpay_order_id, error_description: 'Payment was declined by the bank' } } },
+  });
+  assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: failedEvt.raw, headers: { 'x-razorpay-signature': failedEvt.sig } })).status, 200);
+  await declined.reload();
+  assert.equal(declined.status, 'pending', 'stored status untouched — the order is still payable');
+
+  const list = async () => {
+    const rows = (await h.request('GET', `${P}/subscriptions/payments`, { token })).body.data.items;
+    return Object.fromEntries(rows.map((r) => [r.uid, r]));
+  };
+  let rows = await list();
+  assert.equal(rows[fresh.uid].status, 'pending', 'a checkout in progress is not called abandoned');
+  assert.equal(rows[walkedOff.uid].status, 'abandoned');
+  assert.equal(rows[walkedOff.uid].failure_reason, null);
+  assert.equal(rows[declined.uid].status, 'failed');
+  assert.equal(rows[declined.uid].failure_reason, 'Payment was declined by the bank');
+
+  // The user retries on the same order and it goes through.
+  const { raw, sig } = captured(declined, { method: 'upi', vpa: 'r@okaxis' });
+  assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } })).status, 200);
+  rows = await list();
+  assert.equal(rows[declined.uid].status, 'success', 'a failed attempt does not stop a later one fulfilling');
+  assert.equal(rows[declined.uid].failure_reason, null, 'no failure shown on a paid row');
+  assert.equal(rows[declined.uid].documents_available, true);
+});
+
+test('an unpaid one-time plan order is resumed rather than duplicated', async () => {
+  const u     = await mkUser('OneTimeResume');
+  const token = h.userTokenFor(u.id);
+  // Own plan: no trial and no Razorpay plan id, so it is the one-time path for sure.
+  const plan   = await models.Plan.create({ uid: uuid(), name: `TST OneTime Plan ${Date.now()}`, status: 'inactive' });
+  const option = await models.PlanBillingOption.create({ plan_id: plan.id, billing_cycle: 'monthly', price: 100 });
+  const coupon = await mkCoupon({ discount_value: 10 });
+
+  let orders = 0;
+  const createOrder = async () => ({ id: `order_ot_${u.id}_${++orders}` });
+  const start = (body = {}) => withGateway({ createOrder }, () =>
+    h.request('POST', `${P}/subscriptions`, { token, body: { plan_billing_option_id: option.id, ...body } }));
+  const historyRow = async (uid) =>
+    (await h.request('GET', `${P}/subscriptions/payments`, { token })).body.data.items.find((r) => r.uid === uid);
+
+  try {
+    const first = await start();
+    assert.equal(first.status, 201);
+    assert.equal(first.body.data.type, 'one_time');
+
+    const again = await start();
+    assert.equal(again.body.data.order_id, first.body.data.order_id, 'same order handed back');
+    assert.equal(again.body.data.payment_uid, first.body.data.payment_uid);
+    assert.equal(again.body.data.user_subscription_uid, first.body.data.user_subscription_uid);
+    assert.equal(orders, 1);
+    assert.equal(await Payment.count({ where: { user_id: u.id } }), 1, 'no pile of abandoned rows in the history');
+
+    // Walked away, came back an hour later: the row read "abandoned", and reads
+    // "pending" again as soon as the order is handed back.
+    await agePayment((await Payment.findOne({ where: { uid: first.body.data.payment_uid } })).id);
+    assert.equal((await historyRow(first.body.data.payment_uid)).status, 'abandoned');
+    await start();
+    assert.equal((await historyRow(first.body.data.payment_uid)).status, 'pending', 'the clock restarts on resume');
+
+    // A failed attempt, then a retry: the old failure no longer shows.
+    const failed = signWebhook({
+      event: 'payment.failed',
+      payload: { payment: { entity: { id: `pay_otf_${u.id}`, order_id: first.body.data.order_id, error_description: 'Card declined' } } },
+    });
+    await h.request('POST', `${P}/subscriptions/webhook`, { body: failed.raw, headers: { 'x-razorpay-signature': failed.sig } });
+    assert.equal((await historyRow(first.body.data.payment_uid)).status, 'failed');
+    const retry = await start();
+    assert.equal(retry.body.data.order_id, first.body.data.order_id);
+    const row = await historyRow(first.body.data.payment_uid);
+    assert.equal(row.status, 'pending', 'a new attempt is under way');
+    assert.equal(row.failure_reason, null);
+
+    // A coupon changes what is charged: that is a different order.
+    const discounted = await start({ coupon_code: coupon.code });
+    assert.equal(discounted.status, 201);
+    assert.notEqual(discounted.body.data.order_id, first.body.data.order_id);
+    assert.equal(orders, 2);
+
+    // Once the first order is paid there is nothing left to resume for it.
+    const pay = signWebhook({
+      event: 'payment.captured',
+      payload: { payment: { entity: { id: `pay_ot_${u.id}`, order_id: first.body.data.order_id, amount: 11800 } } },
+    });
+    await h.request('POST', `${P}/subscriptions/webhook`, { body: pay.raw, headers: { 'x-razorpay-signature': pay.sig } });
+    assert.equal((await historyRow(first.body.data.payment_uid)).status, 'success');
+    const next = await start();
+    assert.notEqual(next.body.data.order_id, first.body.data.order_id, 'a paid order is never handed back');
+    assert.equal(orders, 3);
+  } finally {
+    await Payment.destroy({ where: { user_id: u.id } });
+    await UserSubscription.destroy({ where: { plan_id: plan.id } });
+    await option.destroy();
+    await plan.destroy();
+  }
 });
 
 test('a payment that succeeded before numbering existed is numbered on first document request', async () => {

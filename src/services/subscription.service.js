@@ -154,6 +154,45 @@ async function getMySubscription(userId) {
   };
 }
 
+// A pending trial row means the user opened the mandate checkout and never
+// finished it. Its Razorpay subscription cannot simply be handed back: the first
+// charge (start_at) was fixed when it was created, so resuming it days later
+// would shorten the trial. Instead the old mandate is cancelled and the caller
+// opens a fresh one on the same row.
+//
+// Cancelled first, and only from 'created': a mandate the user DID authorise
+// (the webhook just has not landed yet) is a real trial in flight, and opening a
+// second one would let the same user hold two mandates for one trial.
+const MANDATE_ENDED = new Set(['cancelled', 'completed', 'expired']);
+
+async function _retireStaleTrialMandate(sub) {
+  const id = sub.razorpay_subscription_id;
+  if (!id) return;
+
+  const gatewayError = () =>
+    new AppError('Could not reach the payment gateway; please try again', 502, 'GATEWAY_ERROR');
+
+  let status;
+  try {
+    ({ status } = await razorpay.fetchSubscription(id));
+  } catch (err) {
+    // Razorpay answers 400 for an id it does not know (e.g. created under other
+    // keys) — there is nothing live to retire. Anything else is a real outage.
+    if (err?.statusCode === 400 || err?.statusCode === 404) return;
+    throw gatewayError();
+  }
+
+  if (MANDATE_ENDED.has(status)) return;
+  if (status !== 'created') {
+    throw new ConflictError('Your free trial for this plan is already being set up — it will be active shortly');
+  }
+  try {
+    await razorpay.cancelSubscription(id);
+  } catch {
+    throw gatewayError();
+  }
+}
+
 async function initiateSubscription(userId, { plan_billing_option_id, coupon_code }) {
   const option = await PlanBillingOption.findByPk(plan_billing_option_id);
   if (!option) throw new NotFoundError('Billing option not found');
@@ -204,16 +243,31 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
   };
 
   if (isTrial) {
-    if (await subRepo.findTrialByUserAndPlan(userId, plan.id)) {
+    // A pending trial is an abandoned (or in-flight) mandate checkout, not a used
+    // trial — see _retireStaleTrialMandate. Anything past pending is a use.
+    const prior = await subRepo.findTrialByUserAndPlan(userId, plan.id);
+    if (prior && prior.status !== 'pending') {
       throw new ConflictError('You have already used the free trial for this plan');
     }
     if (!option.razorpay_plan_id) {
       throw new ConflictError('This plan is not configured for trials (missing Razorpay plan mapping)');
     }
+    if (prior) await _retireStaleTrialMandate(prior);
+
     const totalCount = option.billing_cycle === 'annual' ? 5 : 12;
     const startAt    = Math.floor(endsAt.getTime() / 1000); // first charge at trial end
     const rzpSub     = await razorpay.createSubscription(option.razorpay_plan_id, totalCount, startAt);
-    const sub        = await subRepo.create({ ...baseSub, auto_renew: 1, razorpay_subscription_id: rzpSub.id });
+    let sub;
+    if (prior) {
+      // Repoint the same row at the new mandate. Webhooks for the retired one
+      // then match no row and are ignored, so it can never activate anything.
+      await subRepo.update(prior.id, {
+        ...baseSub, uid: prior.uid, auto_renew: 1, razorpay_subscription_id: rzpSub.id,
+      });
+      sub = prior;
+    } else {
+      sub = await subRepo.create({ ...baseSub, auto_renew: 1, razorpay_subscription_id: rzpSub.id });
+    }
     return {
       type:                  'trial',
       trial_ends_at:         endsAt,
@@ -237,6 +291,26 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
     };
   }
 
+  const oneTimeResponse = (sub, payment) => ({
+    type:                  'one_time',
+    order_id:              payment.razorpay_order_id,
+    amount:                totalAmount,
+    currency:              'INR',
+    payment_uid:           payment.uid,
+    user_subscription_uid: sub.uid,
+  });
+
+  // Same purchase started before and never paid (Checkout closed, or an attempt
+  // failed) -> hand back that order rather than open another, so abandoned
+  // attempts do not pile up as rows in the payment history. Matched on option +
+  // coupon + amount: anything that changes what is charged is a new order.
+  const resumable = await subRepo.findResumableOneTime(userId, option.id, couponId);
+  const open      = resumable && await paymentRepo.findPendingForSubscription(resumable.id);
+  if (open && parseFloat(open.amount) === totalAmount) {
+    await _reopenOrder(open);
+    return oneTimeResponse(resumable, open);
+  }
+
   const sub   = await subRepo.create({ ...baseSub, auto_renew: 0 });
   const order = await razorpay.createOrder(totalAmount, 'INR', `sub_${Date.now()}`);
   const payment = await paymentRepo.create({
@@ -252,21 +326,31 @@ async function initiateSubscription(userId, { plan_billing_option_id, coupon_cod
     status:            'pending',
   });
 
-  return {
-    type:                  'one_time',
-    order_id:              order.id,
-    amount:                totalAmount,
-    currency:              'INR',
-    payment_uid:           payment.uid,
-    user_subscription_uid: sub.uid,
-  };
+  return oneTimeResponse(sub, payment);
+}
+
+// An unpaid order is being handed back for another attempt. Clearing the last
+// failure is right on its own (a new attempt is starting), and the write also
+// stamps updated_at, which restarts the payment history's "abandoned" clock (see
+// billing.service displayStatus) — otherwise a resumed order would read
+// "abandoned" while the user is in the middle of paying it.
+async function _reopenOrder(payment) {
+  await paymentRepo.update(payment.id, { failure_reason: null });
 }
 
 // ₹10 one-time access pass: enjoy the access-pass plan's features for pass_days
 // without subscribing, then it expires (the renewal job reverts the user to
 // free). One pass per user, ever.
+//
+// "Used" means paid. Closing Checkout without paying leaves the row 'pending'
+// and nothing ever moves it on (closing sends no event, and payment.failed
+// deliberately leaves rows alone), so a pending row used to lock the user out of
+// the pass for good. Now the next attempt resumes it on the SAME Razorpay order:
+// an order accepts repeated attempts until one succeeds and can only be paid
+// once, so two open checkouts can never buy two passes.
 async function initiateAccessPass(userId) {
-  if (await subRepo.findAccessPassByUser(userId)) {
+  const prior = await subRepo.findAccessPassByUser(userId);
+  if (prior && prior.status !== 'pending') {
     throw new ConflictError('You have already used your one-time access pass');
   }
   const plan = await planRepo.findAccessPass();
@@ -275,19 +359,43 @@ async function initiateAccessPass(userId) {
   const amountBeforeTax            = parseFloat(plan.pass_price);
   const { gstAmount, totalAmount } = withGst(amountBeforeTax);
   const startsAt                   = new Date();
+  const term                       = { starts_at: startsAt, ends_at: addDays(startsAt, plan.pass_days) };
 
-  const sub = await subRepo.create({
-    uid:                    uuid(),
-    user_id:                userId,
-    plan_id:                plan.id,
-    plan_billing_option_id: null,
-    sub_type:               'access_pass',
-    status:                 'pending',
-    auto_renew:             0,
-    starts_at:              startsAt,
-    ends_at:                addDays(startsAt, plan.pass_days),
-    amount_paid:            totalAmount,
+  const passResponse = (sub, payment) => ({
+    type:                  'access_pass',
+    order_id:              payment.razorpay_order_id,
+    amount:                totalAmount,
+    currency:              'INR',
+    pass_days:             plan.pass_days,
+    payment_uid:           payment.uid,
+    user_subscription_uid: sub.uid,
   });
+
+  let sub;
+  if (prior) {
+    sub = prior;
+    // Same price as when the order was opened -> hand the same order back.
+    // If an admin has since re-priced the pass, the old order charges the old
+    // amount, so a fresh one is opened on the same row instead.
+    const open = await paymentRepo.findPendingForSubscription(sub.id);
+    if (open && parseFloat(open.amount) === totalAmount) {
+      await _reopenOrder(open);
+      return passResponse(sub, open);
+    }
+    await subRepo.update(sub.id, { plan_id: plan.id, amount_paid: totalAmount, ...term });
+  } else {
+    sub = await subRepo.create({
+      uid:                    uuid(),
+      user_id:                userId,
+      plan_id:                plan.id,
+      plan_billing_option_id: null,
+      sub_type:               'access_pass',
+      status:                 'pending',
+      auto_renew:             0,
+      amount_paid:            totalAmount,
+      ...term,
+    });
+  }
 
   const order   = await razorpay.createOrder(totalAmount, 'INR', `pass_${Date.now()}`);
   const payment = await paymentRepo.create({
@@ -303,15 +411,7 @@ async function initiateAccessPass(userId) {
     status:            'pending',
   });
 
-  return {
-    type:                  'access_pass',
-    order_id:              order.id,
-    amount:                totalAmount,
-    currency:              'INR',
-    pass_days:             plan.pass_days,
-    payment_uid:           payment.uid,
-    user_subscription_uid: sub.uid,
-  };
+  return passResponse(sub, payment);
 }
 
 // Activate a pending/renewing subscription and demote any other active sub the
@@ -445,11 +545,14 @@ async function _onOneTimePaid(event) {
 }
 
 // `payment.failed` was previously unhandled and fell through to `ignored`. It is
-// handled now purely to tell the user — the payment row is deliberately NOT marked
-// failed here, because Razorpay can retry the same order and a later
-// `payment.captured` for it must still fulfil. Notifying is safe either way: the
-// dedupe key is the razorpay payment id, so a redelivered failure is silent, and a
-// subsequent success sends its own "plan is active" notification.
+// handled now to tell the user and to let the payment history show the attempt
+// as failed — but the row's `status` is deliberately NOT set to 'failed', because
+// Razorpay can retry the same order and a later `payment.captured` for it must
+// still fulfil (and an unpaid access pass is resumed on this very order). Only
+// `failure_reason` is recorded; billing.service derives the displayed status from
+// it. Notifying is safe either way: the dedupe key is the razorpay payment id, so
+// a redelivered failure is silent, and a subsequent success sends its own "plan
+// is active" notification.
 async function _onPaymentFailed(event) {
   const p = event.payload?.payment?.entity;
   if (!p?.order_id) return { ignored: 'no order_id' };
@@ -457,6 +560,11 @@ async function _onPaymentFailed(event) {
   const payment = await paymentRepo.findByRazorpayOrderId(p.order_id);
   if (!payment) return { ignored: 'unknown order' };
   if (payment.status === 'success') return { ok: true, ignored: 'already paid' };
+
+  // Latest attempt wins — that is the one the user just saw fail.
+  await paymentRepo.update(payment.id, {
+    failure_reason: p.error_description || p.error_reason || 'Payment failed',
+  });
 
   notify.notify({
     code: 'payment_failed', userId: payment.user_id,

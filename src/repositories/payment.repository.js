@@ -38,6 +38,14 @@ class PaymentRepository extends BaseRepository {
     return this.findByUid(uid, { include: DESCRIBE });
   }
 
+  // The unpaid order behind a pending subscription, so an abandoned checkout can
+  // be resumed on the same Razorpay order instead of opening a second one.
+  findPendingForSubscription(subscriptionId) {
+    return this.findOne({ subscription_id: subscriptionId, status: 'pending' }, {
+      order: [['id', 'DESC']],
+    });
+  }
+
   // The most recent successful charge on one subscription — where the
   // subscription's "payment method" comes from.
   findLatestSuccessForSubscription(subscriptionId) {

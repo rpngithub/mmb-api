@@ -122,14 +122,36 @@ async function uniqueSlug(base, transaction) {
 // insert the DB would reject, converge on the existing row: an approved match makes
 // the pick a normal industry outright, and a pending match joins the suggestion
 // already in the queue instead of filing a duplicate.
+//
+// Converging is only correct when the existing row sits under the SAME industry.
+// A name living elsewhere ("Bakery" typed under Retail, while Bakery is a child of
+// Food) would silently re-home the business to Food, overriding the industry the
+// owner just picked — so that is a 400 telling them where it is instead.
+async function adoptExistingIndustry(existing, parentId, name, transaction) {
+  if (existing.status === 'rejected') throw new ValidationError(`"${name}" is not available as an industry`);
+  // A retired catalogue entry is not something a client may attach to (the same
+  // rule findPublishedIndustry applies to sub_industry).
+  if (existing.status === 'approved' && Number(existing.is_active) !== 1) {
+    throw new ValidationError(`"${name}" is not available as an industry`);
+  }
+  if (existing.parent_id === parentId) return existing.id;
+
+  if (existing.parent_id == null) {
+    throw new ValidationError(`"${name}" is an industry, not a sub-industry — choose it as the industry instead`);
+  }
+  // Only an approved home is named: a pending row's placement is not public.
+  if (existing.status === 'approved') {
+    const home = await BusinessCategory.findByPk(existing.parent_id, { attributes: ['name'], transaction });
+    if (home) throw new ValidationError(`"${name}" already exists under ${home.name} — pick it from there`);
+  }
+  throw new ValidationError(`"${name}" is already suggested under a different industry`);
+}
+
 async function suggestSubIndustry(parentId, rawName, userId, transaction) {
   const name = rawName.trim();
 
   const existing = await BusinessCategory.findOne({ where: { name }, transaction });
-  if (existing) {
-    if (existing.status === 'rejected') throw new ValidationError(`"${name}" is not available as an industry`);
-    return existing.id;
-  }
+  if (existing) return adoptExistingIndustry(existing, parentId, name, transaction);
 
   try {
     const row = await BusinessCategory.create({
@@ -148,7 +170,7 @@ async function suggestSubIndustry(parentId, rawName, userId, transaction) {
     if (err.name !== 'SequelizeUniqueConstraintError') throw err;
     const row = await BusinessCategory.findOne({ where: { name }, transaction });
     if (!row) throw err;
-    return row.id;
+    return adoptExistingIndustry(row, parentId, name, transaction);
   }
 }
 
@@ -157,15 +179,25 @@ async function suggestSubIndustry(parentId, rawName, userId, transaction) {
 //   sub_industry          — the child pick, validated to belong to `industry`
 //   custom_sub_industry   — free text from "Others"; files a pending suggestion
 // `industry` alone is valid (not every industry has children). The legacy
-// `category_id` is still accepted and passes through untouched when none of the
-// three friendly params are supplied, so pre-rename clients keep working.
-async function resolveIndustry(data, userId, transaction) {
+// `category_id` is still accepted when none of the three friendly params are
+// supplied, so pre-rename clients keep working — but it gets the same published-
+// only check as `industry`, otherwise a raw id could attach a business to a
+// pending, rejected or retired row (including someone else's suggestion). Re-
+// sending the business's CURRENT id is always allowed, so a client that echoes
+// the whole form back doesn't trip over its own pending suggestion.
+async function resolveIndustry(data, userId, transaction, currentCategoryId = null) {
   const { industry, sub_industry, custom_sub_industry, ...rest } = data;
 
   const hasIndustry = industry !== undefined && industry !== '';
   const hasSub      = sub_industry !== undefined && sub_industry !== '';
   const hasCustom   = typeof custom_sub_industry === 'string' && custom_sub_industry.trim() !== '';
-  if (!hasIndustry && !hasSub && !hasCustom) return rest;
+  if (!hasIndustry && !hasSub && !hasCustom) {
+    if (rest.category_id !== undefined && Number(rest.category_id) !== currentCategoryId
+        && !(await findPublishedIndustry(rest.category_id, transaction))) {
+      throw new ValidationError('Unknown category_id');
+    }
+    return rest;
+  }
 
   if (hasSub && hasCustom) {
     throw new ValidationError('Send either sub_industry or custom_sub_industry, not both');
@@ -180,6 +212,11 @@ async function resolveIndustry(data, userId, transaction) {
   if (hasSub) {
     const sub = await findPublishedIndustry(sub_industry, transaction);
     if (!sub) throw new ValidationError('Unknown sub_industry');
+    // Sent without `industry` there is no parent to check against, so at least
+    // insist it IS a sub-industry — a top-level row belongs in `industry`.
+    if (sub.parent_id == null) {
+      throw new ValidationError('sub_industry must be a sub-industry; send a top-level industry as industry');
+    }
     if (parent && sub.parent_id !== parent.id) {
       throw new ValidationError('sub_industry does not belong to the given industry');
     }
@@ -388,7 +425,7 @@ async function updateBusiness(uid, userId, data) {
     await assertFontsUsable(fields, userId);
     await assertFrameUsable(fields, userId);
     if (fields.brand_colors !== undefined) fields.brand_colors = normalizeBrandColors(fields.brand_colors);
-    const payload = await resolveIndustry(fields, userId, t);
+    const payload = await resolveIndustry(fields, userId, t, biz.category_id);
     const tagIds  = await resolveKeywords(keywords, t);
     if (Object.keys(payload).length) await businessRepo.update(biz.id, payload, t);
     if (tagIds) await biz.setTags(tagIds, { transaction: t });   // full replace
