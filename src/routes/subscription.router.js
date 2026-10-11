@@ -185,7 +185,8 @@ router.post('/me/cancel-renewal', authenticate, controller.cancelRenewal);
  *   get:
  *     summary: My payment history (Billing & Payments screen)
  *     description: >-
- *       Every payment the user started, newest first — successful, pending and failed alike.
+ *       Every payment the user started, newest first — successful, pending, failed and
+ *       abandoned alike (see `status` on the row for how failed/abandoned are decided).
  *       `last_transaction` (page 1 only) is the newest SUCCESSFUL row, for the "Last transaction"
  *       card. `documents_available` says whether the invoice/receipt endpoint will serve the row.
  *     tags: [Subscriptions]
@@ -312,6 +313,12 @@ router.post('/coupon/verify', authenticate, validate(verifyCouponSchema), contro
  *       or non-redeemable `coupon_code` fails the request (404/409) rather than silently
  *       charging full price; the coupon's `used_count` is consumed only once the
  *       subscription activates, so an abandoned checkout does not burn a capped coupon.
+ *       An unpaid ONE-TIME order for the same billing option, coupon and amount is resumed:
+ *       the same `order_id` / `payment_uid` / `user_subscription_uid` come back instead of a
+ *       new order.
+ *       Likewise an abandoned free-trial checkout does not use up the trial: calling this
+ *       again cancels the unfinished Razorpay mandate and returns a fresh `short_url`
+ *       (same `user_subscription_uid`).
  *     tags: [Subscriptions]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -332,7 +339,12 @@ router.post('/coupon/verify', authenticate, validate(verifyCouponSchema), contro
  *         description: Billing option not found, or coupon not found/expired
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *       409:
- *         description: Coupon not redeemable, trial already used, or plan not configured for trials
+ *         description: >-
+ *           Coupon not redeemable, trial already used, plan not configured for trials, or the
+ *           user already authorised this trial's mandate and it is about to activate
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       502:
+ *         description: Razorpay unreachable while retiring an unfinished trial mandate; retry
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.post('/', authenticate, validate(createSubscriptionSchema), controller.initiate);
@@ -342,15 +354,21 @@ router.post('/', authenticate, validate(createSubscriptionSchema), controller.in
  * /subscriptions/access-pass:
  *   post:
  *     summary: Buy the one-time ₹10 access pass
- *     description: Creates a pending one-time access-pass subscription and returns a Razorpay order. Grants the access-pass plan's features for its pass_days, then expires (reverts to free). Allowed once per user, ever.
+ *     description: >-
+ *       Creates a pending one-time access-pass subscription and returns a Razorpay order.
+ *       Grants the access-pass plan's features for its pass_days, then expires (reverts to
+ *       free). Allowed once per user, ever — but only a PAID pass counts. If the user closed
+ *       Checkout without paying, calling this again returns the same `order_id` (and
+ *       `payment_uid` / `user_subscription_uid`) so they can finish paying; a Razorpay order
+ *       can only be paid once, so this never sells two passes.
  *     tags: [Subscriptions]
  *     security: [{ bearerAuth: [] }]
  *     responses:
  *       201:
- *         description: Razorpay order to drive Checkout
+ *         description: Razorpay order to drive Checkout (new, or the user's unpaid one resumed)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/SuccessResponse' } } }
  *       409:
- *         description: Access pass already used
+ *         description: Access pass already bought (active, expired or cancelled)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.post('/access-pass', authenticate, controller.initiateAccessPass);

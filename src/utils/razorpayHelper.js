@@ -12,6 +12,10 @@ const createSubscription = (planId, totalCount = 12, startAt) => {
   return getRazorpay().subscriptions.create(params);
 };
 
+// Current gateway state of a subscription — `status` is what callers read
+// (created / authenticated / active / pending / halted / cancelled / ...).
+const fetchSubscription = (subscriptionId) => getRazorpay().subscriptions.fetch(subscriptionId);
+
 // Stops a recurring subscription (UPI Autopay / card mandate) at Razorpay.
 // Immediate, not at cycle end: the caller is the account purge, and an account
 // that is about to be wiped must not take one more charge. Razorpay rejects
@@ -77,6 +81,6 @@ const verifyPaymentSignature = (orderId, paymentId, signature) => {
 };
 
 module.exports = {
-  createOrder, createSubscription, cancelSubscription, cancelSubscriptionAtCycleEnd,
+  createOrder, createSubscription, fetchSubscription, cancelSubscription, cancelSubscriptionAtCycleEnd,
   paymentMethodFrom, verifyWebhookSignature, verifyPaymentSignature,
 };

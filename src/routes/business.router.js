@@ -44,7 +44,9 @@ const deprecated = require('../middlewares/deprecated');
  *                   sub-industry. Files it as a PENDING industry under `industry` (which is
  *                   then required) for admin approval, and links the business to it right away.
  *                   Publicly the business shows no industry chip until it is approved.
- *                   A name that already exists resolves to that industry instead of filing a duplicate.
+ *                   A name that already exists UNDER THE SAME industry resolves to that row instead
+ *                   of filing a duplicate; one that exists under a different industry (or is itself
+ *                   a top-level industry) is a 400 rather than silently moving the business there.
  *               keywords:
  *                 type: array
  *                 items: { type: string }
@@ -52,7 +54,7 @@ const deprecated = require('../middlewares/deprecated');
  *                   "My Keywords" — tags describing the products & services, each a numeric id,
  *                   a slug, or the display name. Must already exist (see GET /industries/{ref}/keywords
  *                   for the suggestions); an unknown keyword is a 400.
- *               category_id: { type: integer, deprecated: true, description: "Legacy form of industry (still accepted)" }
+ *               category_id: { type: integer, deprecated: true, description: "Legacy form of industry (still accepted; ignored when industry/sub_industry/custom_sub_industry is sent). Must be a published industry — a pending, rejected or retired id is a 400." }
  *               description:  { type: string }
  *               logo_s3_key:  { type: string, nullable: true, description: "Key from POST /uploads/presign with slot `business_logo`. A key outside your own namespace, or from a different slot, is rejected. Send null to clear." }
  *               cover_s3_key: { type: string, nullable: true, description: "As logo_s3_key, with slot `business_cover`." }
@@ -201,14 +203,16 @@ router.get('/:uid/products', optionalAuth, rateLimiter.publicTiered, controller.
  *                   child of that industry and moves this business onto it immediately; the label
  *                   stays hidden from GET /industries and from the public storefront until an admin
  *                   approves it, while the owner's own read shows BusinessCategory.status = pending.
- *                   An existing name (case-insensitive) resolves to that row rather than filing a
- *                   duplicate; a previously rejected name is a 400.
+ *                   An existing name (case-insensitive) under the same industry resolves to that row
+ *                   rather than filing a duplicate. A previously rejected or retired name, a name that
+ *                   lives under a different industry, or a top-level industry's name is a 400.
+ *                   Sending only `industry` attaches the business to it and drops the old sub-industry.
  *     responses:
  *       200:
  *         description: Updated business
  *         content: { application/json: { schema: { $ref: '#/components/schemas/BusinessResponse' } } }
  *       400:
- *         description: Unknown industry, a sub_industry that is not a child of it, both sub_industry and custom_sub_industry, or custom_sub_industry with no industry
+ *         description: Unknown industry, a sub_industry that is not a child of it (or is a top-level industry), both sub_industry and custom_sub_industry, custom_sub_industry with no industry or naming an industry elsewhere in the tree, or a legacy category_id that is not a published industry
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *       403:
  *         description: Access denied

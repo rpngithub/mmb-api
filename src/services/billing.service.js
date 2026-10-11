@@ -44,8 +44,33 @@ function periodFor(payment) {
   return `${f(sub.starts_at)} – ${f(sub.ends_at)}`;
 }
 
+// A pending order with no failure reported for this long is treated as walked
+// away from. Long enough to cover a slow UPI collect request (which can take
+// several minutes to approve) so a payment in progress is not called abandoned.
+const ABANDONED_AFTER_MS = 30 * 60 * 1000;
+
+// What the history shows, which is NOT always the stored status. A one-time
+// order stays 'pending' in the database until it is paid — a failed attempt or
+// a closed Checkout does not end it, since the same order can still be paid
+// (see subscription.service _onPaymentFailed). For display, though:
+//   - a failure Razorpay reported         -> 'failed' (with its reason)
+//   - nothing heard for ABANDONED_AFTER_MS -> 'abandoned'
+// Either flips to 'success' if the order is paid after all.
+//
+// The clock runs from the order's last activity (updated_at), not its creation:
+// an order the user resumes is touched when it is handed back (subscription.service
+// _reopenOrder), so it reads 'pending' again while they pay it.
+function displayStatus(p, now = Date.now()) {
+  if (p.status !== 'pending') return p.status;
+  if (p.failure_reason)       return 'failed';
+  const lastActivity = new Date(p.updated_at || p.created_at).getTime();
+  if (now - lastActivity > ABANDONED_AFTER_MS) return 'abandoned';
+  return 'pending';
+}
+
 function toRow(payment) {
-  const p = payment.toJSON ? payment.toJSON() : payment;
+  const p      = payment.toJSON ? payment.toJSON() : payment;
+  const status = displayStatus(p);
   return {
     uid:                   p.uid,
     description:           describe(payment),
@@ -58,7 +83,10 @@ function toRow(payment) {
     amount_before_tax:     Number(p.amount_before_tax),
     gst_amount:            Number(p.gst_amount),
     currency:              p.currency,
-    status:                p.status,
+    status,
+    // Razorpay's own wording ("Payment was declined by the bank", ...), for a
+    // failed row only.
+    failure_reason:        status === 'failed' ? (p.failure_reason || null) : null,
     payment_method:        p.payment_method,
     payment_method_detail: p.payment_method_detail,
     invoice_number:        p.invoice_number,
@@ -157,4 +185,4 @@ async function renderDocument(userId, uid, type) {
   };
 }
 
-module.exports = { listPayments, renderDocument, describe, toRow };
+module.exports = { listPayments, renderDocument, describe, toRow, displayStatus, ABANDONED_AFTER_MS };

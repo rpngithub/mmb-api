@@ -24,7 +24,20 @@
  *         amount_before_tax: { type: number }
  *         gst_amount:        { type: number }
  *         currency:          { type: string, example: INR }
- *         status:            { type: string, enum: [pending, success, failed, refunded] }
+ *         status:
+ *           type: string
+ *           enum: [pending, success, failed, abandoned, refunded]
+ *           description: >-
+ *             For display. An unpaid order is `failed` once Razorpay reports a failed attempt
+ *             (see `failure_reason`), `abandoned` after 30 minutes with no activity (resuming
+ *             the order restarts the clock and clears an earlier failure), otherwise
+ *             `pending`. Either can still turn into `success` — the same order stays payable
+ *             (e.g. a resumed access pass).
+ *         failure_reason:
+ *           type: string
+ *           nullable: true
+ *           example: Payment was declined by the bank
+ *           description: Razorpay's reason for the latest failed attempt; set only when status is failed.
  *         payment_method:
  *           type: string
  *           nullable: true
