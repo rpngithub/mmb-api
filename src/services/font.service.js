@@ -1,8 +1,9 @@
 const { Op }       = require('sequelize');
 const { v4: uuid } = require('uuid');
 const userUpload   = require('./userUpload.service');
+const fontPreview  = require('./fontPreview.service');
 const userSubRepo  = require('../repositories/userSubscription.repository');
-const { sequelize, Font, FontFile, Language } = require('../models');
+const { sequelize, Font, FontFile, Language, User } = require('../models');
 const { NotFoundError, ForbiddenError, ValidationError, ConflictError } = require('../errors');
 
 // A font is offered to a viewer when it is a LIBRARY font (user_id null) or one
@@ -71,7 +72,7 @@ async function createOwnFont(userId, { family, files }) {
 
   for (const f of files) await userUpload.assertOwnedKey(f.s3_key, 'brand_font', userId);
 
-  return sequelize.transaction(async (t) => {
+  const fontId = await sequelize.transaction(async (t) => {
     const font = await Font.create({ uid: uuid(), user_id: userId, family: name, is_active: 1 }, { transaction: t });
     await FontFile.bulkCreate(files.map((f) => ({
       font_id: font.id,
@@ -80,23 +81,34 @@ async function createOwnFont(userId, { family, files }) {
       format:  f.format,
       s3_key:  f.s3_key,
     })), { transaction: t });
-
-    return Font.findOne({ where: { id: font.id }, include: includes(), transaction: t })
-      .then((row) => shape(row, { userId, tier: 'paid' }));
+    return font.id;
   });
+
+  // After commit (it reads the row back) and best-effort: the font is registered
+  // whether or not a preview could be made.
+  await fontPreview.refresh(fontId);
+
+  const row = await Font.findOne({ where: { id: fontId }, include: includes() });
+  return shape(row, { userId, tier: 'paid' });
 }
 
 // Deleting your own font releases the storage its files occupied. Any business
 // using it has the reference nulled by the FK (ON DELETE SET NULL), so it silently
 // falls back to the default typeface rather than breaking.
 async function deleteOwnFont(uid, userId) {
-  const font = await Font.findOne({ where: { uid }, include: [{ model: FontFile, attributes: ['s3_key'] }] });
+  const font = await Font.findOne({
+    where:   { uid },
+    include: [{ model: FontFile, attributes: ['s3_key'] }, { model: User, attributes: ['uid'] }],
+  });
   if (!font) throw new NotFoundError('Font not found');
   if (font.user_id !== userId) throw new ForbiddenError('Library fonts cannot be deleted');
 
   const keys = (font.FontFiles || []).map((f) => f.s3_key);
   await font.destroy();                                   // cascades font_files
   for (const key of keys) await userUpload.release(key, userId);
+  try { await fontPreview.remove(font); } catch (err) {
+    console.warn(`[FontPreview] could not remove preview of ${uid}: ${err.message}`);
+  }
 }
 
 // Guard for the brand kit: you may only style a business with a font you can

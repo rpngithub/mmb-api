@@ -8,7 +8,8 @@ const uploadService   = require('../services/upload.service');
 const feedbackService = require('../services/feedback.service');
 const pageContent     = require('../services/pageContent.service');
 const assetAudit      = require('../services/assetAudit.service');
-const s3              = require('../utils/s3Helper');
+const fontPreview     = require('../services/fontPreview.service');
+const s3             = require('../utils/s3Helper');
 const { BusinessCategory, Tag, Template, TemplateFamily, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
 const { NotFoundError, ValidationError, ConflictError } = require('../errors');
 const { Op } = require('sequelize');
@@ -182,8 +183,28 @@ const setFontFiles = async (req, res) => {
       s3_key:  f.s3_key,
     })), { transaction: t });
   });
+  // The regular face may have changed, so the name preview is rebuilt (new key,
+  // never overwritten — it is cached immutably). Best-effort; never fails this call.
+  await fontPreview.refresh(font.id);
   await activity.log(req, { action: 'font.files_updated', entityType: 'font', entityId: font.id });
   res.json({ success: true, data: await findFont(req.params.uid) });
+};
+
+// Backfill / repair: build name previews for fonts that have none (or for every
+// font with ?force=1). Covers users' own fonts too. Returns one line per font
+// with the reason when no preview could be made.
+const rebuildFontPreviews = async (req, res) => {
+  const force  = ['1', 'true'].includes(String(req.query.force || ''));
+  const report = await fontPreview.rebuildAll({ force });
+  await activity.log(req, { action: 'font.previews_rebuilt', entityType: 'font', metadata: { force, count: report.length } });
+  res.json({
+    success: true,
+    data: {
+      processed:    report.length,
+      with_preview: report.filter((r) => r.preview_s3_key).length,
+      fonts:        report,
+    },
+  });
 };
 
 const setFontLanguages = async (req, res) => {
@@ -635,4 +656,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };
+module.exports = { setFontFiles, setFontLanguages, rebuildFontPreviews, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

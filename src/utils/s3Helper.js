@@ -10,8 +10,23 @@ const s3 = require('../config/s3');
 const BUCKET = process.env.S3_BUCKET_NAME;
 const PENDING_TAG = 'status=pending';
 
-const uploadFile = (key, buffer, mimeType) =>
-  s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: buffer, ContentType: mimeType }));
+const uploadFile = (key, buffer, mimeType, { cacheControl } = {}) =>
+  s3.send(new PutObjectCommand({
+    Bucket: BUCKET, Key: key, Body: buffer, ContentType: mimeType,
+    ...(cacheControl ? { CacheControl: cacheControl } : {}),
+  }));
+
+// Server-side read of a whole object. `maxBytes` refuses anything larger before
+// the body is buffered — this host has little memory to spare.
+const getObjectBuffer = async (key, { maxBytes = 25 * 1024 * 1024 } = {}) => {
+  if (!BUCKET) throw new Error('no S3 bucket configured');
+  const r = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+  if (r.ContentLength != null && r.ContentLength > maxBytes) {
+    r.Body.destroy?.();
+    throw new Error(`object ${key} is ${r.ContentLength} bytes, over the ${maxBytes} limit`);
+  }
+  return Buffer.from(await r.Body.transformToByteArray());
+};
 
 // Presigned GET (download) — kept for any read-side use.
 const getPresignedUrl = (key, expiresIn = 3600) =>
@@ -105,7 +120,7 @@ const copyObject = (srcKey, destKey) =>
   s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `${BUCKET}/${srcKey}`, Key: destKey }));
 
 module.exports = {
-  uploadFile, getPresignedUrl, getPresignedPutUrl, putObjectTagging, objectExists,
+  uploadFile, getObjectBuffer, getPresignedUrl, getPresignedPutUrl, putObjectTagging, objectExists,
   createMultipartUpload, presignUploadPart, completeMultipartUpload, abortMultipartUpload,
   listKeys, deleteObjects, deleteByPrefix, copyObject, deleteFile,
 };
