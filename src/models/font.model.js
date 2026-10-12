@@ -14,6 +14,9 @@ module.exports = (sequelize) => {
     is_premium:    { type: DataTypes.TINYINT, allowNull: false, defaultValue: 0 },
     display_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     is_active:     { type: DataTypes.TINYINT, allowNull: false, defaultValue: 1 },
+    // Name-only subset (WOFF2) for the font picker; null = draw the name in the
+    // app font. Written by fontPreview.service, never by clients.
+    preview_s3_key: { type: DataTypes.STRING(500), allowNull: true },
   }, { tableName: 'fonts' });
 
   Font.associate = (models) => {

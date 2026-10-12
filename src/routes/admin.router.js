@@ -8,6 +8,7 @@ const controller   = require('../controllers/admin.controller');
 const uploadController = require('../controllers/upload.controller');
 const importController = require('../controllers/import.controller');
 const { IMPORT_ENTITIES } = require('../services/import.service');
+const fontPreview  = require('../services/fontPreview.service');
 const models       = require('../models');
 const { ConflictError } = require('../errors');
 const {
@@ -373,6 +374,11 @@ router.get('/activity-logs', authenticate, authorizeAdmin('activity.read'), cont
  *       Full replace — a family is many files, one per (weight, style, format). Upload each
  *       via the admin upload endpoints first, then send the keys here. Sending an empty list
  *       is rejected: a font with no files cannot render.
+ *
+ *
+ *       Also rebuilds the font's name preview (`preview_s3_key`) from the regular TTF/OTF/WOFF
+ *       file. Best-effort: when no preview can be made the font is saved anyway, with
+ *       `preview_s3_key` null.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -428,8 +434,58 @@ router.get('/activity-logs', authenticate, authorizeAdmin('activity.read'), cont
  *       404:
  *         description: Not found
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ * /admin/fonts/previews/rebuild:
+ *   post:
+ *     summary: Build name previews for fonts that lack one
+ *     description: >-
+ *       Backfill and repair for `preview_s3_key` — the few-KB WOFF2 holding only the glyphs
+ *       of a font's own name, which the font picker uses to draw each name in its face.
+ *       Previews are made automatically when a font's files or family change; run this once
+ *       after deploying, and again whenever you want to retry fonts that failed.
+ *
+ *
+ *       Covers library fonts AND users' own uploads. Without `force` only fonts with no
+ *       preview are processed; `force=1` rebuilds every font (unchanged previews keep their
+ *       key). Runs sequentially, so it can take a while on a large library.
+ *
+ *
+ *       `reason` explains a missing preview: `name_not_covered` (the font cannot draw its own
+ *       name — e.g. a Tamil font with a Latin name), `needs_shaping` (the name is in a script
+ *       that needs shaping, such as Devanagari or Arabic), `cff_unsupported` (CFF-flavoured
+ *       OTF), `no_readable_file` (only WOFF2 files — add the TTF), `source_unavailable` (the
+ *       file could not be read from storage; retry), `woff2_input`, `collection`,
+ *       `no_truetype_outlines`, `no_unicode_cmap`, `not_a_font`, `error`.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: force, schema: { type: string, enum: ['1', 'true'] }, description: Rebuild every font, not only those without a preview }
+ *     responses:
+ *       200:
+ *         description: Per-font report
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     processed:    { type: integer }
+ *                     with_preview: { type: integer }
+ *                     fonts:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           uid:            { type: string, format: uuid }
+ *                           family:         { type: string }
+ *                           is_library:     { type: boolean }
+ *                           preview_s3_key: { type: string, nullable: true }
+ *                           reason:         { type: string, nullable: true }
  */
-router.put('/fonts/:uid/files',     authenticate, authorizeAdmin('fonts.update'), validate(setFontFilesSchema),     controller.setFontFiles);
+router.post('/fonts/previews/rebuild', authenticate, authorizeAdmin('fonts.update'), controller.rebuildFontPreviews);
+router.put('/fonts/:uid/files',    authenticate, authorizeAdmin('fonts.update'), validate(setFontFilesSchema),     controller.setFontFiles);
 router.put('/fonts/:uid/languages', authenticate, authorizeAdmin('fonts.update'), validate(setFontLanguagesSchema), controller.setFontLanguages);
 
 router.get('/feedback', authenticate, authorizeAdmin('feedback.read'), controller.listFeedback);
@@ -1748,7 +1804,18 @@ const assertLibraryFamilyFree = async (payload, row) => {
   const clash = await models.Font.findOne({ where: { family: payload.family, user_id: null } });
   if (clash && (!row || clash.id !== row.id)) throw new ConflictError('A library font with this name already exists');
 };
-C('/fonts',               { model: models.Font,             resource: 'font',             permission: 'fonts', reorderable: true, filterable: ['is_active', 'is_premium'], beforeWrite: assertLibraryFamilyFree, createSchema: createFontSchema, updateSchema: updateFontSchema, listOptions: { where: { user_id: null } }, include: [{ model: models.FontFile }, { model: models.Language, through: { attributes: [] } }] });
+// The name preview draws the family name, so a rename needs a new one; a deleted
+// font's preview object goes with it. Files are set separately (PUT …/files),
+// which rebuilds the preview itself — a fresh create has no files yet.
+const syncFontPreview = async (row, req, { action }) => {
+  if (action === 'updated' && req.body.family !== undefined) await fontPreview.refresh(row);
+  if (action === 'deleted') {
+    try { await fontPreview.remove(row); } catch (err) {
+      console.warn(`[FontPreview] could not remove preview of ${row.uid}: ${err.message}`);
+    }
+  }
+};
+C('/fonts',               { model: models.Font,             resource: 'font',             permission: 'fonts', reorderable: true, filterable: ['is_active', 'is_premium'], beforeWrite: assertLibraryFamilyFree, afterWrite: syncFontPreview, createSchema: createFontSchema, updateSchema: updateFontSchema, listOptions: { where: { user_id: null } }, include: [{ model: models.FontFile }, { model: models.Language, through: { attributes: [] } }] });
 C('/assets',              { model: models.Asset,            resource: 'asset',            permission: 'assets', filterable: ['category_id', 'asset_type', 'status'], createSchema: createAssetSchema, updateSchema: updateAssetSchema });
 C('/asset-categories',    { model: models.AssetCategory,    resource: 'asset_category',   permission: 'assets', unique: ['slug'], autoSlug: true, createSchema: createAssetCategorySchema, updateSchema: updateAssetCategorySchema });
 C('/special-events',      { model: models.SpecialEvent,     resource: 'special_event',    permission: 'events', unique: ['name'], createSchema: createSpecialEventSchema, updateSchema: updateSpecialEventSchema });

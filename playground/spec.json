@@ -3171,7 +3171,7 @@
                   }
                 ]
               },
-              "description": "Optional auth — send `Bearer {{access_token}}` to include your own uploads and unlock premium library fonts. `is_own` marks yours; `is_locked` marks a premium library font your plan does not include (it still appears, but its files are withheld).\n\nEach row carries its `FontFiles` (weight, style, format, s3_key) and `Languages` (script coverage). `?language=ta` narrows to fonts that can render that script — fonts with no declared coverage are always included, since unclassified means unknown, not incapable.",
+              "description": "Optional auth — send `Bearer {{access_token}}` to include your own uploads and unlock premium library fonts. `is_own` marks yours; `is_locked` marks a premium library font your plan does not include (it still appears, but its files are withheld).\n\nEach row carries its `FontFiles` (weight, style, format, s3_key) and `Languages` (script coverage). `?language=ta` narrows to fonts that can render that script — fonts with no declared coverage are always included, since unclassified means unknown, not incapable.\n\n`preview_s3_key` is the font picker's name-only preview (a few-KB WOFF2 that can draw only `family`) — present on locked fonts too, `null` when the font cannot draw its own name. Keys are immutable; cache forever.",
               "auth": {
                 "type": "noauth"
               }

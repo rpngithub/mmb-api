@@ -66,6 +66,11 @@ module.exports = {
         type: 'boolean',
         description: 'A premium library font the caller\'s plan does not include. It is still listed so the user can see what they would get, but `FontFiles` is withheld until they upgrade.',
       },
+      preview_s3_key: {
+        type: 'string',
+        nullable: true,
+        description: 'Name-only preview for the font picker: a WOFF2 of a few KB holding just the glyphs of `family`, so the name can be drawn in its own face without loading the font. Present for locked fonts too (it can draw nothing but the name). Load it like a FontFiles key (`${cdn_base}/${preview_s3_key}`, family name of your choosing) and render exactly `family` with it. Null when there is no preview — the font cannot draw its own name, or its files are a format the server cannot cut — so show the name in the app font. Keys are immutable: a renamed font or replaced file gets a NEW key, so cache them forever.',
+      },
       FontFiles: {
         type: 'array',
         description: 'One entry per (weight, style, format). Absent when `is_locked`.',

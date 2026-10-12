@@ -5242,6 +5242,258 @@ test('admin library fonts: name unique among library rows only, files and script
   assert.deepEqual(scoped.body.data.Languages.map((l) => l.code), ['ta']);
 });
 
+// ---------- Font name previews ----------
+const zlib = require('node:zlib');
+const { subset: subsetFont, open: openFont } = require('../src/utils/fontSubset');
+const { buildTestFont, toWoff } = require('./fontFixture');
+
+const glyphCount = (ttf) => openFont(ttf).tables.get('maxp').readUInt16BE(4);
+const glyphBytes = (ttf, gid) => {
+  const { tables } = openFont(ttf);
+  const loca = tables.get('loca');
+  return tables.get('glyf').subarray(loca.readUInt32BE(gid * 4), loca.readUInt32BE(gid * 4 + 4));
+};
+
+test('font subset: keeps only the name glyphs, follows composites, drops hinting', () => {
+  const font = buildTestFont();
+  const r = subsetFont(font, 'C A', { format: 'ttf' });
+  assert.ok(r.bytes, r.reason);
+  // .notdef, A, B (pulled in by C's components), C, space — not D.
+  assert.equal(glyphCount(r.bytes), 5);
+  assert.ok(r.bytes.length < font.length);
+
+  // A subset is itself a valid font: subsetting it again resolves every character
+  // through the rebuilt cmap and the remapped composite.
+  assert.equal(subsetFont(r.bytes, 'CA', { format: 'ttf' }).glyphs, 4);
+
+  const simple = glyphBytes(r.bytes, 1);
+  assert.equal(simple.readUInt16BE(12), 0, 'instructions zeroed on simple glyphs');
+  const composite = [1, 2, 3, 4].map((g) => glyphBytes(r.bytes, g)).find((g) => g.length && g.readInt16BE(0) < 0);
+  assert.ok(composite, 'composite kept');
+  // header(10) | flags glyph x y (8) | flags glyph x y (8) — the last record's flags at 18.
+  assert.equal(composite.length, 28, 'trailing instructions cut (26 bytes, padded to 4)');
+  assert.equal(composite.readUInt16BE(18) & 0x0100, 0, 'WE_HAVE_INSTRUCTIONS cleared');
+  for (const at of [12, 20]) assert.ok(composite.readUInt16BE(at) < 5, 'component ids point into the new glyph range');
+});
+
+test('font subset: emits well-formed WOFF2 and reads WOFF input', () => {
+  const r = subsetFont(buildTestFont(), 'BAD');
+  assert.ok(r.bytes);
+  const w = r.bytes;
+  assert.equal(w.toString('latin1', 0, 4), 'wOF2');
+  assert.equal(w.readUInt32BE(8), w.length, 'length field is the file size');
+  assert.equal(w.length % 4, 0, 'padded to 4 bytes');
+
+  // Directory: flag byte + base128 origLength per table (all < 128 bytes long
+  // here except glyf/loca/cmap, so decode base128 properly).
+  const numTables = w.readUInt16BE(12);
+  let p = 48;
+  let total = 0;
+  for (let i = 0; i < numTables; i++) {
+    const flag = w[p++];
+    if ((flag & 0x3f) === 63) p += 4;
+    let n = 0;
+    let b;
+    do { b = w[p++]; n = n * 128 + (b & 0x7f); } while (b & 0x80);
+    total += n;
+  }
+  const compressedLen = w.readUInt32BE(20);
+  const stream = zlib.brotliDecompressSync(w.subarray(p, p + compressedLen));
+  assert.equal(stream.length, total, 'the Brotli stream holds exactly the tables');
+
+  // Same font wrapped as WOFF 1.0 subsets to the same glyph set.
+  assert.equal(subsetFont(toWoff(buildTestFont()), 'BAD').glyphs, r.glyphs);
+});
+
+test('font subset: refuses what it cannot render faithfully, with a reason', () => {
+  const font = buildTestFont();
+  assert.equal(subsetFont(font, 'AZ').reason, 'name_not_covered', 'one missing letter is enough');
+  assert.equal(subsetFont(font, 'தமிழ்').reason, 'needs_shaping');
+  assert.equal(subsetFont(font, '   ').reason, 'empty_text');
+  const sig = (s) => Buffer.concat([Buffer.from(s, 'latin1'), Buffer.alloc(60)]);
+  assert.equal(subsetFont(sig('OTTO'), 'A').reason, 'cff_unsupported');
+  assert.equal(subsetFont(sig('wOF2'), 'A').reason, 'woff2_input');
+  assert.equal(subsetFont(sig('ttcf'), 'A').reason, 'collection');
+  assert.equal(subsetFont(Buffer.from('not a font at all'), 'A').reason, 'not_a_font');
+  // A space-less name only needs its letters; a missing space glyph is tolerated.
+  assert.ok(subsetFont(font, 'AB').bytes);
+});
+
+// Stubs the S3 calls the preview service makes. `source` is what any font file
+// "contains"; null makes the read fail as an unreachable bucket would.
+const withPreviewS3 = async (fn, { source = null, uploadFails = false } = {}) => {
+  const s3 = require('../src/utils/s3Helper');
+  const original = { getObjectBuffer: s3.getObjectBuffer, uploadFile: s3.uploadFile, deleteFile: s3.deleteFile };
+  const calls = { read: [], uploaded: [], deleted: [] };
+  s3.getObjectBuffer = async (key) => {
+    calls.read.push(key);
+    if (!source) throw new Error('unreachable');
+    return source;
+  };
+  s3.uploadFile = async (key, bytes, type, opts) => {
+    if (uploadFails) throw new Error('upload refused');
+    calls.uploaded.push({ key, bytes, type, cacheControl: opts && opts.cacheControl });
+  };
+  s3.deleteFile = async (key) => { calls.deleted.push(key); };
+  try { return await fn(calls); } finally { Object.assign(s3, original); }
+};
+
+test('admin fonts: a name preview is built from the regular file and kept in step with renames', async () => {
+  const token  = h.adminToken(['*']);
+  const stamp  = Date.now();
+  const family = `TST Preview ${stamp}`;
+  const font   = buildTestFont({ extraChars: `${family}TST Renamed ${stamp}` });
+
+  const created = await h.request('POST', `${P}/admin/fonts`, { token, body: { family } });
+  assert.equal(created.status, 201);
+  track.fonts.push(created.body.data.id);
+  const uid = created.body.data.uid;
+
+  await withPreviewS3(async (calls) => {
+    const put = await h.request('PUT', `${P}/admin/fonts/${uid}/files`, {
+      token,
+      body: { files: [
+        { s3_key: 'fonts/p/bold.ttf',      format: 'ttf',   weight: 700 },
+        { s3_key: 'fonts/p/regular.woff2', format: 'woff2', weight: 400 },
+        { s3_key: 'fonts/p/regular.ttf',   format: 'ttf',   weight: 400 },
+        { s3_key: 'fonts/p/italic.ttf',    format: 'ttf',   weight: 400, style: 'italic' },
+      ] },
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(calls.read, ['fonts/p/regular.ttf'], 'regular upright, from a format the subsetter reads');
+    const first = put.body.data.preview_s3_key;
+    assert.match(first, new RegExp(`^fonts/previews/${uid}-[0-9a-f]{12}\\.woff2$`));
+    assert.equal(calls.uploaded.length, 1);
+    assert.equal(calls.uploaded[0].type, 'font/woff2');
+    assert.equal(calls.uploaded[0].cacheControl, 'public, max-age=31536000, immutable');
+    assert.equal(calls.uploaded[0].bytes.toString('latin1', 0, 4), 'wOF2');
+
+    // Same files again: same bytes, same key, nothing re-uploaded.
+    await h.request('PUT', `${P}/admin/fonts/${uid}/files`, {
+      token, body: { files: [{ s3_key: 'fonts/p/regular.ttf', format: 'ttf' }] },
+    });
+    assert.equal(calls.uploaded.length, 1);
+
+    // A rename draws a different name: new key, old object removed.
+    const renamed = await h.request('PATCH', `${P}/admin/fonts/${uid}`, { token, body: { family: `TST Renamed ${stamp}` } });
+    assert.equal(renamed.status, 200);
+    const second = renamed.body.data.preview_s3_key;
+    assert.ok(second && second !== first, 'a new immutable key');
+    assert.deepEqual(calls.deleted, [first]);
+
+    // Other edits leave the preview alone.
+    await h.request('PATCH', `${P}/admin/fonts/${uid}`, { token, body: { display_order: 7 } });
+    assert.equal(calls.uploaded.length, 2);
+
+    // A name the font cannot draw: no preview, and the stale one is removed.
+    const uncovered = await h.request('PATCH', `${P}/admin/fonts/${uid}`, { token, body: { family: `TST Ωmega ${stamp}` } });
+    assert.equal(uncovered.body.data.preview_s3_key, null);
+    assert.deepEqual(calls.deleted, [first, second]);
+
+    // Back to a drawable name, then delete the font: its preview goes with it.
+    const back = await h.request('PATCH', `${P}/admin/fonts/${uid}`, { token, body: { family } });
+    assert.equal(back.body.data.preview_s3_key, first, 'same name + file = same content hash');
+    assert.equal((await h.request('DELETE', `${P}/admin/fonts/${uid}`, { token })).status, 200);
+    assert.equal(calls.deleted.at(-1), first);
+  }, { source: font });
+});
+
+test('font previews are best-effort and served for locked fonts too', async () => {
+  const token  = h.adminToken(['*']);
+  const stamp  = Date.now();
+  const family = `TST Locked Preview ${stamp}`;
+  const created = await h.request('POST', `${P}/admin/fonts`, { token, body: { family, is_premium: 1 } });
+  track.fonts.push(created.body.data.id);
+  const uid = created.body.data.uid;
+  const files = [{ s3_key: 'fonts/q/regular.ttf', format: 'ttf' }];
+
+  // Storage down / upload refused: the file change still succeeds, without a preview.
+  await withPreviewS3(async () => {
+    const r = await h.request('PUT', `${P}/admin/fonts/${uid}/files`, { token, body: { files } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.data.preview_s3_key, null);
+  });
+  await withPreviewS3(async () => {
+    const r = await h.request('PUT', `${P}/admin/fonts/${uid}/files`, { token, body: { files } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.data.preview_s3_key, null);
+  }, { source: buildTestFont({ extraChars: family }), uploadFails: true });
+
+  // WOFF2-only families have nothing the subsetter can read.
+  await withPreviewS3(async (calls) => {
+    const r = await h.request('PUT', `${P}/admin/fonts/${uid}/files`, {
+      token, body: { files: [{ s3_key: 'fonts/q/regular.woff2', format: 'woff2' }] },
+    });
+    assert.equal(r.body.data.preview_s3_key, null);
+    assert.equal(calls.read.length, 0);
+  }, { source: buildTestFont({ extraChars: family }) });
+
+  await withPreviewS3(async () => {
+    await h.request('PUT', `${P}/admin/fonts/${uid}/files`, { token, body: { files } });
+  }, { source: buildTestFont({ extraChars: family }) });
+
+  // A guest sees the font locked — files withheld — but still gets its preview.
+  const listed = (await h.request('GET', `${P}/fonts`)).body.data.find((f) => f.uid === uid);
+  assert.equal(listed.is_locked, true);
+  assert.equal(listed.FontFiles, undefined);
+  assert.match(listed.preview_s3_key, /^fonts\/previews\//);
+});
+
+test('a user font gets its preview under their own prefix, removed with the font', async () => {
+  const u      = await mkUser('FontPreview');
+  const token  = h.userTokenFor(u.id);
+  const family = `TST Mine ${Date.now()}`;
+
+  const key = await withStubbedS3(async () => {
+    const presigned = await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'brand_font' }, filename: 'Mine.ttf', content_type: 'font/ttf' },
+    });
+    await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [presigned.body.data.key] } });
+    return presigned.body.data.key;
+  }, { size: 4096 });
+
+  const created = await withPreviewS3(async () => h.request('POST', `${P}/fonts`, {
+    token, body: { family, files: [{ s3_key: key, format: 'ttf' }] },
+  }), { source: buildTestFont({ extraChars: family }) });
+  assert.equal(created.status, 201);
+  track.fonts.push(created.body.data.id);
+  const preview = created.body.data.preview_s3_key;
+  assert.ok(preview.startsWith(`users/${u.uid}/fonts/previews/${created.body.data.uid}-`), preview);
+  assert.equal(await storageUsed(u.id), 4096, 'the preview is not charged to storage');
+
+  await withStubbedS3(async (calls) => {
+    assert.equal((await h.request('DELETE', `${P}/fonts/${created.body.data.uid}`, { token })).status, 200);
+    assert.deepEqual(calls.deleted.sort(), [key, preview].sort());
+  });
+});
+
+test('POST /admin/fonts/previews/rebuild backfills fonts without a preview', async () => {
+  const stamp  = Date.now();
+  const family = `TST Backfill ${stamp}`;
+  const font   = await models.Font.create({ uid: uuid(), user_id: null, family, is_active: 1 });
+  track.fonts.push(font.id);
+  await models.FontFile.create({ font_id: font.id, weight: 400, style: 'normal', format: 'ttf', s3_key: `fonts/${font.uid}/r.ttf` });
+
+  const denied = await h.request('POST', `${P}/admin/fonts/previews/rebuild`, { token: h.adminToken(['fonts.read']) });
+  assert.equal(denied.status, 403);
+
+  const token = h.adminToken(['*']);
+  await withPreviewS3(async () => {
+    const r = await h.request('POST', `${P}/admin/fonts/previews/rebuild`, { token });
+    assert.equal(r.status, 200);
+    const mine = r.body.data.fonts.find((f) => f.uid === font.uid);
+    assert.equal(mine.is_library, true);
+    assert.match(mine.preview_s3_key, /^fonts\/previews\//);
+    assert.equal(mine.reason, null);
+
+    // Already done: a plain rerun skips it; force revisits it with the same key.
+    const rerun = await h.request('POST', `${P}/admin/fonts/previews/rebuild`, { token });
+    assert.ok(!rerun.body.data.fonts.some((f) => f.uid === font.uid));
+    const forced = await h.request('POST', `${P}/admin/fonts/previews/rebuild?force=1`, { token });
+    assert.equal(forced.body.data.fonts.find((f) => f.uid === font.uid).preview_s3_key, mine.preview_s3_key);
+  }, { source: buildTestFont({ extraChars: family }) });
+});
+
 // ---------- Admin panel enablement fixes ----------
 test('content_admin can reach fonts and languages, but not feedback or plans', async () => {
   const bcrypt = require('bcryptjs');
