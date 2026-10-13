@@ -685,7 +685,7 @@ router.use('/roles', adminCrud({
  *     security: [{ bearerAuth: [] }]
  *     parameters:
  *       - { in: query, name: status,               schema: { type: string, enum: [active, inactive, draft] }, description: Omit to list all statuses }
- *       - { in: query, name: search,               schema: { type: string }, description: Name contains }
+ *       - { in: query, name: search,               schema: { type: string }, description: "Name contains (literal: `%` and `_` are not wildcards)" }
  *       - { in: query, name: category_id,          schema: { type: integer } }
  *       - { in: query, name: industry_id,          schema: { type: integer }, description: "Industry (business category) id" }
  *       - { in: query, name: business_category_id, deprecated: true, schema: { type: integer }, description: "Deprecated alias of industry_id" }
@@ -730,6 +730,15 @@ router.use('/roles', adminCrud({
  *               template_type: { type: string, enum: [image, video, animated] }
  *               is_premium:    { type: integer, enum: [0, 1] }
  *               is_popular:    { type: integer, enum: [0, 1] }
+ *               search_keywords:
+ *                 description: >-
+ *                   Extra words `GET /templates?q=` finds the design by, beyond its name, tags,
+ *                   category, industries, events, languages and sizes. An array or one
+ *                   comma-separated string; trimmed and de-duplicated (case-insensitive). At most
+ *                   30 keywords of 50 characters each. Always returned as an array.
+ *                 oneOf:
+ *                   - { type: array, items: { type: string }, example: [grand opening, bonanza] }
+ *                   - { type: string, example: "grand opening, bonanza" }
  *     responses:
  *       201:
  *         description: Created design
@@ -750,7 +759,8 @@ router.use('/roles', adminCrud({
  *   patch:
  *     summary: Update a design (requires templates.update; audit-logged)
  *     description: >-
- *       Any of `name`, `category_id`, `template_type`, `is_premium`, `is_popular`, `status`.
+ *       Any of `name`, `category_id`, `template_type`, `is_premium`, `is_popular`, `status`,
+ *       `search_keywords` (full replace; `null` or `[]` clears — see create).
  *       **Publish gate** on `status: active`: a category or an industry, at least one tag, and
  *       an ACTIVE English version — or a text-free one, for a text-free design — in the default
  *       size. Each unmet requirement is one `error.details[]` entry keyed by `field`

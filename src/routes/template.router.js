@@ -30,8 +30,18 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *       default size (`default_template_size` in GET /config), then the lowest size id.
  *       Language beats size. `all_languages=1` switches the language rule off (SEO pages).
  *       Premium templates return `is_locked=true` for guests/free users (cards never carry `content`).
- *       The browse view must be anchored: at least one of `category` or `industry`
+ *       The browse view must be anchored: at least one of `category`, `industry` or `q`
  *       is required (the full catalog is never returned). Other params only narrow the result.
+ *       **Search (`q`)**: every word must match the design somewhere — its name, its admin
+ *       `search_keywords`, a tag, its category (or that category's parent), an industry (or its
+ *       parent), a special event, its `template_type`, or an active version's size (name/slug, or
+ *       platform as a whole word) or language (code, English or native name, as a whole word).
+ *       Matching is a case-insensitive substring; `%` and `_` are literal. A word naming a
+ *       language ("tamil", "ta", "தமிழ்") also moves that language to the front of the viewer's
+ *       rank, so designs in it show and their cards use that version — unless `language` or
+ *       `all_languages` is sent. With `q`, results are ordered by relevance (name starts with
+ *       the query, then name contains it, then every word is in the name/keywords/tags, then the
+ *       rest), then `trending_score`.
  *       All taxonomy filters accept a friendly slug (e.g. `youtube-thumbnails`), a uid, or a
  *       legacy numeric id — a supplied filter that resolves to nothing returns an empty page.
  *       Note: theme templates are NOT browsable here — they are premium and plan-gated,
@@ -39,6 +49,13 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *     tags: [Templates]
  *     security: []
  *     parameters:
+ *       - in: query
+ *         name: q
+ *         description: >-
+ *           Plain-text search, 2–100 characters (shorter is ignored, so it does not anchor;
+ *           longer is a 400). Up to 8 words; one-letter words are dropped when longer ones are present.
+ *         schema: { type: string, minLength: 2, maxLength: 100 }
+ *         example: diwali offer
  *       - in: query
  *         name: category
  *         description: Template category — slug (e.g. `youtube-thumbnails`), uid, or numeric id.
@@ -113,12 +130,78 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *           application/json:
  *             schema: { $ref: '#/components/schemas/TemplatePublicListResponse' }
  *       400:
- *         description: No anchor filter supplied (need category or industry)
+ *         description: No anchor filter supplied (need category, industry or q), or q longer than 100 characters
  *         content:
  *           application/json:
  *             schema: { $ref: '#/components/schemas/ErrorResponse' }
  */
 router.get('/', optionalAuth, rateLimiter.publicTiered, controller.list);
+
+/**
+ * @swagger
+ * /templates/suggestions:
+ *   get:
+ *     summary: Autocomplete for the template search box (public)
+ *     description: >-
+ *       No JWT required (a bearer token applies the user's Preferred Languages and rate-limit tier).
+ *       Short mixed suggestions — special events, template categories, industries, tags and design
+ *       names — whose label, or any word in it, STARTS with `q` (case-insensitive; `%`/`_` literal).
+ *       Each is `{ type, label, query }`: show `label`, and on tap send `query` to
+ *       `GET /templates?q=` (it is the label, cut at a word boundary if longer than 100 chars).
+ *       A design is also suggested, by its name, when `q` starts one of its admin
+ *       `search_keywords` (or a word in one) — keywords themselves are never shown; such a
+ *       hit ranks as a word prefix.
+ *       Only things that would return results are suggested: a design only if it is live and
+ *       visible to this viewer (not Brand Series, a version in their languages — `language` /
+ *       `all_languages` work as on GET /templates), and a category / industry / tag / event only
+ *       if such a design sits under it (a parent counts its children's) and it is active.
+ *       Order: whole-label prefix before word prefix, then events, categories, industries, tags,
+ *       designs; then popularity. At most 3 of each non-design type; labels are de-duplicated
+ *       case-insensitively. A blank `q` returns `[]` (not a 400).
+ *     tags: [Templates]
+ *     security: []
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         description: What the user has typed so far — 1 to 100 characters.
+ *         schema: { type: string, maxLength: 100 }
+ *         example: diw
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 8, maximum: 20 }
+ *       - in: query
+ *         name: language
+ *         description: "As on GET /templates — comma-separated language codes in rank order."
+ *         schema: { type: string }
+ *       - in: query
+ *         name: all_languages
+ *         description: "As on GET /templates — any value: do not narrow by language."
+ *         schema: { type: integer, enum: [1] }
+ *     responses:
+ *       200:
+ *         description: Suggestions, best first
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       type:  { type: string, enum: [event, category, industry, tag, design] }
+ *                       label: { type: string, example: Diwali }
+ *                       query: { type: string, example: Diwali, description: "Send as GET /templates?q=" }
+ *       400:
+ *         description: q longer than 100 characters
+ *         content:
+ *           application/json:
+ *             schema: { $ref: '#/components/schemas/ErrorResponse' }
+ */
+router.get('/suggestions', optionalAuth, rateLimiter.publicTiered, controller.suggestions);
 
 /**
  * @swagger

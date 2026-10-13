@@ -10,6 +10,7 @@ const {
   Template, TemplateFamily, TemplateCategory, BusinessCategory, TemplateSize, Tag, Language,
 } = require('../models');
 const { resolveRef, resolveRefList, pick } = require('../utils/catalogRef');
+const { parseSearchQuery, escapeLike, containsPattern } = require('../utils/textSearch');
 const { NotFoundError, ValidationError } = require('../errors');
 
 // Public lists are lists of DESIGNS (template families): one card per design, showing
@@ -66,6 +67,75 @@ const existsIn = (table, fkColumn, ids) =>
 const countIn = (table, alias, extra = '') =>
   [literal(`(SELECT COUNT(*) FROM \`${table}\` j WHERE j.family_id = ${FAMILY}${extra})`), alias];
 
+// ---- Plain-text search (`q`) ----
+// Every word of the query must match the design somewhere; different words may
+// match different places ("diwali sale" finds a design named "Diwali Bonanza"
+// tagged "sale"). Where a word may match:
+//   the design   — name, admin search_keywords, template_type
+//   its taxonomy — tag names, category (or its parent), industries (or their
+//                  parents), special events; only active taxonomy counts
+//   its versions — an ACTIVE version's language (whole word: code, name or native
+//                  name, so "en" does not match every English design) or size
+//                  (name / slug substring, platform whole word)
+// Variant (Brand Series) designs never match: listTemplates already excludes them.
+// Values are inlined through sequelize.escape and LIKE patterns have their
+// wildcards escaped, so user input cannot alter the SQL or widen a match.
+const FAMILY_NAME     = '`TemplateFamily`.`name`';
+const FAMILY_KEYWORDS = '`TemplateFamily`.`search_keywords`';
+const esc = (v) => TemplateFamily.sequelize.escape(v);
+
+// The fields that DESCRIBE a design (vs. where it is filed); a hit here ranks higher.
+const describesSql = (like) =>
+  `(${FAMILY_NAME} LIKE ${like} OR ${FAMILY_KEYWORDS} LIKE ${like}` +
+  ` OR EXISTS (SELECT 1 FROM \`template_tags\` j JOIN \`tags\` t ON t.id = j.tag_id` +
+  ` WHERE j.family_id = ${FAMILY} AND t.name LIKE ${like}))`;
+
+function wordMatchSql(word) {
+  const like = esc(containsPattern(word));
+  const exact = esc(word);
+  return `(${describesSql(like)}` +
+    ` OR \`TemplateFamily\`.\`template_type\` = ${exact}` +
+    ` OR EXISTS (SELECT 1 FROM \`template_categories\` c LEFT JOIN \`template_categories\` pc ON pc.id = c.parent_id` +
+    `   WHERE c.id = \`TemplateFamily\`.\`category_id\` AND c.is_active = 1 AND (c.name LIKE ${like} OR pc.name LIKE ${like}))` +
+    ` OR EXISTS (SELECT 1 FROM \`template_business_categories\` j JOIN \`business_categories\` b ON b.id = j.business_category_id` +
+    `   LEFT JOIN \`business_categories\` pb ON pb.id = b.parent_id` +
+    `   WHERE j.family_id = ${FAMILY} AND b.is_active = 1 AND (b.name LIKE ${like} OR pb.name LIKE ${like}))` +
+    ` OR EXISTS (SELECT 1 FROM \`special_event_templates\` j JOIN \`special_events\` e ON e.id = j.event_id` +
+    `   WHERE j.family_id = ${FAMILY} AND e.is_active = 1 AND e.name LIKE ${like})` +
+    ` OR EXISTS (SELECT 1 FROM \`templates\` v JOIN \`languages\` l ON l.id = v.language_id` +
+    `   WHERE v.family_id = ${FAMILY} AND v.status = 'active' AND (l.code = ${exact} OR l.name = ${exact} OR l.native_name = ${exact}))` +
+    ` OR EXISTS (SELECT 1 FROM \`templates\` v JOIN \`template_sizes\` s ON s.id = v.size_id` +
+    `   WHERE v.family_id = ${FAMILY} AND v.status = 'active' AND (s.name LIKE ${like} OR s.slug LIKE ${like} OR s.platform = ${exact})))`;
+}
+
+// Relevance tier, lower first: the name starts with the whole query, then contains
+// it, then every word is in the describing fields, then matched via taxonomy,
+// language or size. trending_score orders within a tier.
+function relevanceSql({ phrase, words }) {
+  const all = words.map((w) => describesSql(esc(containsPattern(w)))).join(' AND ');
+  return `CASE WHEN ${FAMILY_NAME} LIKE ${esc(`${escapeLike(phrase)}%`)} THEN 0` +
+    ` WHEN ${FAMILY_NAME} LIKE ${esc(containsPattern(phrase))} THEN 1` +
+    ` WHEN ${all} THEN 2 ELSE 3 END`;
+}
+
+// A search naming a language ("tamil diwali", "தமிழ்") is asking for designs IN it,
+// so that language goes to the front of the viewer's rank: those versions become
+// visible and are the ones the cards show. An explicit `language` or
+// `all_languages` param is the client's own choice and is left alone.
+async function rankSearchedLanguages(search, filters, languageIds) {
+  if (!languageIds || filters.language !== undefined) return languageIds;
+  const named = await Language.findAll({
+    where: {
+      is_active: 1,
+      [Op.or]: [{ code: search.words }, { name: search.words }, { native_name: search.words }],
+    },
+    attributes: ['id'],
+  });
+  if (!named.length) return languageIds;
+  const first = named.map((l) => l.id);
+  return [...first, ...languageIds.filter((id) => !first.includes(id))];
+}
+
 async function listTemplates(filters = {}, viewer = null) {
   // Anchor / narrowing filters accept a friendly slug, a uid, or a legacy int id.
   // `category` ↔ legacy `category_id`; `industry` (the public name for a business
@@ -74,14 +144,19 @@ async function listTemplates(filters = {}, viewer = null) {
   const categoryRef = pick(filters.category, filters.category_id);
   const industryRef = pick(filters.industry, pick(filters.business_category, filters.business_category_id));
 
+  // Plain-text search; null when `q` is absent or too short to count.
+  const search = parseSearchQuery(filters.q);
+
   // Public browse must be anchored: we never dump the full catalog. At least one
-  // of template category / industry must be SUPPLIED (a ref that fails to resolve
-  // is still an anchor — it just yields an empty page, not a 400). variant_id is
-  // intentionally NOT accepted here — a variant's templates are premium and
-  // plan-gated, served only via the entitlement-checked GET /variants/{uid}.
-  if (categoryRef === undefined && industryRef === undefined) {
+  // of template category / industry / a search must be SUPPLIED (a ref that fails
+  // to resolve is still an anchor — it just yields an empty page, not a 400). A
+  // search anchors on its own: it is the app-wide search box, and it is already a
+  // narrow, paged slice. variant_id is intentionally NOT accepted here — a
+  // variant's templates are premium and plan-gated, served only via the
+  // entitlement-checked GET /variants/{uid}.
+  if (categoryRef === undefined && industryRef === undefined && !search) {
     throw new ValidationError(
-      'At least one of category or industry is required',
+      'At least one of category, industry or q is required',
     );
   }
 
@@ -98,18 +173,23 @@ async function listTemplates(filters = {}, viewer = null) {
 
   // Only designs the viewer can see: an active version in their languages (or a
   // text-free one) and, when a size is filtered, in that size.
-  const languageIds = await picker.resolveLanguageRank(filters, viewer);
+  let languageIds = await picker.resolveLanguageRank(filters, viewer);
+  if (search) languageIds = await rankSearchedLanguages(search, filters, languageIds);
 
   const membership = [NOT_A_VARIANT_MEMBER, picker.versionMatchClause(FAMILY, { languageIds, sizeId })];
   if (businessCategoryId !== undefined) membership.push(existsIn('template_business_categories', 'business_category_id', [businessCategoryId]));
   if (tagIds.length)                    membership.push(existsIn('template_tags',                'tag_id',               tagIds));
+  if (search) for (const word of search.words) membership.push(literal(wordMatchSql(word)));
   where[Op.and] = membership;
 
   const limit  = Math.min(parseInt(filters.limit, 10) || DEFAULT_LIMIT, MAX_LIMIT);
   const offset = Math.max(parseInt(filters.offset, 10) || 0, 0);
 
+  const order = [['trending_score', 'DESC'], ['id', 'DESC']];
+  if (search) order.unshift([literal(relevanceSql(search)), 'ASC']);
+
   const families = await familyRepo.findMany(where, {
-    order: [['trending_score', 'DESC'], ['id', 'DESC']],
+    order,
     limit,
     offset,
   });
@@ -214,7 +294,7 @@ async function listFamiliesForAdmin(filters = {}) {
 
   const categoryId = toPosInt(filters.category_id);
   if (categoryId) where.category_id = categoryId;
-  if (filters.search) where.name = { [Op.like]: `%${filters.search}%` };
+  if (filters.search) where.name = { [Op.like]: containsPattern(filters.search) };
 
   const membership = [];
   // `industry_id` is the public name; `business_category_id` the deprecated alias.
@@ -300,7 +380,7 @@ async function listTemplatesForAdmin(filters = {}) {
   else if (toPosInt(filters.language_id)) where.language_id = toPosInt(filters.language_id);
   const sizeId = toPosInt(filters.size_id);
   if (sizeId) where.size_id = sizeId;
-  if (filters.search) where.name = { [Op.like]: `%${filters.search}%` };
+  if (filters.search) where.name = { [Op.like]: containsPattern(filters.search) };
 
   const limit  = Math.min(parseInt(filters.limit, 10) || DEFAULT_LIMIT, MAX_LIMIT);
   const offset = Math.max(parseInt(filters.offset, 10) || 0, 0);
