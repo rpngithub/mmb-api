@@ -1,7 +1,23 @@
 const Joi = require('joi');
+const { normalizeKeywords, KEYWORD_MAX, KEYWORDS_MAX, KEYWORDS_STORED } = require('../utils/textSearch');
 
 const TEMPLATE_TYPES = ['image', 'video', 'animated'];
 const STATUSES       = ['draft', 'active', 'inactive'];
+
+// Extra words search finds a design by: an array, or one comma-separated string
+// (what a tag-style input box naturally sends). null / [] clears them. Limits apply
+// to the normalized list — trimmed, de-duplicated — since that is what is stored.
+const searchKeywords = Joi.alternatives(
+  Joi.array().items(Joi.string().allow('')),
+  Joi.string().allow(''),
+).allow(null).custom((value, helpers) => {
+  const list = normalizeKeywords(value);
+  if (list.length > KEYWORDS_MAX) return helpers.message(`search_keywords may hold at most ${KEYWORDS_MAX} keywords`);
+  const long = list.find((k) => k.length > KEYWORD_MAX);
+  if (long) return helpers.message(`search keyword "${long}" is longer than ${KEYWORD_MAX} characters`);
+  if (list.join(',').length > KEYWORDS_STORED) return helpers.message(`search_keywords may total at most ${KEYWORDS_STORED} characters`);
+  return value;
+});
 
 // ---- Template families (designs) ----
 // A family owns everything its versions share. Counters/trending_score/created_by are
@@ -14,6 +30,7 @@ const createFamilySchema = Joi.object({
   is_premium:    Joi.number().valid(0, 1).optional(),
   is_popular:    Joi.number().valid(0, 1).optional(),
   status:        Joi.string().valid(...STATUSES).optional(),
+  search_keywords: searchKeywords.optional(),
 });
 
 const updateFamilySchema = Joi.object({
@@ -23,6 +40,7 @@ const updateFamilySchema = Joi.object({
   is_premium:    Joi.number().valid(0, 1).optional(),
   is_popular:    Joi.number().valid(0, 1).optional(),
   status:        Joi.string().valid(...STATUSES).optional(),
+  search_keywords: searchKeywords.optional(),
 }).min(1);
 
 // ---- Template versions ----

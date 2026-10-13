@@ -1,4 +1,5 @@
 const { DataTypes } = require('sequelize');
+const { keywordsToColumn, keywordsFromColumn } = require('../utils/textSearch');
 
 // A design. Its versions (one per language × size) live in `templates`; everything
 // they share lives here — taxonomy, access level, curation flags and the counters,
@@ -18,6 +19,15 @@ module.exports = (sequelize) => {
     downloads_count: { type: DataTypes.INTEGER, defaultValue: 0 },
     likes_count:     { type: DataTypes.INTEGER, defaultValue: 0 },
     status:          { type: DataTypes.ENUM('active', 'inactive', 'draft'), defaultValue: 'draft' },
+    // Extra words plain-text search finds the design by, beyond its name and
+    // taxonomy. An array in the API; stored comma-joined so search can LIKE it
+    // (see migration 050). Accepts an array or a comma-separated string.
+    search_keywords: {
+      type: DataTypes.STRING(1000),
+      allowNull: true,
+      get() { return keywordsFromColumn(this.getDataValue('search_keywords')); },
+      set(v) { this.setDataValue('search_keywords', keywordsToColumn(v)); },
+    },
     created_by:      { type: DataTypes.INTEGER, allowNull: true },
   }, { tableName: 'template_families' });
 

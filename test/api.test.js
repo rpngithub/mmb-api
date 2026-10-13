@@ -8170,3 +8170,249 @@ test('an integer feature type must be one the app meters', async () => {
   assert.equal(flag.status, 201, 'boolean features are capabilities, free to add');
   await models.FeatureType.destroy({ where: { id: flag.body.data.id } });
 });
+
+// ---------- Plain-text template search (GET /templates?q=) ----------
+// Every fixture word carries the run's stamp, so leftovers in the persistent test
+// DB can never match another run's search.
+async function searchFixture() {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const W = `w${stamp}`;
+  const design = async (name, attrs = {}) => {
+    const t = await createTemplate({ uid: uuid(), name, content: '{"s":1}', status: 'active', category_id: 2, ...attrs });
+    track.templates.push(t.id);
+    return t;
+  };
+  const tag = async (name) => {
+    const t = await models.Tag.create({ name, slug: `tst-${name.toLowerCase().replace(/\W+/g, '-')}` });
+    track.tags.push(t.id);
+    return t;
+  };
+  return { stamp, W, design, tag };
+}
+
+const searchCards = async (qs, token) => {
+  const r = await h.request('GET', `${P}/templates?limit=100&${qs}`, token ? { token } : {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.data;
+};
+const q = (s) => `q=${encodeURIComponent(s)}`;
+
+test('template search: q alone anchors the browse; too-short or too-long q is refused', async () => {
+  const { W, design } = await searchFixture();
+  const d = await design(`TST ${W}solo Poster`);
+
+  const cards = await searchCards(q(`${W}solo`));
+  assert.deepEqual(cards.map((c) => c.family_uid), [d.fam.uid], 'no category or industry needed with q');
+
+  // One character is not a search, so it is not an anchor either.
+  assert.equal((await h.request('GET', `${P}/templates?q=a`)).status, 400);
+  assert.equal((await h.request('GET', `${P}/templates?q=${'x'.repeat(101)}`)).status, 400);
+  // With an anchor, q narrows within it.
+  assert.equal((await searchCards(`category_id=2&${q(`${W}solo`)}`)).length, 1);
+  assert.equal((await searchCards(`category=no-such-slug-xyz&${q(`${W}solo`)}`)).length, 0);
+});
+
+test('template search: matches name, keywords, tags, category, industries, events and sizes — never brand series', async () => {
+  const { stamp, W, design, tag } = await searchFixture();
+  const token = h.adminToken(['*']);
+
+  const byName = await design(`TST ${W}name Bonanza`);
+
+  const byTag = await design(`TST Srch Tagged ${stamp}`);
+  await byTag.fam.setTags([(await tag(`TST ${W}tag`)).id]);
+
+  const byKeyword = await design(`TST Srch Keyword ${stamp}`);
+  const kw = await h.request('PATCH', `${P}/admin/template-families/${byKeyword.fam.uid}`, {
+    token, body: { search_keywords: ` ${W}kw   opening , Sale,sale ` },
+  });
+  assert.equal(kw.status, 200, JSON.stringify(kw.body));
+  assert.deepEqual(kw.body.data.search_keywords, [`${W}kw opening`, 'Sale'], 'trimmed, collapsed, de-duplicated');
+
+  const cat = await models.TemplateCategory.create({ uid: uuid(), name: `TST ${W}cat`, slug: `tst-${W}cat`, is_active: 1 });
+  track.templateCategories.push(cat.id);
+  const byCategory = await design(`TST Srch Category ${stamp}`, { category_id: cat.id });
+
+  const parent = await models.BusinessCategory.create({ uid: uuid(), name: `TST ${W}parent`, slug: `tst-${W}parent`, is_active: 1 });
+  const child  = await models.BusinessCategory.create({ uid: uuid(), parent_id: parent.id, name: `TST Srch Child ${stamp}`, slug: `tst-srch-child-${stamp}`, is_active: 1 });
+  const dead   = await models.BusinessCategory.create({ uid: uuid(), name: `TST ${W}dead`, slug: `tst-${W}dead`, is_active: 0 });
+  track.businessCategories.push(child.id, parent.id, dead.id);
+  const byIndustry = await design(`TST Srch Industry ${stamp}`);
+  await byIndustry.fam.setBusinessCategories([child.id, dead.id]);
+
+  const ev = await models.SpecialEvent.create({ uid: uuid(), name: `TST ${W}event`, type: 'festival', event_date: '03-15', is_active: 1 });
+  track.specialEvents.push(ev.id);
+  const byEvent = await design(`TST Srch Event ${stamp}`);
+  await ev.setTemplateFamilies([byEvent.fam.id]);
+
+  const size = await models.TemplateSize.create({ uid: uuid(), name: `TST ${W}size`, slug: `tst-${W}size`, width: 1080, height: 1350 });
+  track.templateSizes.push(size.id);
+  const bySize = await design(`TST Srch Size ${stamp}`, { size_id: size.id });
+
+  // A Brand Series design stays out of search even when its name matches.
+  const premium = await design(`TST ${W}name Series Only`);
+  const { variant } = await makeSeriesWithVariant(`Srch ${stamp}`);
+  await variant.setTemplateFamilies([premium.fam.id]);
+
+  const found = async (term) => (await searchCards(q(term))).map((c) => c.family_uid);
+
+  assert.deepEqual(await found(`${W}name`),   [byName.fam.uid], 'name — and not the brand series design');
+  assert.deepEqual(await found(`${W}tag`),    [byTag.fam.uid]);
+  assert.deepEqual(await found(`${W}kw`),     [byKeyword.fam.uid]);
+  assert.deepEqual(await found(`${W}cat`),    [byCategory.fam.uid]);
+  assert.deepEqual(await found(`${W}parent`), [byIndustry.fam.uid], 'a parent industry name finds its children\'s designs');
+  assert.deepEqual(await found(`${W}event`),  [byEvent.fam.uid]);
+  assert.deepEqual(await found(`${W}size`),   [bySize.fam.uid]);
+  assert.deepEqual(await found(`${W}dead`),   [], 'an inactive industry does not count');
+
+  // Every word must match, but each may match a different field.
+  assert.deepEqual(await found(`${W}name ${W}tag`), []);
+  await byName.fam.setTags([(await models.Tag.findOne({ where: { name: `TST ${W}tag` } })).id]);
+  assert.deepEqual(await found(`${W}name ${W}tag`), [byName.fam.uid]);
+
+  // Clearing the keywords takes the design out of that search.
+  await h.request('PATCH', `${P}/admin/template-families/${byKeyword.fam.uid}`, { token, body: { search_keywords: null } });
+  assert.deepEqual(await found(`${W}kw`), []);
+  const tooMany = await h.request('PATCH', `${P}/admin/template-families/${byKeyword.fam.uid}`, {
+    token, body: { search_keywords: Array.from({ length: 31 }, (_, i) => `k${i}`) },
+  });
+  assert.equal(tooMany.status, 400);
+});
+
+test('template search: LIKE wildcards in q are literal', async () => {
+  const { W, design } = await searchFixture();
+  const d = await design(`TST ${W}pct 50% Off`);
+  await design(`TST ${W}pctx 500 Off`);
+
+  const pct = await searchCards(q(`${W}pct 50%`));
+  assert.deepEqual(pct.map((c) => c.family_uid), [d.fam.uid], '% matches a percent sign, not anything');
+  assert.deepEqual(await searchCards(q(`${W}_ct`)), [], '_ is not a single-character wildcard');
+
+  // The admin name search escapes them too.
+  const admin = await h.request('GET', `${P}/admin/template-families?search=${encodeURIComponent(`${W}_ct`)}`, { token: h.adminToken(['*']) });
+  assert.equal(admin.status, 200);
+  assert.equal(admin.body.data.length, 0);
+});
+
+test('template search: a named language shows designs in it, and relevance beats trending', async () => {
+  const { W, design, tag } = await searchFixture();
+  const ta = await models.Language.findOne({ where: { code: 'ta' } });
+
+  const tamil = await design(`TST ${W}lang Pongal`, { language_id: ta.id });
+  // A guest browses in English: the Tamil-only design is hidden...
+  assert.deepEqual(await searchCards(q(`${W}lang`)), []);
+  // ...until the search names Tamil, by English name, code or native name.
+  for (const term of ['tamil', 'ta', ta.native_name]) {
+    const cards = await searchCards(q(`${W}lang ${term}`));
+    assert.deepEqual(cards.map((c) => c.uid), [tamil.uid], `"${term}" shows the Tamil version`);
+  }
+  // An explicit language param is the client's choice and is not overridden.
+  assert.deepEqual(await searchCards(`language=ml&${q(`${W}lang tamil`)}`), []);
+
+  // Relevance tiers: name starts with q > name contains q > keyword/tag > taxonomy.
+  // trending_score is set against that order to show relevance wins.
+  const viaEvent = await design(`TST Rank Event ${W}`);
+  const ev = await models.SpecialEvent.create({ uid: uuid(), name: `TST ${W}rank`, type: 'festival', event_date: '03-15', is_active: 1 });
+  track.specialEvents.push(ev.id);
+  await ev.setTemplateFamilies([viaEvent.fam.id]);
+  const viaTag   = await design(`TST Rank Tag ${W}`);
+  await viaTag.fam.setTags([(await tag(`TST ${W}rank`)).id]);
+  const contains = await design(`TST ${W}rank Contains`);
+  const prefix   = await design(`${W}rank Prefix`);
+  const order = [prefix, contains, viaTag, viaEvent];
+  await Promise.all(order.map((d, i) => d.fam.update({ trending_score: i * 10 })));
+
+  const ranked = await searchCards(q(`${W}rank`));
+  assert.deepEqual(ranked.map((c) => c.family_uid), order.map((d) => d.fam.uid));
+});
+
+// ---------- Search autocomplete (GET /templates/suggestions?q=) ----------
+const suggestions = async (qs) => {
+  const r = await h.request('GET', `${P}/templates/suggestions?${qs}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.data;
+};
+
+test('suggestions: mixed types, prefix-ranked, only what search can return', async () => {
+  const { stamp, W, design, tag } = await searchFixture();
+  const ta = await models.Language.findOne({ where: { code: 'ta' } });
+
+  const eventDesign = await design(`TST Sug Event ${stamp}`);
+  const ev = await models.SpecialEvent.create({ uid: uuid(), name: `TST ${W}fest`, type: 'festival', event_date: '03-15', is_active: 1 });
+  const emptyEv = await models.SpecialEvent.create({ uid: uuid(), name: `TST ${W}festempty`, type: 'festival', event_date: '03-15', is_active: 1 });
+  track.specialEvents.push(ev.id, emptyEv.id);
+  await ev.setTemplateFamilies([eventDesign.fam.id]);
+  // Same label as the event: one suggestion, not two.
+  await eventDesign.fam.setTags([(await tag(`TST ${W}fest`)).id, (await tag(`TST ${W}tag`)).id]);
+
+  // A parent category is suggested for the designs in its children.
+  const parentCat = await models.TemplateCategory.create({ uid: uuid(), name: `TST ${W}cat`, slug: `tst-${W}cat`, is_active: 1 });
+  const childCat  = await models.TemplateCategory.create({ uid: uuid(), parent_id: parentCat.id, name: `TST Sug Child ${stamp}`, slug: `tst-sug-child-${stamp}`, is_active: 1 });
+  track.templateCategories.push(childCat.id, parentCat.id);
+  await design(`TST Sug Cat ${stamp}`, { category_id: childCat.id });
+
+  const ind = await models.BusinessCategory.create({ uid: uuid(), name: `TST ${W}ind`, slug: `tst-${W}ind`, is_active: 1 });
+  track.businessCategories.push(ind.id);
+  const indDesign = await design(`TST Sug Ind ${stamp}`);
+  await indDesign.fam.setBusinessCategories([ind.id]);
+
+  await design(`${W}design Poster`);
+  await design(`TST ${W}design Two`);
+  // Never suggested: a Brand Series design, and (for an English guest) a Tamil-only one.
+  const premium = await design(`${W}design Premium`);
+  const { variant } = await makeSeriesWithVariant(`Sug ${stamp}`);
+  await variant.setTemplateFamilies([premium.fam.id]);
+  await design(`${W}tamilonly Kolam`, { language_id: ta.id });
+
+  const got = await suggestions(`limit=20&${q(W)}`);
+  assert.deepEqual(got.map((s) => [s.type, s.label]), [
+    ['design',   `${W}design Poster`],   // the label itself starts with q
+    ['event',    `TST ${W}fest`],        // then word-prefix matches, broad types first
+    ['category', `TST ${W}cat`],
+    ['industry', `TST ${W}ind`],
+    ['tag',      `TST ${W}tag`],
+    ['design',   `TST ${W}design Two`],
+  ]);
+
+  // Every suggestion, sent as a search, comes back with results.
+  for (const s of got) {
+    assert.ok((await searchCards(q(s.query))).length > 0, `"${s.query}" (${s.type}) finds something`);
+  }
+
+  // `language` works as on browse.
+  const tamil = await suggestions(`language=ta&${q(`${W}tamil`)}`);
+  assert.deepEqual(tamil.map((s) => s.label), [`${W}tamilonly Kolam`]);
+
+  assert.equal((await suggestions(`limit=2&${q(W)}`)).length, 2);
+  assert.deepEqual(await suggestions('q=%20'), [], 'blank q is an empty list, not an error');
+  assert.deepEqual(await suggestions(q(`${W}%`)), [], '% is literal');
+  assert.equal((await h.request('GET', `${P}/templates/suggestions?q=${'x'.repeat(101)}`)).status, 400);
+});
+
+test('suggestions: a search keyword suggests its design by name, below name prefixes', async () => {
+  const { stamp, W, design } = await searchFixture();
+
+  const named   = await design(`${W}kw Name Prefix`);
+  const first   = await design(`TST Sug Kw First ${stamp}`);
+  const later   = await design(`TST Sug Kw Later ${stamp}`);
+  const inWord  = await design(`TST Sug Kw Word ${stamp}`);
+  const midWord = await design(`TST Sug Kw Mid ${stamp}`);
+  await first.fam.update({ search_keywords: [`${W}kw opening`], trending_score: 30 });
+  await later.fam.update({ search_keywords: ['Sale', `${W}kw promo`], trending_score: 20 });
+  await inWord.fam.update({ search_keywords: [`Big ${W}kw`], trending_score: 10 });
+  await midWord.fam.update({ search_keywords: [`x${W}kw`] });
+
+  const got = await suggestions(`limit=20&${q(`${W}kw`)}`);
+  assert.deepEqual(got.map((s) => [s.type, s.label]), [
+    ['design', named.fam.name],   // name prefix first
+    ['design', first.fam.name],   // then keyword hits, by trending — the first keyword,
+    ['design', later.fam.name],   // a later one (after the stored comma),
+    ['design', inWord.fam.name],  // a word inside one; never mid-word
+  ], 'the label is the design name — keywords are never shown');
+
+  for (const s of got) {
+    assert.ok((await searchCards(q(s.query))).length > 0, `"${s.query}" finds something`);
+  }
+
+  await first.fam.update({ search_keywords: null });
+  assert.ok(!(await suggestions(q(`${W}kw`))).some((s) => s.label === first.fam.name), 'cleared keywords stop suggesting');
+});

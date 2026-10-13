@@ -1,4 +1,5 @@
 const templateService = require('../services/template.service');
+const suggestService  = require('../services/templateSuggest.service');
 
 const list = async (req, res) => {
   const items = await templateService.listTemplates(req.query, req.user);
@@ -18,4 +19,9 @@ const getFamily = async (req, res) => {
   res.json({ success: true, data: tpl });
 };
 
-module.exports = { list, getOne, getFamily };
+const suggestions = async (req, res) => {
+  const items = await suggestService.suggest(req.query, req.user);
+  res.json({ success: true, data: items });
+};
+
+module.exports = { list, getOne, getFamily, suggestions };

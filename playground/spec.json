@@ -3718,7 +3718,7 @@
       },
       {
         "name": "Templates (public)",
-        "description": "Optional auth — send `access_token` to unlock premium content and raise the rate-limit tier, or none for anonymous.\n\nThe browse view **must be anchored**: at least one of `category` or `industry` is required (400 otherwise). All taxonomy filters accept a friendly slug, a uid, or a legacy numeric id.\n\nVariant templates are NOT browsable here — they are premium and plan-gated, served only via `GET /variants/{uid}`.\n\n**Designs and versions:** a design is a template FAMILY with one version per language × size. Lists return ONE card per design, showing the version picked for the viewer — the card's `uid` is that version's, `family_uid` names the design. Pick order: highest-ranked language (`language`, else the user's Preferred Languages, else English; text-free versions show to everyone), then the default size (`default_template_size` in `GET /config`), then the lowest size id. Language beats size.",
+        "description": "Optional auth — send `access_token` to unlock premium content and raise the rate-limit tier, or none for anonymous.\n\nThe browse view **must be anchored**: at least one of `category`, `industry` or `q` (search) is required (400 otherwise). All taxonomy filters accept a friendly slug, a uid, or a legacy numeric id.\n\nVariant templates are NOT browsable here — they are premium and plan-gated, served only via `GET /variants/{uid}`.\n\n**Designs and versions:** a design is a template FAMILY with one version per language × size. Lists return ONE card per design, showing the version picked for the viewer — the card's `uid` is that version's, `family_uid` names the design. Pick order: highest-ranked language (`language`, else the user's Preferred Languages, else English; text-free versions show to everyone), then the default size (`default_template_size` in `GET /config`), then the lowest size id. Language beats size.",
         "item": [
           {
             "name": "List Templates",
@@ -3734,6 +3734,11 @@
                   "templates"
                 ],
                 "query": [
+                  {
+                    "key": "q",
+                    "value": "diwali offer",
+                    "disabled": true
+                  },
                   {
                     "key": "category",
                     "value": "{{template_category_slug}}"
@@ -3810,7 +3815,7 @@
                   }
                 ]
               },
-              "description": "One card per design. A design is listed only if it has an active version in one of the viewer's languages (or a text-free one) and, with `size`, in that size. Each card carries `family_uid`, `Language`, `TemplateSize`, `available_languages` and `available_sizes`. `language=ta,en` overrides the saved Preferred Languages (order = rank); `all_languages=1` switches the language rule off (SEO pages).",
+              "description": "One card per design. A design is listed only if it has an active version in one of the viewer's languages (or a text-free one) and, with `size`, in that size. Each card carries `family_uid`, `Language`, `TemplateSize`, `available_languages` and `available_sizes`. `language=ta,en` overrides the saved Preferred Languages (order = rank); `all_languages=1` switches the language rule off (SEO pages).\n\n**Search** — `q` (2–100 chars) anchors on its own. Every word must match somewhere: design name, admin search keywords, a tag, the category (or its parent), an industry (or its parent), a special event, `template_type`, or an active version's size or language (whole word: `tamil`, `ta`, `தமிழ்`). Naming a language also shows designs in it (unless `language` is sent). Ordered by relevance, then trending. Enable `q` and disable `category` to try the app-wide search box.",
               "auth": {
                 "type": "noauth"
               }
@@ -3831,6 +3836,65 @@
                     "const d = (pm.response.json() || {}).data; const first = Array.isArray(d) ? d[0] : (d && d.items && d.items[0]);",
                     "if (first && first.uid) pm.environment.set('template_uid', first.uid);",
                     "if (first && first.family_uid) pm.environment.set('family_uid', first.family_uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Search Suggestions (autocomplete)",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/templates/suggestions?q=diw",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "templates",
+                  "suggestions"
+                ],
+                "query": [
+                  {
+                    "key": "q",
+                    "value": "diw"
+                  },
+                  {
+                    "key": "limit",
+                    "value": "8",
+                    "disabled": true
+                  },
+                  {
+                    "key": "language",
+                    "value": "ta,en",
+                    "disabled": true
+                  },
+                  {
+                    "key": "all_languages",
+                    "value": "1",
+                    "disabled": true
+                  }
+                ]
+              },
+              "description": "Autocomplete for the search box. Returns up to `limit` (default 8, max 20) `{ type, label, query }` — `type` is event · category · industry · tag · design. Matches the START of the label or of any word in it (`diw` → \"Happy Diwali\"). Show `label`; on tap call **List Templates** with `q` = `query`. Only suggests what would return results for this viewer (live, not Brand Series, in their languages; taxonomy only with such a design under it). Blank `q` → `[]`; over 100 chars → 400. `language` / `all_languages` work as on List Templates.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
                   ]
                 }
               }

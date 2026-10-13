@@ -188,6 +188,7 @@ module.exports = {
   // A design: everything its versions share. See /admin/template-families.
   TemplateFamily: {
     add: {
+      search_keywords:      { type: 'array', items: { type: 'string' }, description: 'Extra words GET /templates?q= finds the design by ([] when none)' },
       version_count:        { type: 'integer' },
       active_version_count: { type: 'integer' },
       tag_count:            { type: 'integer' },
