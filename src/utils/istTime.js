@@ -71,6 +71,16 @@ function istDaysBetween(from, to = new Date()) {
   return Math.round((b - a) / DAY);
 }
 
+// 'YYYY-MM-DD' shifted by whole calendar days. Pure date arithmetic — no clock.
+const addDaysISO = (iso, days) =>
+  new Date(Date.parse(`${iso}T00:00:00Z`) + days * DAY).toISOString().slice(0, 10);
+
+// The real instant at which an IST calendar date begins. This is what a DB range
+// filter needs: "today" in IST starts at 18:30 UTC the previous day, so comparing
+// created_at against a UTC midnight would hand the first 5½ hours of every IST
+// day to the wrong date.
+const istDayStart = (iso) => new Date(Date.parse(`${iso}T00:00:00Z`) - cfg.tzOffsetMinutes() * MINUTE);
+
 // Is this instant inside the quiet window? The window wraps midnight (21:00 ->
 // 09:00), so the comparison flips depending on whether start < end.
 function isQuietHour(date = new Date()) {
@@ -122,6 +132,8 @@ module.exports = {
   istIsoWeek,
   istMonth,
   istDaysBetween,
+  addDaysISO,
+  istDayStart,
   isQuietHour,
   nextDeliverableAt,
 };

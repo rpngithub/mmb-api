@@ -7,6 +7,7 @@ const adminCrud    = require('../utils/adminCrud');
 const controller   = require('../controllers/admin.controller');
 const uploadController = require('../controllers/upload.controller');
 const importController = require('../controllers/import.controller');
+const dashboardController = require('../controllers/dashboard.controller');
 const { IMPORT_ENTITIES } = require('../services/import.service');
 const fontPreview  = require('../services/fontPreview.service');
 const models       = require('../models');
@@ -1330,6 +1331,66 @@ router.put('/business-categories/:uid/tags', authenticate, authorizeAdmin('categ
  */
 router.get('/business-categories/:uid/related', authenticate, authorizeAdmin('categories.read'),   controller.getRelatedIndustries);
 router.put('/business-categories/:uid/related', authenticate, authorizeAdmin('categories.update'), validate(setRelatedIndustriesSchema), controller.setRelatedIndustries);
+
+// ---- Dashboard widgets ----
+// Gated per WIDGET (`dashboard.<key>`), not per route: the list returns only what
+// the caller's role grants, and each widget re-checks its own permission.
+/**
+ * @swagger
+ * /admin/dashboard/widgets:
+ *   get:
+ *     summary: List the dashboard widgets this admin may see
+ *     description: >-
+ *       Each widget has its own permission, `dashboard.<key>` (`dashboard.*` grants all,
+ *       `*` grants everything). The list contains only the widgets the caller's role
+ *       grants, in display order, each with its `section` (money / growth / content /
+ *       todo / system) and the query `params` it accepts. `sections` lists only the
+ *       sections that have at least one visible widget.
+ *
+ *
+ *       Roles are configuration: to give a role a widget, add its permission string to
+ *       the role. An admin whose role grants none gets an empty list, not a 403.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "`{ sections: [{ key, title }], widgets: [{ key, section, title, params, permission, endpoint }] }`" }
+ */
+router.get('/dashboard/widgets', authenticate, authorizeAdmin(), dashboardController.listWidgets);
+
+/**
+ * @swagger
+ * /admin/dashboard/widgets/{key}:
+ *   get:
+ *     summary: One dashboard widget's data
+ *     description: >-
+ *       Requires `dashboard.<key>`. All dates are IST calendar dates; money is INR,
+ *       `gross` including GST and `net` before it. Results are cached for 60 seconds
+ *       per widget and parameters (`meta.cached`); pass `fresh=1` to bypass.
+ *
+ *
+ *       Widgets: `revenue_summary`, `revenue_trend`, `payment_health`,
+ *       `subscribers_by_plan`, `renewals_due`, `user_summary`, `signups_by_platform`,
+ *       `signup_funnel`, `export_summary`, `catalog_coverage`, `events_without_templates`,
+ *       `pending_industries`, `recent_feedback`, `draft_templates`, `migration_status`.
+ *       Which params a widget reads is in its manifest entry; others are ignored.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path,  name: key,         required: true, schema: { type: string } }
+ *       - { in: query, name: from,        schema: { type: string, format: date }, description: "Range start (IST, inclusive). Default: `to` minus the widget's default span (30 days; 7 for recent_feedback)" }
+ *       - { in: query, name: to,          schema: { type: string, format: date }, description: "Range end (IST, inclusive). Default today. Max span 366 days" }
+ *       - { in: query, name: granularity, schema: { type: string, enum: [day, week, month], default: day }, description: "Series bucket (weeks start Monday)" }
+ *       - { in: query, name: days,        schema: { type: integer }, description: "Look-ahead window: renewals_due (default 7, max 60), events_without_templates (default 30, max 366)" }
+ *       - { in: query, name: min,         schema: { type: integer }, description: "Threshold: catalog_coverage lists anchors with fewer active designs than this (default 3); events_without_templates likewise (default 1)" }
+ *       - { in: query, name: limit,       schema: { type: integer }, description: "List length cap" }
+ *       - { in: query, name: fresh,       schema: { type: string, enum: ['1'] }, description: "Skip the 60-second cache" }
+ *     responses:
+ *       200: { description: "`data` is the widget's payload; `meta: { widget, generated_at, cached }`" }
+ *       400: { description: Invalid parameter }
+ *       403: { description: "Missing `dashboard.<key>`" }
+ *       404: { description: Unknown widget key }
+ */
+router.get('/dashboard/widgets/:key', authenticate, authorizeAdmin(), dashboardController.getWidget);
 
 // ---- Page content: the two operations generic CRUD can't express ----
 // Registered before the `/page-sections` CRUD mount so the literal paths aren't
