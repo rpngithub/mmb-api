@@ -21,7 +21,10 @@ module.exports = {
         // absent — sending an unsolicited message to every user is a different
         // authority from editing copy, so it stays with super_admin, the same call
         // `quota_packs` makes about pricing.
-        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*', 'frames.*', 'notifications.*', 'page_content.*']), is_system: 1 },
+        // NOTE: dashboard widgets are granted one by one, never `dashboard.*` —
+        // only the catalogue-facing ones (see migration 20260101000051).
+        permissions: JSON.stringify(['templates.*', 'categories.*', 'variants.*', 'brand_series.*', 'assets.*', 'events.*', 'faqs.*', 'testimonials.*', 'banners.*', 'tags.*', 'sizes.*', 'languages.*', 'fonts.*', 'frames.*', 'notifications.*', 'page_content.*',
+          'dashboard.user_summary', 'dashboard.catalog_coverage', 'dashboard.events_without_templates', 'dashboard.pending_industries', 'dashboard.draft_templates']), is_system: 1 },
     ]);
 
     // --- admin user ---
