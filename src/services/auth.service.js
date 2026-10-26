@@ -75,7 +75,9 @@ async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic
   let user = await userRepo.findByPhone(phone);
   if (!user) {
     if (purpose === 'reset') throw new NotFoundError('No account found for this phone number');
-    user = await userRepo.create({ name: phone, phone, uid: uuid() });
+    // No name yet — the user enters one in the app. (It used to be the phone
+    // number, which then showed up as their name everywhere.)
+    user = await userRepo.create({ phone, uid: uuid() });
   }
 
   // A deactivated account must not be able to sign straight back in — otherwise

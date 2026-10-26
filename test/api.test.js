@@ -203,6 +203,7 @@ test('OTP login: send-otp then verify-otp issues tokens with free tier', async (
 
   const u = await userByPhone(phone);
   if (u) track.users.push(u.id);
+  assert.equal(u.name, null, 'signup leaves the name empty rather than copying the phone number');
 });
 
 test('verify-otp rejects a wrong OTP', async () => {
@@ -984,8 +985,9 @@ test('import: rejects the reference/example file, and enforces permission', asyn
 // and every tag write is recorded on `tagged` for assertions.
 async function withS3Objects(present, fn) {
   const s3 = require('../src/utils/s3Helper');
-  const original = { objectExists: s3.objectExists, putObjectTagging: s3.putObjectTagging };
+  const original = { objectExists: s3.objectExists, putObjectTagging: s3.putObjectTagging, readObjectStart: s3.readObjectStart };
   const tagged = [];
+  s3.readObjectStart = async () => null;
   s3.objectExists = async (key) => (
     Object.prototype.hasOwnProperty.call(present, key)
       ? { exists: true, content_type: 'image/png', size: 1024, ...present[key] }
@@ -3244,9 +3246,16 @@ test('PATCH /users/me is an allow-list: server-owned columns are not writable', 
   assert.equal(ok.body.data.name, 'TST Renamed');
   assert.equal(ok.body.data.password_hash, undefined, 'the hash never goes back to the client');
   assert.equal((await h.request('GET', `${P}/users/me`, { token })).body.data.password_hash, undefined);
+
+  // The name is optional: null or blank clears it, and blank is stored as null.
+  for (const name of [null, '', '   ']) {
+    const cleared = await h.request('PATCH', `${P}/users/me`, { token, body: { name } });
+    assert.equal(cleared.status, 200, `name ${JSON.stringify(name)} clears it`);
+    assert.equal(cleared.body.data.name, null);
+  }
 });
 
-test('personal account: choosing it completes onboarding and blocks business creation', async () => {
+test('personal account: choosing it completes onboarding', async () => {
   const u     = await mkUser('Personal');
   const token = h.userTokenFor(u.id);
 
@@ -3258,17 +3267,61 @@ test('personal account: choosing it completes onboarding and blocks business cre
   assert.deepEqual(chosen.body.data.onboarding, { account_type: 'personal', has_business: false, completed: true },
     'a personal account has nothing left to answer');
 
-  // No business row, and no way to make one.
-  const biz = await h.request('POST', `${P}/businesses`, { token, body: { name: 'TST Personal Biz', industry: 'restaurant-food' } });
-  assert.equal(biz.status, 409);
-  assert.equal(await Business.count({ where: { user_id: u.id } }), 0);
-
-  // The answer is frozen once onboarding is stamped.
-  const flip = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'business' } });
-  assert.equal(flip.status, 409, 'account type cannot be changed after signup');
-
   // Re-sending the same value is a harmless no-op, not a 409.
   assert.equal((await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } })).status, 200);
+});
+
+test('personal account: PATCH to business reopens onboarding at the business step', async () => {
+  const u     = await mkUser('PersonalUpgrade');
+  const token = h.userTokenFor(u.id);
+  await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } });
+
+  const up = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'business' } });
+  assert.equal(up.status, 200, 'personal → business is an upgrade, allowed after signup');
+  assert.deepEqual(up.body.data.onboarding, { account_type: 'business', has_business: false, completed: false },
+    'no business yet, so the app resumes at business details');
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Upgrade Biz ${Date.now()}`, industry: 'restaurant-food' },
+  });
+  assert.equal(created.status, 201);
+  const me = await h.request('GET', `${P}/users/me`, { token });
+  assert.deepEqual(me.body.data.onboarding, { account_type: 'business', has_business: true, completed: true });
+
+  // Not vice versa: a finished business account stays business.
+  const down = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } });
+  assert.equal(down.status, 409);
+});
+
+test('personal account: POST /businesses upgrades it in one step', async () => {
+  const u     = await mkUser('PersonalDirect');
+  const token = h.userTokenFor(u.id);
+  await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } });
+
+  const created = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: `TST Personal Direct ${Date.now()}`, industry: 'restaurant-food' },
+  });
+  assert.equal(created.status, 201);
+
+  await u.reload();
+  assert.equal(u.account_type, 'business');
+  assert.ok(u.onboarding_completed_at);
+});
+
+test('personal account: a failed business create leaves it personal', async () => {
+  const u     = await mkUser('PersonalRollback');
+  const token = h.userTokenFor(u.id);
+  await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } });
+
+  const bad = await h.request('POST', `${P}/businesses`, {
+    token, body: { name: 'TST Personal Rollback', industry: 'restaurant-food', keywords: ['no-such-keyword'] },
+  });
+  assert.equal(bad.status, 400);
+
+  await u.reload();
+  assert.equal(u.account_type, 'personal', 'the upgrade rolled back with the business');
+  assert.ok(u.onboarding_completed_at);
+  assert.equal(await Business.count({ where: { user_id: u.id } }), 0);
 });
 
 test('business account: onboarding completes on business creation, then freezes', async () => {
@@ -3284,7 +3337,7 @@ test('business account: onboarding completes on business creation, then freezes'
   // Mid-flow the user may still switch (the "SWITCH TO PERSONAL" button), and back.
   assert.equal((await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'personal' } })).status, 200);
   const back = await h.request('PATCH', `${P}/users/me`, { token, body: { account_type: 'business' } });
-  assert.equal(back.status, 409, 'switching to personal completed onboarding, which freezes the answer');
+  assert.equal(back.status, 200, 'personal → business is always allowed');
 });
 
 test('business creation completes onboarding for an account that never answered step 2', async () => {
@@ -3347,21 +3400,32 @@ test('GET /industries?q= searches by name, and narrows within a parent', async (
 // ---------- User uploads (presign -> PUT -> confirm, then save the key) ----------
 // S3 is stubbed: presigning needs credentials and confirm does a HEAD, neither of
 // which exists in the test env. The stub records what would have been called.
-const withStubbedS3 = async (fn, { size = 1024, exists = true } = {}) => {
+// `start` is what the signature check reads back (the object's first bytes); null
+// = "could not read", which lets the file through as inconclusive.
+const withStubbedS3 = async (fn, { size = 1024, exists = true, contentType = 'image/png', start = null } = {}) => {
   const s3 = require('../src/utils/s3Helper');
   const original = {
     getPresignedPutUrl: s3.getPresignedPutUrl,
     objectExists:       s3.objectExists,
+    readObjectStart:    s3.readObjectStart,
     putObjectTagging:   s3.putObjectTagging,
     deleteFile:         s3.deleteFile,
+    uploadFile:         s3.uploadFile,
   };
-  const calls = { tagged: [], deleted: [] };
-  s3.getPresignedPutUrl = async (key) => `https://s3.test/${key}?signed=1`;
-  s3.objectExists       = async () => (exists ? { exists: true, content_type: 'image/png', size } : { exists: false });
+  const calls = { tagged: [], deleted: [], signed: [], uploaded: [] };
+  s3.getPresignedPutUrl = async (key, type, opts = {}) => { calls.signed.push({ key, type, ...opts }); return `https://s3.test/${key}?signed=1`; };
+  s3.objectExists       = async () => (exists ? { exists: true, content_type: contentType, size } : { exists: false });
+  s3.readObjectStart    = async () => start;
   s3.putObjectTagging   = async (key, status) => { calls.tagged.push([key, status]); };
   s3.deleteFile         = async (key) => { calls.deleted.push(key); };
+  s3.uploadFile         = async (key, buf, type) => { calls.uploaded.push({ key, bytes: buf.length, type }); };
   try { return await fn(calls); } finally { Object.assign(s3, original); }
 };
+
+// First bytes of real files, for the signature check.
+const MP4_START  = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypisom'), Buffer.alloc(52)]);
+const PNG_START  = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(56)]);
+const POSTER_B64 = PNG_START.toString('base64');
 
 test('presign issues a key under the callers own namespace and rejects bad slots/types', async () => {
   const u     = await mkUser('Upload');
@@ -3529,6 +3593,190 @@ test('confirm reports each key separately and keeps the good files in a partly b
     assert.equal(allBad.status, 400);
     assert.ok(!allBad.body.success);
   });
+});
+
+// ---------- Upload limits (app_settings `uploads`) and video ----------
+const withSetting = async (key, value, fn) => {
+  const row = await models.AppSetting.findOne({ where: { key } });
+  const before = row.value;
+  await row.update({ value: String(value) });
+  try { return await fn(); } finally { await row.update({ value: before }); }
+};
+
+test('presign with a declared size binds the URL; video goes to the media library only', async () => {
+  const u     = await mkUser('VideoPresign');
+  const token = h.userTokenFor(u.id);
+  const vid   = (over = {}) => ({ target: { slot: 'media_library' }, filename: 'clip.mp4', content_type: 'video/mp4', size: 50 * MB, ...over });
+
+  await withStubbedS3(async (calls) => {
+    const r = await h.request('POST', `${P}/uploads/presign`, { token, body: vid() });
+    assert.equal(r.status, 200);
+    assert.ok(r.body.data.key.startsWith(`users/${u.uid}/media/`) && r.body.data.key.endsWith('.mp4'));
+    assert.equal(r.body.data.upload_method, 'single');
+    assert.equal(r.body.data.required_headers['Content-Type'], 'video/mp4', 'a bound URL signs the type too');
+    assert.equal(calls.signed[0].contentLength, 50 * MB, 'URL bound to the declared size');
+    assert.equal(r.body.data.limits.video.max_bytes, 100 * MB);
+    assert.equal(r.body.data.limits.batch_max_total_bytes, 300 * MB);
+    assert.equal(r.body.data.max_bytes, 10 * MB, 'the legacy field still reports the image cap');
+
+    // An older client that sends no size gets today's unbound URL.
+    calls.signed.length = 0;
+    const legacy = await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'old.png' },
+    });
+    assert.equal(legacy.status, 200);
+    assert.equal(calls.signed[0].contentLength, undefined);
+    assert.ok(!legacy.body.data.required_headers['Content-Type']);
+
+    const refused = async (body, field) => {
+      const res = await h.request('POST', `${P}/uploads/presign`, { token, body });
+      assert.equal(res.status, 400, JSON.stringify(body));
+      if (field) assert.ok(res.body.error.details.some((d) => d.field === field), `${field}: ${JSON.stringify(res.body.error.details)}`);
+      return res;
+    };
+    await refused(vid({ target: { slot: 'business_logo' } }), 'content_type');          // video only in media_library
+    await refused(vid({ target: { slot: 'product_image' } }), 'content_type');
+    await refused(vid({ filename: 'clip.webm' }), 'filename');                            // extension must match the type
+    await refused(vid({ size: 101 * MB }), 'size');                                       // over the per-file cap
+    await refused({ target: { slot: 'media_library' }, filename: 'a.png', size: 10 }, null); // size needs content_type
+    await refused({ target: { slot: 'media_library' }, filename: 'clip.avi', content_type: 'video/x-msvideo' }, 'content_type');
+
+    // Per request: at most 5 videos, and 300 MB combined — even when every file
+    // passes on its own, the WHOLE request is refused.
+    const many = await refused({ files: Array.from({ length: 6 }, () => vid({ size: MB })) }, 'files');
+    assert.match(many.body.error.details[0].message, /at most 5 videos/);
+    const heavy = await refused({ files: Array.from({ length: 4 }, () => vid({ size: 90 * MB })) }, 'files');
+    assert.match(heavy.body.error.details[0].message, /total 360 MB.*300 MB/);
+    assert.equal(calls.signed.length, 1, 'no URL was issued for any refused request');
+  });
+});
+
+test('upload limits follow app_settings, and the settings rules refuse unsafe values', async () => {
+  const u     = await mkUser('LimitSettings');
+  const token = h.userTokenFor(u.id);
+  const body  = { target: { slot: 'media_library' }, filename: 'clip.mp4', content_type: 'video/mp4', size: 30 * MB };
+
+  await withStubbedS3(async () => {
+    assert.equal((await h.request('POST', `${P}/uploads/presign`, { token, body })).status, 200);
+    await withSetting('upload_user_video_max_mb', 20, async () => {
+      assert.equal((await h.request('POST', `${P}/uploads/presign`, { token, body })).status, 400, 'an admin edit applies to the next presign');
+    });
+    // Dropping a type from the list switches it off.
+    await withSetting('upload_user_video_types', '["video/webm"]', async () => {
+      assert.equal((await h.request('POST', `${P}/uploads/presign`, { token, body })).status, 400);
+    });
+  });
+
+  // The user limits are public, so the app can check a file the moment it is picked.
+  const config = await h.request('GET', `${P}/config`);
+  assert.equal(config.body.data.upload_user_video_max_mb, 100);
+  assert.deepEqual(config.body.data.upload_user_video_types, ['video/mp4', 'video/webm', 'video/quicktime']);
+  assert.ok(!('upload_admin_video_max_mb' in config.body.data), 'admin limits stay private');
+
+  const admin = h.adminToken(['*']);
+  const patch = async (key, value) => {
+    const row = await models.AppSetting.findOne({ where: { key } });
+    return h.request('PATCH', `${P}/admin/app-settings/${row.id}`, { token: admin, body: { value } });
+  };
+  assert.equal((await patch('upload_user_image_types', '["image/png","image/svg+xml"]')).status, 400, 'never SVG for users');
+  assert.equal((await patch('upload_user_video_types', '["video/x-msvideo"]')).status, 400, 'no type the server cannot check');
+  assert.equal((await patch('upload_user_video_types', '["image/png"]')).status, 400, 'kinds do not mix');
+  assert.equal((await patch('upload_user_video_max_mb', '0')).status, 400);
+  assert.equal((await patch('upload_user_video_max_mb', '6000')).status, 400, 'over what one PUT can carry');
+});
+
+test('presign refuses a sized request that does not fit in the storage left', async () => {
+  const userId = await userWithActivePlan(1, 9116);
+  const token  = h.userTokenFor(userId);
+
+  await withStorageLimitMb(5, async () => {
+    await withStubbedS3(async (calls) => {
+      const files = [1, 2].map((i) => ({ target: { slot: 'media_library' }, filename: `p${i}.png`, content_type: 'image/png', size: 3 * MB }));
+      const r = await h.request('POST', `${P}/uploads/presign`, { token, body: { files } });
+      assert.equal(r.status, 402);
+      assert.match(r.body.error.message, /total 6 MB.*5 MB/);
+      assert.equal(calls.signed.length, 0);
+
+      // One that fits is fine.
+      assert.equal((await h.request('POST', `${P}/uploads/presign`, { token, body: { files: files.slice(0, 1) } })).status, 200);
+    });
+  });
+});
+
+test('confirming a video stores its duration and poster; delete removes both', async () => {
+  const u     = await mkUser('VideoConfirm');
+  const token = h.userTokenFor(u.id);
+
+  await withStubbedS3(async (calls) => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'clip.mp4', content_type: 'video/mp4', size: 40 * MB },
+    })).body.data.key;
+
+    const r = await h.request('POST', `${P}/uploads/confirm`, {
+      token, body: { uploads: [{ key, width: 1080, height: 1920, duration_ms: 12500, poster: `data:image/png;base64,${POSTER_B64}` }] },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(calls.tagged, [[key, 'active']]);
+    assert.equal(calls.uploaded.length, 1);
+    assert.ok(calls.uploaded[0].key.startsWith(`users/${u.uid}/posters/`), 'poster inside the user prefix');
+
+    const row = await models.UserUpload.findOne({ where: { s3_key: key } });
+    assert.equal(row.duration_ms, 12500);
+    assert.equal(row.poster_s3_key, calls.uploaded[0].key);
+    assert.equal(Number(row.bytes), 40 * MB);
+
+    const list = await h.request('GET', `${P}/uploads`, { token });
+    const item = list.body.data.find((x) => x.s3_key === key);
+    assert.equal(item.duration_ms, 12500);
+    assert.equal(item.poster_s3_key, row.poster_s3_key);
+
+    calls.deleted.length = 0;
+    assert.equal((await h.request('DELETE', `${P}/uploads/${row.uid}`, { token })).status, 200);
+    assert.deepEqual(calls.deleted.sort(), [key, row.poster_s3_key].sort());
+  }, { size: 40 * MB, contentType: 'video/mp4', start: MP4_START });
+});
+
+test('confirm rejects a file whose bytes are not what its extension says, and video metadata on an image', async () => {
+  const u     = await mkUser('SniffConfirm');
+  const token = h.userTokenFor(u.id);
+  const presign = async (filename, content_type) => (await h.request('POST', `${P}/uploads/presign`, {
+    token, body: { target: { slot: 'media_library' }, filename, content_type, size: MB },
+  })).body.data.key;
+
+  // A PNG uploaded under an .mp4 key: deleted, never promoted.
+  await withStubbedS3(async (calls) => {
+    const key = await presign('fake.mp4', 'video/mp4');
+    const r = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(calls.deleted, [key]);
+    assert.deepEqual(calls.tagged, []);
+  }, { size: MB, contentType: 'video/mp4', start: PNG_START });
+
+  // A poster on an image is refused before anything destructive — the upload
+  // stays pending for a corrected retry.
+  await withStubbedS3(async (calls) => {
+    const key = await presign('photo.png', 'image/png');
+    const r = await h.request('POST', `${P}/uploads/confirm`, { token, body: { uploads: [{ key, poster: POSTER_B64 }] } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(calls.deleted, []);
+    assert.deepEqual(calls.tagged, []);
+
+    // A bad poster on a video is the same: refused, not deleted.
+    const vkey = await presign('clip.mp4', 'video/mp4');
+    const bad  = await h.request('POST', `${P}/uploads/confirm`, { token, body: { uploads: [{ key: vkey, poster: Buffer.from('not an image').toString('base64') }] } });
+    assert.equal(bad.status, 400);
+    assert.deepEqual(calls.deleted, []);
+  }, { size: MB, start: null });
+
+  // Over the video cap at confirm (an older client's unbound URL) is deleted.
+  await withStubbedS3(async (calls) => {
+    const key = (await h.request('POST', `${P}/uploads/presign`, {
+      token, body: { target: { slot: 'media_library' }, filename: 'long.mp4' },
+    })).body.data.key;
+    const r = await h.request('POST', `${P}/uploads/confirm`, { token, body: { keys: [key] } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(calls.deleted, [key]);
+  }, { size: 101 * MB, contentType: 'video/mp4' });
 });
 
 test('a user cannot save an s3_key that was not issued to them (logo, product image, photo)', async () => {
@@ -4398,7 +4646,7 @@ const withStubbedPurgeDeps = async (fn, { razorpayFails = false } = {}) => {
   try { return await fn(calls); } finally { Object.assign(s3, original); Object.assign(rzp, original); }
 };
 
-const setGraceHours = (hours) => models.AppSetting.update({ value: String(hours) }, { where: { key: purgeSvc.GRACE_SETTING_KEY } });
+const setGraceMinutes = (minutes) => models.AppSetting.update({ value: String(minutes) }, { where: { key: purgeSvc.GRACE_SETTING_KEY } });
 const hoursAgo = (h) => new Date(Date.now() - h * 3600e3);
 
 test('self-deactivation starts the deletion clock; admin deactivation does not', async () => {
@@ -4527,14 +4775,61 @@ test('purge respects the grace period, the admin setting, and admin reactivation
   assert.ok(!dueIds.includes(adminBan.id), 'admin-deactivated → never');
 
   // Shorten the grace period from the admin setting: takes effect on the next scan.
-  await setGraceHours(1);
+  await setGraceMinutes(60);
   try {
     const shortened = (await purgeSvc.findDue()).map((u) => u.id);
-    assert.ok(shortened.includes(recent.id), '2h-old deactivation is due under a 1h grace');
+    assert.ok(shortened.includes(recent.id), '2h-old deactivation is due under a 60-minute grace');
   } finally {
-    await setGraceHours(24);
+    await setGraceMinutes(1440);
   }
-  assert.equal(await purgeSvc.graceHours(), 24, 'restored');
+  assert.equal(await purgeSvc.graceMinutes(), 1440, 'restored');
+
+  // The setting is in minutes, so a sub-hour grace works.
+  const minutesAgo = await mkUser('PurgeMinutes');
+  await minutesAgo.update({ is_active: 0, deactivated_at: new Date(Date.now() - 20 * 60e3) });
+  await setGraceMinutes(15);
+  try {
+    assert.ok((await purgeSvc.findDue()).some((u) => u.id === minutesAgo.id), '20 minutes ago is due under a 15-minute grace');
+    await setGraceMinutes(30);
+    assert.ok(!(await purgeSvc.findDue()).some((u) => u.id === minutesAgo.id), 'but not under a 30-minute one');
+  } finally {
+    await setGraceMinutes(1440);
+  }
+});
+
+test('admin app-settings: the deletion grace must be a whole number of minutes ≥ 1', async () => {
+  const token   = h.adminToken(['settings.*']);
+  const setting = await models.AppSetting.findOne({ where: { key: purgeSvc.GRACE_SETTING_KEY } });
+  const patch   = (value) => h.request('PATCH', `${P}/admin/app-settings/${setting.id}`, { token, body: { value } });
+
+  try {
+    for (const bad of ['0', '-5', '1.5', '0.5', 'abc', '1e3', ' 10', '']) {
+      const r = await patch(bad);
+      assert.equal(r.status, 400, `${JSON.stringify(bad)} must be rejected`);
+    }
+    await setting.reload();
+    assert.equal(setting.value, '1440', 'nothing slipped through');
+
+    for (const good of ['1', '10', '2880']) {
+      assert.equal((await patch(good)).status, 200, `${good} is accepted`);
+    }
+    assert.equal(await purgeSvc.graceMinutes(), 2880);
+
+    // A bad value already in the DB (saved before the rule) reads as the safe default.
+    await setGraceMinutes(0);
+    assert.equal(await purgeSvc.graceMinutes(), purgeSvc.DEFAULT_GRACE_MINUTES, '0 in the DB never means "purge now"');
+    await setGraceMinutes('1.5');
+    assert.equal(await purgeSvc.graceMinutes(), purgeSvc.DEFAULT_GRACE_MINUTES);
+  } finally {
+    await setGraceMinutes(1440);
+  }
+
+  // Other settings are not affected by the rule.
+  const other = await h.request('POST', `${P}/admin/app-settings`, {
+    token, body: { key: `tst_free_setting_${Date.now()}`, value: '0', type: 'integer' },
+  });
+  assert.equal(other.status, 201);
+  await models.AppSetting.destroy({ where: { id: other.body.data.id } });
 });
 
 test('a purge that cannot stop Razorpay billing leaves the account untouched for retry', async () => {
@@ -5649,6 +5944,124 @@ test('admin confirm reports each key separately and keeps the good ones', async 
       token, body: { keys: [outside] },
     })).status, 400);
   });
+});
+
+test('admin presign checks types and sizes per target, and binds the URL to a declared size', async () => {
+  const token = h.adminToken(['*']);
+  const presign = (body) => h.request('POST', `${P}/admin/uploads/presign`, { token, body });
+  const video = { target: { type: 'asset', asset_type: 'video' }, filename: 'promo.mp4', content_type: 'video/mp4' };
+
+  await withStubbedS3(async (calls) => {
+    const ok = await presign({ ...video, size: 400 * MB });
+    assert.equal(ok.status, 200);
+    assert.ok(ok.body.data.key.startsWith('assets/video/'));
+    assert.equal(calls.signed[0].contentLength, 400 * MB);
+    assert.equal(ok.body.data.required_headers['Content-Type'], 'video/mp4');
+    assert.equal(ok.body.data.limits.video.max_bytes, 500 * MB);
+
+    assert.equal((await presign({ ...video, size: 501 * MB })).status, 400, 'over the admin video cap');
+    assert.equal((await presign({ ...video, filename: 'promo.png', content_type: undefined })).status, 400, 'a video asset must be a video');
+    assert.equal((await presign({ target: { type: 'asset', asset_type: 'icon' }, filename: 'x.mp4' })).status, 400, 'an icon must be an image');
+    assert.equal((await presign({ target: { type: 'image_slot', slot: 'banner' }, filename: 'b.png', content_type: 'image/png', size: 26 * MB })).status, 400, 'over the admin image cap');
+
+    // Kinds without rules yet are untouched.
+    assert.equal((await presign({ target: { type: 'asset', asset_type: 'audio' }, filename: 'chime.mp3' })).status, 200);
+    assert.equal((await presign({ target: { type: 'image_slot', slot: 'font_file' }, filename: 'f.woff2' })).status, 200);
+
+    // Per request: at most 10 videos.
+    const eleven = Array.from({ length: 11 }, () => ({ ...video, size: MB }));
+    assert.equal((await presign({ files: eleven })).status, 400);
+  });
+});
+
+test('admin multipart: a declared size gets a part plan and parts signed for their exact length', async () => {
+  const token = h.adminToken(['*']);
+  const s3 = require('../src/utils/s3Helper');
+  const original = {
+    createMultipartUpload: s3.createMultipartUpload, presignUploadPart: s3.presignUploadPart,
+    completeMultipartUpload: s3.completeMultipartUpload, objectExists: s3.objectExists,
+    readObjectStart: s3.readObjectStart, deleteFile: s3.deleteFile,
+  };
+  const parts = [];
+  const deleted = [];
+  let stored = 25 * MB + 1;
+  s3.createMultipartUpload   = async () => 'upload-1';
+  s3.presignUploadPart       = async (key, id, n, exp, opts = {}) => { parts.push({ n, ...opts }); return `https://s3.test/${key}?part=${n}`; };
+  s3.completeMultipartUpload = async () => {};
+  s3.objectExists            = async () => ({ exists: true, content_type: 'video/mp4', size: stored });
+  s3.readObjectStart         = async () => MP4_START;
+  s3.deleteFile              = async (key) => { deleted.push(key); };
+  try {
+    const size = 25 * MB + 1;
+    const init = await h.request('POST', `${P}/admin/uploads/multipart/initiate`, {
+      token, body: { target: { type: 'asset', asset_type: 'video' }, filename: 'long.mp4', content_type: 'video/mp4', size },
+    });
+    assert.equal(init.status, 200);
+    assert.equal(init.body.data.upload_method, 'multipart');
+    assert.equal(init.body.data.part_size, 10 * MB);
+    assert.equal(init.body.data.part_count, 3);
+    const { key, upload_id } = init.body.data;
+
+    const signed = await h.request('POST', `${P}/admin/uploads/multipart/presign-parts`, {
+      token, body: { key, upload_id, part_numbers: [1, 2, 3], size },
+    });
+    assert.equal(signed.status, 200);
+    assert.deepEqual(parts.map((p) => p.contentLength), [10 * MB, 10 * MB, 5 * MB + 1], 'the last part is the remainder');
+    assert.deepEqual(signed.body.data.parts.map((p) => p.size), [10 * MB, 10 * MB, 5 * MB + 1]);
+
+    assert.equal((await h.request('POST', `${P}/admin/uploads/multipart/presign-parts`, {
+      token, body: { key, upload_id, part_numbers: [4], size },
+    })).status, 400, 'no part beyond the plan');
+
+    const done = { key, upload_id, parts: [{ part_number: 1, etag: '"a"' }] };
+    assert.equal((await h.request('POST', `${P}/admin/uploads/multipart/complete`, { token, body: done })).status, 200);
+
+    // Assembled over the cap (parts presigned without a size): deleted at complete.
+    stored = 600 * MB;
+    assert.equal((await h.request('POST', `${P}/admin/uploads/multipart/complete`, { token, body: done })).status, 400);
+    assert.deepEqual(deleted, [key]);
+  } finally { Object.assign(s3, original); }
+});
+
+test('admin confirm deletes a file whose bytes do not match its extension', async () => {
+  const token = h.adminToken(['*']);
+  await withStubbedS3(async (calls) => {
+    const key = (await h.request('POST', `${P}/admin/uploads/presign`, {
+      token, body: { target: { type: 'asset', asset_type: 'video' }, filename: 'v.mp4' },
+    })).body.data.key;
+    const r = await h.request('POST', `${P}/admin/uploads/confirm`, { token, body: { keys: [key] } });
+    assert.equal(r.status, 400);
+    assert.deepEqual(calls.deleted, [key]);
+    assert.deepEqual(calls.tagged, []);
+  }, { contentType: 'video/mp4', start: PNG_START });
+});
+
+test('a video asset needs a thumbnail, and keeps the metadata the panel reports', async () => {
+  const token = h.adminToken(['*']);
+  const stamp = Date.now();
+  const base  = { name: `TST Video Asset ${stamp}`, s3_key: `assets/video/v-${stamp}.mp4`, asset_type: 'video' };
+
+  const without = await h.request('POST', `${P}/admin/assets`, { token, body: base });
+  assert.equal(without.status, 400);
+
+  const ok = await h.request('POST', `${P}/admin/assets`, {
+    token, body: { ...base, thumbnail_s3_key: `assets/thumbnail/v-${stamp}.png`, width: 1080, height: 1920, duration_ms: 15000, bytes: 24 * MB, content_type: 'video/mp4' },
+  });
+  assert.equal(ok.status, 201);
+  track.assets.push(ok.body.data.id);
+  assert.equal(ok.body.data.duration_ms, 15000);
+  assert.equal(Number(ok.body.data.bytes), 24 * MB);
+
+  // Clearing the thumbnail later is refused the same way.
+  const cleared = await h.request('PATCH', `${P}/admin/assets/${ok.body.data.uid}`, { token, body: { thumbnail_s3_key: null } });
+  assert.equal(cleared.status, 400);
+
+  // And an icon still needs none.
+  const icon = await h.request('POST', `${P}/admin/assets`, {
+    token, body: { name: `TST Icon NoThumb ${stamp}`, s3_key: `assets/icon/i-${stamp}.png`, asset_type: 'icon' },
+  });
+  assert.equal(icon.status, 201);
+  track.assets.push(icon.body.data.id);
 });
 
 test('a font can no longer be filed as an asset â€” fonts belong to the fonts library', async () => {

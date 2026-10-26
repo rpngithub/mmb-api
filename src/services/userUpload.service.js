@@ -2,8 +2,11 @@ const { v4: uuid } = require('uuid');
 const s3           = require('../utils/s3Helper');
 const userRepo     = require('../repositories/user.repository');
 const quota        = require('./quota.service');
+const uploadLimits = require('./uploadLimits.service');
+const projectThumbnail = require('./projectThumbnail.service');
+const { kindOfType } = require('../constants/uploadTypes');
 const { UserUpload } = require('../models');
-const { ValidationError, NotFoundError } = require('../errors');
+const { ValidationError, NotFoundError, QuotaError } = require('../errors');
 
 // ---- User-facing direct-to-S3 uploads ----
 //
@@ -34,9 +37,9 @@ const SLOTS = {
   // catalogue content that users buy or add (see services/frame.service.js), not
   // files a user uploads, so the slot is retired — presigning one is rejected.
   // Migration 20260101000028 refunded the storage the old uploads were holding.
-  // "My Uploads" — the images a user brings into the editor. Unlike the slots
-  // above, these are not saved onto a record: the upload IS the thing, so the
-  // ledger row is what the library lists.
+  // "My Uploads" — the images and videos a user brings into the editor. Unlike
+  // the slots above, these are not saved onto a record: the upload IS the thing,
+  // so the ledger row is what the library lists.
   media_library:  'media',
   // A font file for the user's own Brand Kit typeface. The only non-image slot.
   brand_font:     'fonts',
@@ -47,10 +50,20 @@ const SLOTS = {
 // would invite someone to delete their logo from a media grid.
 const DEFAULT_LIST_SLOT = 'media_library';
 
-// Raster images only. SVG is deliberately excluded for user uploads (it can carry
-// script and these files are served back to browsers); admins can still upload SVG
-// icons through the admin endpoints, where the uploader is trusted.
-const IMAGE_CONTENT_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+// Image and video types come from app_settings (`upload_user_image_types`,
+// `upload_user_video_types`, see uploadLimits.service), and so do the size and
+// count limits. SVG can never be switched on for users — the settings rule
+// refuses it, since it can carry script and these files are served to browsers.
+//
+// Video goes to the media library ONLY. Every other image slot saves its key onto
+// a record that is drawn as an image (a logo, a cover, a product photo); taking
+// video there is a display change on every client, not an upload change.
+const VIDEO_SLOTS = new Set(['media_library']);
+
+const allowedTypesFor = (slotName, limits) => [
+  ...limits.image.types,
+  ...(VIDEO_SLOTS.has(slotName) ? limits.video.types : []),
+];
 
 // Font uploads are the one non-image slot. Browsers are famously inconsistent
 // about font MIME types — the same .woff2 arrives as font/woff2,
@@ -62,28 +75,12 @@ const FONT_CONTENT_TYPES = [
   'application/x-font-otf', 'application/octet-stream',
 ];
 const FONT_EXTENSIONS = ['woff2', 'woff', 'ttf', 'otf'];
-
-// Per-slot rules; everything not listed is an image slot.
-const SLOT_RULES = {
-  brand_font: { types: FONT_CONTENT_TYPES, extensions: FONT_EXTENSIONS },
-};
-const rulesFor = (slotName) => SLOT_RULES[slotName] || { types: IMAGE_CONTENT_TYPES, extensions: null };
-
-// Kept for the validator, which advertises what a client may send. The font types
-// are additionally constrained by extension, so the union is safe to expose.
-const ALLOWED_CONTENT_TYPES = [...IMAGE_CONTENT_TYPES, ...FONT_CONTENT_TYPES];
-
-// Checked at confirm, which is the only point a presigned PUT can be policed —
-// the URL itself cannot carry a size condition. An oversized object is deleted
-// rather than promoted, so its key can never be saved onto a record.
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+// Fonts keep their own fixed cap; the upload settings cover images and video.
+const FONT_MAX_BYTES = 10 * 1024 * 1024;
 
 const bad = (field, message) => new ValidationError('Validation failed', [{ field, message }]);
 
-const ext = (filename) => {
-  const m = /\.([A-Za-z0-9]+)$/.exec(String(filename || ''));
-  return m ? m[1].toLowerCase() : 'bin';
-};
+const { ext, toMb } = uploadLimits;
 
 const prefixFor = (userUid, slot) => `users/${userUid}/${slot}/`;
 
@@ -94,9 +91,17 @@ async function userUidFor(userId) {
 }
 
 // ---- Presign (single PUT) ----
-// No multipart on the user side: every slot here is an image, and a single
-// presigned PUT covers files far larger than MAX_UPLOAD_BYTES. Add multipart when
-// a slot starts taking video.
+// No multipart on the user side: a single presigned PUT covers 5 GB and the video
+// cap is far below that. Every file reports `upload_method: "single"` so the
+// server can start answering "multipart" for large files later without breaking
+// a client that reads the field.
+//
+// Sizes. A client that sends each file's `size` (bytes) gets it checked HERE —
+// per file, per request, and against remaining storage — and gets a URL bound to
+// exactly that length and content type, so S3 itself refuses anything else.
+// `size` is optional for now because older app builds do not send it; they get
+// today's unbound URL and the size check at confirm only. Make it required once
+// min_supported_version passes the first build that sends it.
 //
 // Two request shapes, and the response mirrors whichever was sent. The original
 // single-file body returns its fields flat, exactly as it always has; a batch
@@ -115,46 +120,81 @@ async function presign(body, userId) {
   // Dot-indexed to match the paths Joi produces (`files.3.content_type`), so a
   // client sees one convention whether the rejection came from the schema or here.
   const at = (i, field) => (batch ? `files.${i}.${field}` : field);
-  items.forEach(({ target, filename, content_type }, i) => {
+  const limits = await uploadLimits.load('user');
+
+  const checked = items.map(({ target, filename, content_type, size }, i) => {
+    const field    = (f) => at(i, f);
     const slotName = target && target.slot;
-    if (!SLOTS[slotName]) throw bad(at(i, 'target.slot'), `slot must be one of: ${Object.keys(SLOTS).join(', ')}`);
+    if (!SLOTS[slotName]) throw bad(field('target.slot'), `slot must be one of: ${Object.keys(SLOTS).join(', ')}`);
+    const declared = size == null ? null : Number(size);
 
     // Rules are per slot: an image slot must not accept a font, and vice versa.
-    const rules = rulesFor(slotName);
-    if (content_type && !rules.types.includes(content_type)) {
-      throw bad(at(i, 'content_type'), `content_type must be one of: ${rules.types.join(', ')}`);
+    if (slotName === 'brand_font') {
+      if (content_type && !FONT_CONTENT_TYPES.includes(content_type)) {
+        throw bad(field('content_type'), `content_type must be one of: ${FONT_CONTENT_TYPES.join(', ')}`);
+      }
+      if (!FONT_EXTENSIONS.includes(ext(filename))) {
+        throw bad(field('filename'), `file must be one of: ${FONT_EXTENSIONS.map((e) => `.${e}`).join(', ')}`);
+      }
+      if (declared != null && declared > FONT_MAX_BYTES) {
+        throw bad(field('size'), `file is ${toMb(declared)} MB; the limit for fonts is ${toMb(FONT_MAX_BYTES)} MB`);
+      }
+      return { slotName, filename, content_type, kind: 'font', size: declared };
     }
-    if (rules.extensions && !rules.extensions.includes(ext(filename))) {
-      throw bad(at(i, 'filename'), `file must be one of: ${rules.extensions.map((e) => `.${e}`).join(', ')}`);
-    }
+
+    const type = uploadLimits.resolveType({
+      declared: content_type, filename, allowed: allowedTypesFor(slotName, limits), at: field,
+    });
+    const kind = kindOfType(type);
+    uploadLimits.assertFileSize({ kind, size: declared, limits, at: field });
+    return { slotName, filename, content_type, kind, size: declared };
   });
 
+  // Count and combined size are per REQUEST. Over either, the whole request is
+  // refused even when every file passes on its own.
+  const total = uploadLimits.assertBatch(checked, limits);
+
   // Fail before the client wastes a round trip uploading into a full account.
-  // The real charge happens at confirm, once the byte count is known — so this
-  // stays a single "is there any room at all" check even for a batch; the server
-  // cannot know the sizes yet. Summing them client-side against storage_remaining
-  // is the client's job.
-  await quota.assertWithinQuota(userId, 'storage');
+  // When every file declared its size, the whole request must fit; otherwise this
+  // can only ask "is there any room at all". The charge itself still happens at
+  // confirm, file by file, once S3 reports the real size — nothing is reserved,
+  // so two requests racing for the last megabytes are settled there.
+  if (checked.every((c) => c.size != null)) {
+    const left = await quota.remaining(userId, 'storage');
+    if (left !== null && total > left) {
+      throw new QuotaError(`Selected files total ${toMb(total)} MB, but only ${toMb(left)} MB of storage is left. Upgrade your plan or buy a top-up.`);
+    }
+  } else {
+    await quota.assertWithinQuota(userId, 'storage');
+  }
 
   const userUid = await userUidFor(userId);
-  const files   = await Promise.all(items.map(async ({ target, filename, content_type }) => {
-    const key = `${prefixFor(userUid, SLOTS[target.slot])}${uuid()}.${ext(filename)}`;
+  const files   = await Promise.all(checked.map(async (c) => {
+    const key   = `${prefixFor(userUid, SLOTS[c.slotName])}${uuid()}.${ext(c.filename)}`;
+    const bound = c.size != null;
     return {
       key,
-      upload_url:       await s3.getPresignedPutUrl(key, content_type),
-      required_headers: { 'x-amz-tagging': 'status=pending' },
+      upload_url:       await s3.getPresignedPutUrl(key, c.content_type, bound ? { contentLength: c.size } : {}),
+      // A bound URL also signs Content-Type, so the PUT must send exactly the
+      // declared one. Content-Length is set by the HTTP client from the body.
+      required_headers: {
+        'x-amz-tagging': 'status=pending',
+        ...(bound && c.content_type ? { 'Content-Type': c.content_type } : {}),
+      },
+      upload_method:    'single',
     };
   }));
 
-  // Headroom left in the plan, so the client can reject an oversized file before
-  // uploading it. null = unlimited (or an unenforced free account).
-  const limits = {
+  const meta = {
     expires_in:        900,
-    max_bytes:         MAX_UPLOAD_BYTES,
+    // The image cap, kept for clients that read it; `limits` has the full set.
+    max_bytes:         limits.image.max_bytes,
+    // Headroom left in the plan. null = unlimited (or an unenforced account).
     storage_remaining: await quota.remaining(userId, 'storage'),
+    limits,
   };
 
-  return batch ? { files, ...limits } : { ...files[0], ...limits };
+  return batch ? { files, ...meta } : { ...files[0], ...meta };
 }
 
 // ---- Confirm: promote pending -> active, and charge storage ----
@@ -190,13 +230,14 @@ async function confirm(body, userId) {
   const slotOf  = Object.fromEntries(Object.entries(SLOTS).map(([target, slot]) => [slot, target]));
   const userUid = await userUidFor(userId);
   const mine    = `users/${userUid}/`;
+  const limits  = await uploadLimits.load('user');
 
   const results  = [];
   const failures = [];
 
   for (const item of items) {
     try {
-      await promoteOne(item, { userId, mine, slotOf });
+      await promoteOne(item, { userId, userUid, mine, slotOf, limits });
       results.push({ key: item.key, status: 'confirmed' });
     } catch (err) {
       if (!err.isOperational) throw err;      // a real fault, not this file's fault
@@ -216,13 +257,28 @@ async function confirm(body, userId) {
 
 // Promotes one uploaded object, or throws an operational error describing why it
 // could not be. Split out of confirm so each key's failure is catchable on its own.
-async function promoteOne(item, { userId, mine, slotOf }) {
+async function promoteOne(item, { userId, userUid, mine, slotOf, limits }) {
   const key = item.key;
   if (!key.startsWith(mine)) throw bad('keys', 'key is outside your upload namespace');
 
   // Already confirmed: promoting again must not charge again. The unique index
   // on s3_key is the backstop; this keeps a retry from erroring.
   if (await UserUpload.findOne({ where: { s3_key: key }, attributes: ['id'] })) return;
+
+  // What the file must be. The key's extension was checked against the type at
+  // presign, so it is the authority here — not the Content-Type the PUT sent.
+  const slotName = slotOf[key.slice(mine.length).split('/')[0]] || 'unknown';
+  const isFont   = slotName === 'brand_font';
+  const type     = isFont ? null : uploadLimits.typeOfKey(key);
+  const kind     = isFont ? 'font' : kindOfType(type);
+  const maxBytes = isFont ? FONT_MAX_BYTES : (limits[kind] || limits.image).max_bytes;
+
+  // Video metadata is decoded BEFORE anything destructive: a bad poster fails
+  // this one file and leaves the upload pending, so the client can retry the
+  // confirm with a corrected poster instead of uploading the video again.
+  const hasVideoMeta = item.poster != null || item.duration_ms != null;
+  if (hasVideoMeta && kind !== 'video') throw bad('uploads', 'duration_ms and poster are only accepted for videos');
+  const poster = item.poster ? projectThumbnail.decode(item.poster, { field: 'poster' }) : null;
 
   // HEAD returns null when it cannot tell (no bucket wired up, or a 403 that is
   // indistinguishable from a missing object) — treat that as inconclusive and
@@ -232,10 +288,23 @@ async function promoteOne(item, { userId, mine, slotOf }) {
   const head = await s3.objectExists(key);
   if (head && head.exists === false) throw bad('keys', `no uploaded object found at ${key}`);
 
+  // The backstop for every size check presign made: a URL bound to a declared
+  // size cannot carry more, but an older client's unbound URL can.
   const bytes = (head && head.size != null) ? Number(head.size) : 0;
-  if (bytes > MAX_UPLOAD_BYTES) {
+  if (bytes > maxBytes) {
     await s3.deleteFile(key);
-    throw bad('keys', `file exceeds the ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB limit`);
+    throw bad('keys', `file exceeds the ${toMb(maxBytes)} MB limit`);
+  }
+
+  // The bytes must be what the extension says. A short ranged read; when it
+  // cannot be made (no bucket, permissions) it is inconclusive and the file goes
+  // through, the same call the HEAD above makes.
+  if (head && type && uploadLimits.hasSignature(type)) {
+    const start = await s3.readObjectStart(key, uploadLimits.SNIFF_BYTES);
+    if (start && !uploadLimits.matchesSignature(type, start)) {
+      await s3.deleteFile(key);
+      throw bad('keys', `file content is not a valid ${type} file`);
+    }
   }
 
   // Over plan storage: delete rather than promote, so a rejected file leaves
@@ -249,17 +318,30 @@ async function promoteOne(item, { userId, mine, slotOf }) {
     throw err;
   }
 
+  // The poster is written before the promotion, so a storage failure here leaves
+  // the video pending and uncharged rather than active without its grid image.
+  // Outside the ledger and the quota, like a project thumbnail; under the user's
+  // prefix, so the account purge sweeps it.
+  const uploadUid = uuid();
+  let posterKey = null;
+  if (poster) {
+    posterKey = `users/${userUid}/posters/${uploadUid}.${poster.ext}`;
+    await s3.uploadFile(posterKey, poster.bytes, poster.type);
+  }
+
   await s3.putObjectTagging(key, 'active');
   await UserUpload.create({
-    uid:          uuid(),
+    uid:          uploadUid,
     user_id:      userId,
     s3_key:       key,
-    slot:         slotOf[key.slice(mine.length).split('/')[0]] || 'unknown',
+    slot:         slotName,
     bytes,
-    content_type: (head && head.content_type) || null,
+    content_type: (head && head.content_type) || type || null,
     width:             posIntOrNull(item.width),
     height:            posIntOrNull(item.height),
     original_filename: item.filename ? String(item.filename).slice(0, 255) : null,
+    duration_ms:       posIntOrNull(item.duration_ms),
+    poster_s3_key:     posterKey,
   });
   await quota.consume(userId, 'storage', bytes, { source: 'upload', ref_type: 'user_upload' });
 }
@@ -280,6 +362,7 @@ const posIntOrNull = (v) => {
 // but not enforced. `used_bytes` is real either way.
 async function storageQuota(userId) {
   const { limit, used, remaining, topup_granted } = await quota.snapshot(userId, 'storage');
+  const limits = await uploadLimits.load('user');
   return {
     limit_bytes:      limit,
     used_bytes:       used,
@@ -288,7 +371,10 @@ async function storageQuota(userId) {
     // a client can say "100 MB plan + 500 MB bought" rather than one opaque total.
     topup_bytes:      topup_granted,
     unlimited:        limit === null,
-    max_upload_bytes: MAX_UPLOAD_BYTES,
+    // The image cap, kept for clients that read it; `upload_limits` has the
+    // per-kind sizes, counts, request total and allowed types.
+    max_upload_bytes: limits.image.max_bytes,
+    upload_limits:    limits,
   };
 }
 
@@ -296,7 +382,10 @@ async function storageQuota(userId) {
 
 // What a client sees of an upload. `id` and `user_id` stay internal; `s3_key` is
 // what the app prepends cdn_base_url to.
-const LIBRARY_ATTRS = ['uid', 's3_key', 'slot', 'bytes', 'content_type', 'width', 'height', 'original_filename', 'created_at'];
+const LIBRARY_ATTRS = [
+  'uid', 's3_key', 'slot', 'bytes', 'content_type', 'width', 'height', 'original_filename',
+  'duration_ms', 'poster_s3_key', 'created_at',
+];
 
 async function listMine(userId, { slot, limit, offset } = {}) {
   const wanted = slot && SLOTS[slot] ? slot : DEFAULT_LIST_SLOT;
@@ -341,6 +430,13 @@ async function release(key, userId) {
   if (!row) return;
 
   await s3.deleteFile(key);
+  // The poster goes with its video. Best-effort: it is uncharged, and the account
+  // purge sweeps the prefix anyway.
+  if (row.poster_s3_key) {
+    try { await s3.deleteFile(row.poster_s3_key); } catch (err) {
+      console.warn(`[UserUpload] could not delete poster ${row.poster_s3_key}: ${err.message}`);
+    }
+  }
   await row.destroy();
   await quota.release(userId, 'storage', Number(row.bytes), { source: 'upload', ref_type: 'user_upload' });
 }
@@ -375,5 +471,5 @@ async function assertOwnedKey(key, slotName, userId) {
 
 module.exports = {
   presign, confirm, assertOwnedKey, release, releaseReplaced, listMine, deleteMine, storageQuota,
-  SLOTS, ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES, DEFAULT_LIST_SLOT,
+  SLOTS, VIDEO_SLOTS, FONT_MAX_BYTES, DEFAULT_LIST_SLOT,
 };

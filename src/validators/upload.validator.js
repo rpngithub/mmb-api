@@ -12,30 +12,39 @@ const targetSchema = Joi.object({
 // One file. Kept as its own schema because multipart initiate takes EXACTLY this
 // and must not inherit presign's batch form — a multipart upload is one key, one
 // upload_id, and `files: [...]` there would be silently accepted and half-ignored.
+// `size` is the file's byte count. Optional (the panel may not send it yet); when
+// sent, content_type must be too, since the URL is then signed for both. Allowed
+// types and the size caps are app_settings, checked in the service.
+const sizeSchema = Joi.number().integer().min(1);
+
 const fileSchema = Joi.object({
   target:       targetSchema.required(),
   filename:     Joi.string().min(1).max(200).required(),
   content_type: Joi.string().max(100).optional(),
-});
+  size:         sizeSchema.optional(),
+}).with('size', 'content_type');
 
 // Presign takes one file or a batch. Written as one object with an xor rather than
 // Joi.alternatives so a bad target still reports itself as `files.3.target.slot`;
 // alternatives collapse every branch into one unhelpful "does not match any of the
 // allowed types".
 //
-// Capped higher than the user side's 20: the uploader is trusted, admin confirm is
-// uncapped, and a template bundle is genuinely many files at once.
-const MAX_BATCH = 50;
+// A hard ceiling only: the real per-request counts are app_settings
+// (`upload_admin_*_batch_max_files`, 50 non-video files and 10 videos by
+// default), checked in the service so an admin can tune them.
+const MAX_BATCH = 100;
 
 const presignSchema = Joi.object({
   target:       targetSchema.optional(),
   filename:     Joi.string().min(1).max(200).optional(),
   content_type: Joi.string().max(100).optional(),
+  size:         sizeSchema.optional(),
   files:        Joi.array().items(fileSchema).min(1).max(MAX_BATCH).optional(),
 })
   .xor('target', 'files')
   .with('target', 'filename')
-  .without('files', ['filename', 'content_type']);
+  .with('size', 'content_type')
+  .without('files', ['filename', 'content_type', 'size']);
 
 const multipartInitiateSchema = fileSchema;
 
@@ -43,6 +52,8 @@ const presignPartsSchema = Joi.object({
   key:          Joi.string().min(1).max(600).required(),
   upload_id:    Joi.string().min(1).max(400).required(),
   part_numbers: Joi.array().items(Joi.number().integer().min(1).max(10000)).min(1).required(),
+  // The same `size` sent to initiate: each part is then signed for its exact length.
+  size:         sizeSchema.optional(),
 });
 
 const completeSchema = Joi.object({

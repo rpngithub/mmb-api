@@ -18,6 +18,14 @@ module.exports = (sequelize) => {
     // flat table cannot express, so fonts live in `fonts` + `font_files`. Keeping
     // the value costs nothing and avoids a migration for a value nothing uses.
     asset_type:  { type: DataTypes.ENUM('icon', 'emoji', 'shape', 'font', 'audio', 'video', 'animated', 'bg'), allowNull: false },
+    // File metadata the admin panel reports when it saves the asset (it has the
+    // File in hand; the server would have to decode it). Nullable — rows from
+    // before migration 054 and CSV imports carry none.
+    width:        { type: DataTypes.INTEGER, allowNull: true },
+    height:       { type: DataTypes.INTEGER, allowNull: true },
+    duration_ms:  { type: DataTypes.INTEGER, allowNull: true },
+    bytes:        { type: DataTypes.BIGINT, allowNull: true },
+    content_type: { type: DataTypes.STRING(100), allowNull: true },
     is_premium:  { type: DataTypes.TINYINT, defaultValue: 0 },
     status:      { type: DataTypes.ENUM('active', 'inactive'), defaultValue: 'active' },
   }, { tableName: 'assets' });

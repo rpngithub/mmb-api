@@ -19,10 +19,25 @@ const { presignSchema, confirmSchema } = require('../validators/userUpload.valid
  *       3. `POST /uploads/confirm` — promotes the object from pending to active.
  *
  *       **Bulk uploads** use the same three steps. Send `files: [...]` to presign
- *       (up to 20) to get all the URLs in one call, `PUT` them in parallel — keep
- *       concurrency to about 4–6, browsers queue past that — then confirm every key
- *       in one call. Confirm reports each key separately: a batch is not
- *       all-or-nothing, so one oversized file does not discard the rest.
+ *       to get all the URLs in one call, `PUT` them in parallel — keep concurrency
+ *       to about 4–6, browsers queue past that — then confirm every key in one
+ *       call. Confirm reports each key separately: a batch is not all-or-nothing,
+ *       so one oversized file does not discard the rest.
+ *
+ *       **Video** (mp4, webm, mov) is accepted in the `media_library` slot only.
+ *
+ *       **Send each file's `size`** (bytes, `File.size`) with its `content_type`.
+ *       Presign then checks the per-file cap, the per-request file count and
+ *       combined size, and remaining storage before issuing any URL, and signs
+ *       the URL for exactly that size and type — S3 refuses any other body with
+ *       403 `SignatureDoesNotMatch` (re-presign and retry once). The PUT must carry
+ *       a fixed `Content-Length` (no chunked streaming) and the declared
+ *       `Content-Type`. Presign after any client-side compression, not before.
+ *       Without `size` (older app builds) the URL is unbound and the size is only
+ *       checked at confirm.
+ *
+ *       Limits are app settings (`upload_user_*`, public in `GET /config`) and are
+ *       echoed as `limits` on every presign response, in bytes.
  *
  *       Then save `key` onto the record it belongs to (`logo_s3_key` on the business,
  *       `s3_key` on a product image or frame, `profile_photo_s3_key` on the user).
@@ -39,11 +54,17 @@ const { presignSchema, confirmSchema } = require('../validators/userUpload.valid
  *   post:
  *     summary: Get presigned URLs to upload one file, or a batch
  *     description: >-
- *       Send one file (`target` + `filename`) or up to 20 under `files`. The response
+ *       Send one file (`target` + `filename`) or a batch under `files`. The response
  *       mirrors whichever shape was sent: flat for a single file, a `files` array for a
- *       batch. The whole batch is validated before any URL is issued, so a bad slot in
- *       one entry fails the request outright rather than half-signing it — nothing has
- *       been uploaded at that point, and the error names the offending index.
+ *       batch. The whole batch is validated before any URL is issued, so a bad entry
+ *       fails the request outright rather than half-signing it — nothing has been
+ *       uploaded at that point, and the error names the offending index.
+ *
+ *
+ *       Per request (defaults; app settings): at most 20 non-video files and 5 videos,
+ *       and 300 MB combined. Per file: 10 MB for an image, 100 MB for a video. Over the
+ *       combined size the WHOLE request is refused even when every file passes alone;
+ *       the same when the declared sizes do not fit in the storage left (402).
  *     tags: [Uploads]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -63,21 +84,25 @@ const { presignSchema, confirmSchema } = require('../validators/userUpload.valid
  *                       slot:
  *                         type: string
  *                         enum: [profile_photo, business_logo, business_cover, product_image, user_frame, media_library, brand_font]
- *                   filename:     { type: string, description: "Used only for its extension; the stored name is a uuid." }
+ *                   filename:     { type: string, description: "Used for its extension, which must match content_type (.jpg/.jpeg, .png, .webp, .gif, .mp4/.m4v, .webm, .mov); the stored name is a uuid." }
+ *                   size:
+ *                     type: integer
+ *                     minimum: 1
+ *                     description: >-
+ *                       The file's size in bytes. Requires content_type. Binds the upload URL to
+ *                       this exact size and type. Optional only while older app builds are supported.
  *                   content_type:
  *                     type: string
  *                     description: >-
- *                       Image slots take raster images only — SVG is deliberately excluded for user
- *                       uploads, since it can carry script and these files are served back to
- *                       browsers. The `brand_font` slot takes font types instead, and because
- *                       browsers report those inconsistently (the same .woff2 arrives as font/woff2,
- *                       application/font-woff2 or application/octet-stream) the FILE EXTENSION is
- *                       checked as well — .woff2, .woff, .ttf or .otf.
- *                     enum:
- *                       ['image/jpeg', 'image/png', 'image/webp', 'image/gif',
- *                        'font/woff2', 'font/woff', 'font/ttf', 'font/otf', 'font/sfnt',
- *                        'application/font-woff', 'application/font-woff2', 'application/x-font-ttf',
- *                        'application/x-font-otf', 'application/octet-stream']
+ *                       Image slots take the types in `upload_user_image_types` (jpeg, png, webp,
+ *                       gif by default) — SVG is never accepted for user uploads, since it can carry
+ *                       script and these files are served back to browsers. `media_library` also
+ *                       takes `upload_user_video_types` (mp4, webm, quicktime). The `brand_font`
+ *                       slot takes font types instead, and because browsers report those
+ *                       inconsistently (the same .woff2 arrives as font/woff2, application/font-woff2
+ *                       or application/octet-stream) the FILE EXTENSION is checked as well — .woff2,
+ *                       .woff, .ttf or .otf.
+ *                     example: video/mp4
  *               - type: object
  *                 title: Batch
  *                 required: [files]
@@ -85,11 +110,10 @@ const { presignSchema, confirmSchema } = require('../validators/userUpload.valid
  *                   files:
  *                     type: array
  *                     minItems: 1
- *                     maxItems: 20
  *                     description: >-
  *                       Same fields per entry as the single form. Slots may be mixed in one
- *                       batch. The cap matches confirm's, so everything presigned together
- *                       can be confirmed together.
+ *                       batch. Counts and combined size are limited per request (see above);
+ *                       everything presigned together can be confirmed together.
  *                     items:
  *                       type: object
  *                       required: [target, filename]
@@ -103,6 +127,7 @@ const { presignSchema, confirmSchema } = require('../validators/userUpload.valid
  *                               enum: [profile_photo, business_logo, business_cover, product_image, user_frame, media_library, brand_font]
  *                         filename:     { type: string }
  *                         content_type: { type: string }
+ *                         size:         { type: integer, minimum: 1 }
  *     responses:
  *       200:
  *         description: The key(s) to upload to, and where to PUT them
@@ -113,12 +138,16 @@ const { presignSchema, confirmSchema } = require('../validators/userUpload.valid
  *                 - $ref: '#/components/schemas/PresignResponse'
  *                 - $ref: '#/components/schemas/BatchPresignResponse'
  *       400:
- *         description: Unknown slot, disallowed content type, (font slot) a bad extension, or more than 20 files
+ *         description: >-
+ *           Unknown slot, a type not allowed in that slot (e.g. video outside media_library), an
+ *           extension that does not match the type, a file over its size cap (`size` field), or
+ *           too many files / too many MB in one request (`files` field)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *       402:
  *         description: >-
- *           Storage allowance already full — refused up front so the client does not waste a
- *           round trip uploading into a full account.
+ *           Storage allowance already full, or (when sizes are declared) the request's files
+ *           do not fit in what is left — refused up front so the client does not upload into
+ *           a full account.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.post('/presign', authenticate, validate(presignSchema), controller.presign);
@@ -129,10 +158,11 @@ router.post('/presign', authenticate, validate(presignSchema), controller.presig
  *   post:
  *     summary: Promote uploaded objects from pending to active
  *     description: >-
- *       Call after the `PUT`s succeed — once for the whole batch, up to 20 keys. Rejects
- *       any key outside your own namespace, any key with no object behind it, and any
- *       file over the size limit (which is deleted rather than promoted — a presigned PUT
- *       cannot carry a size condition, so this is the only point it can be enforced).
+ *       Call after the `PUT`s succeed — once for the whole batch. Rejects any key outside
+ *       your own namespace, any key with no object behind it, any file over its size cap,
+ *       and any file whose first bytes are not what its extension says (a PNG uploaded as
+ *       .mp4). Oversized and mismatched files are deleted rather than promoted. This is the
+ *       backstop for uploads whose URL was not bound to a declared size.
  *
  *
  *       Outcomes are reported PER KEY in `results`, and the good files in a batch are
@@ -153,15 +183,14 @@ router.post('/presign', authenticate, validate(presignSchema), controller.presig
  *               keys:
  *                 type: array
  *                 items: { type: string }
- *                 maxItems: 20
  *                 description: "Simple form — just the keys."
  *               uploads:
  *                 type: array
  *                 description: >-
- *                   Richer form, for media-library images. Same promotion, but records the
- *                   dimensions and original filename the grid needs — the server cannot work
- *                   those out without decoding the file. Send this OR `keys`, not both.
- *                 maxItems: 20
+ *                   Richer form, for the media library. Same promotion, but records the
+ *                   dimensions and original filename the grid needs — and for a video its
+ *                   duration and poster — which the server cannot work out without decoding
+ *                   the file. Send this OR `keys`, not both.
  *                 items:
  *                   type: object
  *                   required: [key]
@@ -170,6 +199,14 @@ router.post('/presign', authenticate, validate(presignSchema), controller.presig
  *                     width:    { type: integer }
  *                     height:   { type: integer }
  *                     filename: { type: string, description: "The user's own filename, for the tile label" }
+ *                     duration_ms: { type: integer, description: "Videos only. From the <video> element / video player metadata." }
+ *                     poster:
+ *                       type: string
+ *                       description: >-
+ *                         Videos only, optional. A frame grab for the grid tile: base64 (or a
+ *                         data: URL) JPEG, PNG or WebP, ≤ 500 KB decoded. Not counted against
+ *                         storage. A bad poster rejects that file WITHOUT deleting the video, so
+ *                         confirm can be retried with a corrected poster.
  *     responses:
  *       200:
  *         description: >-
@@ -224,7 +261,9 @@ router.get('/quota', authenticate, controller.quota);
  *   get:
  *     summary: My uploads ("Media Library")
  *     description: >-
- *       The images the user has uploaded for the editor, newest first. Defaults to the
+ *       The images and videos the user has uploaded for the editor, newest first. A video
+ *       carries `duration_ms` and `poster_s3_key` (null when no poster was sent — show a
+ *       generic video tile). Defaults to the
  *       `media_library` slot — logos, covers, product images and frames are managed on their
  *       own screens and are not listed here, so nobody can delete their logo from a media grid
  *       by accident. Pass `slot` to look at another one. `s3_key` is what you prepend

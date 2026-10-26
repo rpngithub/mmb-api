@@ -2723,7 +2723,7 @@
       },
       {
         "name": "Uploads (my files)",
-        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\n**Bulk** is the same three calls: send `files: [...]` to presign (max 20) for all the URLs at once, `PUT` them in parallel (4–6 at a time), then confirm every key in one call. Confirm reports each key separately in `results` — a batch is **not** all-or-nothing, so one oversized file does not discard the rest, and a `200` does not mean every key made it. If *every* key fails the request itself fails (400/402), so single-file callers are unaffected.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `media_library` (the editor's \"My Uploads\"), `brand_font` (the only non-image slot). There is no frame slot — frames are catalogue content you add or buy, not something you upload.\n\nImages are raster only (`image/jpeg|png|webp|gif`) — SVG is deliberately refused for user uploads. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently.\n\nSize is enforced at **confirm** (10 MB) — a presigned PUT cannot carry a size condition — and an oversized object is deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule, so an abandoned upload costs nothing. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
+        "description": "Direct-to-S3 uploads for the signed-in user. Same Design B as the admin side (presign straight to the FINAL key tagged `status=pending`, then a tag flip on confirm), with one difference that carries the whole security model: **every key is derived from the caller** and lives under `users/{your uid}/{slot}/`. The client never sends a key or a prefix, only a slot name — and every write that accepts an `s3_key` (logo, cover, product image, profile photo) re-checks the key was issued to you for that slot.\n\n**Flow:** `POST /uploads/presign` → `PUT` the file to `upload_url` echoing every header in `required_headers` → `POST /uploads/confirm`.\n\n**Bulk** is the same three calls: send `files: [...]` to presign for all the URLs at once, `PUT` them in parallel (4–6 at a time), then confirm every key in one call. Per request (defaults, app settings): 20 non-video files + 5 videos, 300 MB combined — over any of them the WHOLE request is refused. Confirm reports each key separately in `results` — a batch is **not** all-or-nothing, so one oversized file does not discard the rest, and a `200` does not mean every key made it. If *every* key fails the request itself fails (400/402), so single-file callers are unaffected.\n\nSlots: `profile_photo`, `business_logo`, `business_cover`, `product_image`, `media_library` (the editor's \"My Uploads\" — the only slot that takes **video**), `brand_font`. There is no frame slot — frames are catalogue content you add or buy, not something you upload.\n\nImages: `image/jpeg|png|webp|gif` (10 MB) — SVG is never accepted for user uploads. Videos (`media_library` only): `video/mp4|webm|quicktime` (100 MB). The extension must match the type. Fonts (`woff2`/`woff`/`ttf`/`otf`) are checked on extension as well as content type, since browsers report font MIME types inconsistently. Limits are app settings (`upload_user_*`, public in `GET /config`) and come back as `limits` on presign.\n\n**Send `size`** (bytes) with `content_type`: presign then checks the caps and remaining storage up front and signs the URL for exactly that size and type (S3 returns 403 for any other body). Without `size` (older apps) only confirm checks. Confirm always HEADs the object and reads its first bytes — oversized or mismatched files are deleted rather than promoted. Unconfirmed objects stay `pending` and are swept by the bucket lifecycle rule. Confirm is also where storage quota is charged (402 when the plan's limit is reached).",
         "item": [
           {
             "name": "Presign Upload",
@@ -2745,10 +2745,10 @@
                   "presign"
                 ]
               },
-              "description": "Returns `{ key, upload_url, required_headers, expires_in, max_bytes, storage_remaining }`. `filename` is used only for its extension — the stored name is a uuid.",
+              "description": "Returns `{ key, upload_url, required_headers, upload_method, expires_in, max_bytes, storage_remaining, limits }`. `filename` is used for its extension, which must match `content_type` — the stored name is a uuid. With `size` the URL is bound to that size and type; the PUT must send the `Content-Type` in `required_headers` and exactly `size` bytes.",
               "body": {
                 "mode": "raw",
-                "raw": "{\n  \"target\": {\n    \"slot\": \"media_library\"\n  },\n  \"filename\": \"photo.jpg\",\n  \"content_type\": \"image/jpeg\"\n}",
+                "raw": "{\n  \"target\": {\n    \"slot\": \"media_library\"\n  },\n  \"filename\": \"photo.jpg\",\n  \"content_type\": \"image/jpeg\",\n  \"size\": 245760\n}",
                 "options": {
                   "raw": {
                     "language": "json"
@@ -2776,6 +2776,56 @@
             ]
           },
           {
+            "name": "Presign Upload (video)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/presign",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "presign"
+                ]
+              },
+              "description": "Video is accepted in `media_library` only (mp4/webm/mov, 100 MB by default). Confirm it with `duration_ms` and an optional `poster` — see \"Confirm Upload (video)\".",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"target\": {\n    \"slot\": \"media_library\"\n  },\n  \"filename\": \"promo.mp4\",\n  \"content_type\": \"video/mp4\",\n  \"size\": 41943040\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {}; if (d.key) pm.environment.set('my_video_key', d.key);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
             "name": "Presign Upload (bulk)",
             "request": {
               "method": "POST",
@@ -2795,10 +2845,10 @@
                   "presign"
                 ]
               },
-              "description": "Up to **20** files in one call; slots may be mixed. Returns `{ files: [{ key, upload_url, required_headers }], expires_in, max_bytes, storage_remaining }` — the limits are per ACCOUNT, so they are reported once instead of on every entry.\n\nUnlike confirm, presign IS all-or-nothing: the whole batch is validated before any URL is issued, so one bad entry 400s the request with a `files.3.filename`-style field path. Nothing has been uploaded at that point, so there is nothing to unwind.\n\n`storage_remaining` is the headroom for the whole account, not per file — sum the batch client-side against it before uploading. The cap matches confirm's, so anything presigned together can be confirmed together.",
+              "description": "Many files in one call; slots may be mixed. Per request (defaults): 20 non-video files + 5 videos, 300 MB combined. Returns `{ files: [{ key, upload_url, required_headers, upload_method }], expires_in, max_bytes, storage_remaining, limits }` — the limits are per ACCOUNT, so they are reported once instead of on every entry.\n\nUnlike confirm, presign IS all-or-nothing: the whole batch is validated before any URL is issued, so one bad entry 400s the request with a `files.3.filename`-style field path, and too many files / too many MB 400s it on `files`. Nothing has been uploaded at that point, so there is nothing to unwind.\n\nWith every `size` declared, presign also refuses (402) a request that does not fit in the storage left. Anything presigned together can be confirmed together.",
               "body": {
                 "mode": "raw",
-                "raw": "{\n  \"files\": [\n    {\n      \"target\": {\n        \"slot\": \"media_library\"\n      },\n      \"filename\": \"one.jpg\",\n      \"content_type\": \"image/jpeg\"\n    },\n    {\n      \"target\": {\n        \"slot\": \"media_library\"\n      },\n      \"filename\": \"two.png\",\n      \"content_type\": \"image/png\"\n    }\n  ]\n}",
+                "raw": "{\n  \"files\": [\n    {\n      \"target\": {\n        \"slot\": \"media_library\"\n      },\n      \"filename\": \"one.jpg\",\n      \"content_type\": \"image/jpeg\",\n      \"size\": 245760\n    },\n    {\n      \"target\": {\n        \"slot\": \"media_library\"\n      },\n      \"filename\": \"two.png\",\n      \"content_type\": \"image/png\",\n      \"size\": 512000\n    }\n  ]\n}",
                 "options": {
                   "raw": {
                     "language": "json"
@@ -3023,6 +3073,55 @@
             ]
           },
           {
+            "name": "Confirm Upload (video)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/uploads/confirm",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "uploads",
+                  "confirm"
+                ]
+              },
+              "description": "For a video, also send `duration_ms` and an optional `poster` (base64 or data: URL, JPEG/PNG/WebP, ≤ 500 KB) — the grid tile. The poster is not charged to storage and is deleted with the video; it comes back as `poster_s3_key`. A bad poster rejects the file WITHOUT deleting the video, so this call can be retried. `duration_ms`/`poster` on an image is a 400.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"uploads\": [\n    {\n      \"key\": \"{{my_video_key}}\",\n      \"width\": 1080,\n      \"height\": 1920,\n      \"duration_ms\": 12500,\n      \"filename\": \"promo.mp4\",\n      \"poster\": \"data:image/jpeg;base64,<frame grab>\"\n    }\n  ]\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
             "name": "My Storage Quota",
             "request": {
               "method": "GET",
@@ -3037,7 +3136,7 @@
                   "quota"
                 ]
               },
-              "description": "The same figures presign returns, without having to start an upload: `{ limit_bytes, used_bytes, remaining_bytes, unlimited, max_upload_bytes }`. Read it when sizing a bulk upload, or to render a \"82 MB of 100 MB used\" bar.\n\nEverything is in **bytes**, so it compares directly against a file size. `GET /subscriptions/me` reports the same allowance in MB for the plan's feature list — do not mix the two units.\n\n`limit_bytes` / `remaining_bytes` are `null` when the allowance is unlimited or unenforced (a free account); check `unlimited` rather than testing for null. `used_bytes` is always real, so consumption can be shown either way. `max_upload_bytes` is the per-FILE cap, separate from the allowance."
+              "description": "The same figures presign returns, without having to start an upload: `{ limit_bytes, used_bytes, remaining_bytes, unlimited, max_upload_bytes, upload_limits }` (`max_upload_bytes` = the image cap; `upload_limits` = per-kind caps, per-request counts and total, allowed types). Read it when sizing a bulk upload, or to render a \"82 MB of 100 MB used\" bar.\n\nEverything is in **bytes**, so it compares directly against a file size. `GET /subscriptions/me` reports the same allowance in MB for the plan's feature list — do not mix the two units.\n\n`limit_bytes` / `remaining_bytes` are `null` when the allowance is unlimited or unenforced (a free account); check `unlimited` rather than testing for null. `used_bytes` is always real, so consumption can be shown either way. `max_upload_bytes` is the per-FILE cap, separate from the allowance."
             },
             "event": [
               {

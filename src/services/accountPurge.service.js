@@ -12,31 +12,32 @@ const {
   Payment, BusinessCategory, ActivityLog,
 } = models;
 
-// Editable from the admin panel (/admin/app-settings). The migration that added
-// the key seeds 24; this is only the fallback if the row is ever deleted.
-const GRACE_SETTING_KEY   = 'account_deletion_grace_hours';
-const DEFAULT_GRACE_HOURS = 24;
+// Editable from the admin panel (/admin/app-settings), in MINUTES. Migration 053
+// carries the old hours setting over (×60); this is only the fallback if the row
+// is ever deleted. 1440 = 24 hours.
+const GRACE_SETTING_KEY     = 'account_deletion_grace_minutes';
+const DEFAULT_GRACE_MINUTES = 1440;
 
 // How many accounts one job run will take on. Each purge is a handful of DELETEs
 // plus an S3 listing, so this is generous; it exists so a backlog (the job was
 // down for a day) drains over a few runs instead of one long-held lock.
 const MAX_PER_RUN = 50;
 
-const graceHours = () => config.getSetting(GRACE_SETTING_KEY, DEFAULT_GRACE_HOURS);
+const graceMinutes = () => config.getSetting(GRACE_SETTING_KEY, DEFAULT_GRACE_MINUTES);
 
 // What the deactivate response tells the user: "your data will be permanently
 // deleted on …". Recomputed from the setting each time rather than stored, so an
 // admin shortening the grace period applies to accounts already in the window.
 async function deletionScheduledAt(deactivatedAt) {
-  const hours = await graceHours();
-  return new Date(new Date(deactivatedAt).getTime() + hours * 60 * 60 * 1000);
+  const minutes = await graceMinutes();
+  return new Date(new Date(deactivatedAt).getTime() + minutes * 60 * 1000);
 }
 
 // The accounts whose grace period has run out. `deactivated_at` is set by
 // SELF-deactivation only — admin deactivation is moderation and never lands here.
 async function findDue(limit = MAX_PER_RUN) {
-  const hours  = await graceHours();
-  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+  const minutes = await graceMinutes();
+  const cutoff  = new Date(Date.now() - minutes * 60 * 1000);
   return User.findAll({
     where: { deactivated_at: { [Op.lte]: cutoff }, purged_at: null, is_active: 0 },
     order: [['deactivated_at', 'ASC']],
@@ -176,4 +177,4 @@ async function runOnce() {
   return { due: due.length, purged, failed };
 }
 
-module.exports = { purgeUser, findDue, runOnce, deletionScheduledAt, graceHours, GRACE_SETTING_KEY, DEFAULT_GRACE_HOURS };
+module.exports = { purgeUser, findDue, runOnce, deletionScheduledAt, graceMinutes, GRACE_SETTING_KEY, DEFAULT_GRACE_MINUTES };
