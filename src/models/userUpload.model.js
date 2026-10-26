@@ -19,6 +19,11 @@ module.exports = (sequelize) => {
     width:             { type: DataTypes.INTEGER, allowNull: true },
     height:            { type: DataTypes.INTEGER, allowNull: true },
     original_filename: { type: DataTypes.STRING(255), allowNull: true },
+    // Videos only, both client-supplied (the server cannot decode video). The
+    // poster is the grid image, stored inline at confirm like a project thumbnail:
+    // outside the ledger and the quota, and deleted with the upload.
+    duration_ms:       { type: DataTypes.INTEGER, allowNull: true },
+    poster_s3_key:     { type: DataTypes.STRING(500), allowNull: true },
   }, { tableName: 'user_uploads', updatedAt: false });
 
   UserUpload.associate = (models) => {

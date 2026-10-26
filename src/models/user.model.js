@@ -4,7 +4,8 @@ module.exports = (sequelize) => {
   const User = sequelize.define('User', {
     id:                   { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     uid:                  { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, allowNull: false, unique: true },
-    name:                 { type: DataTypes.STRING(100), allowNull: false },
+    // Optional — OTP signup has no name to give, and the app collects one later.
+    name:                 { type: DataTypes.STRING(100), allowNull: true },
     email:                { type: DataTypes.STRING(255), unique: true, allowNull: true },
     phone:                { type: DataTypes.STRING(20), unique: true, allowNull: true },
     password_hash:        { type: DataTypes.STRING(255), allowNull: true },

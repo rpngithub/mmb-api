@@ -34,14 +34,41 @@ const getPresignedUrl = (key, expiresIn = 3600) =>
 
 // Presigned PUT (direct browser upload) straight to the FINAL key, tagged status=pending.
 // The client must echo the tag as header `x-amz-tagging: status=pending`.
-const getPresignedPutUrl = (key, contentType, { tagging = PENDING_TAG, expiresIn = 900 } = {}) =>
-  getSignedUrl(
+//
+// With `contentLength` the URL is bound to that exact size AND to the content
+// type: S3 refuses any other body (SignatureDoesNotMatch). The presigner leaves
+// Content-Type unsigned by default, so it is named explicitly — but only on this
+// path, so a client that sends no size keeps today's unbound URL.
+const getPresignedPutUrl = (key, contentType, { tagging = PENDING_TAG, expiresIn = 900, contentLength } = {}) => {
+  const bound = contentLength != null;
+  return getSignedUrl(
     s3,
-    new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType, Tagging: tagging }),
+    new PutObjectCommand({
+      Bucket: BUCKET, Key: key, ContentType: contentType, Tagging: tagging,
+      ...(bound ? { ContentLength: contentLength } : {}),
+    }),
     // Keep x-amz-tagging as a SIGNED header instead of hoisting it to the query string;
     // otherwise the client's `x-amz-tagging` header is unsigned and S3 returns AccessDenied.
-    { expiresIn, unhoistableHeaders: new Set(['x-amz-tagging']) },
+    {
+      expiresIn,
+      unhoistableHeaders: new Set(['x-amz-tagging']),
+      ...(bound && contentType ? { signableHeaders: new Set(['content-type']) } : {}),
+    },
   );
+};
+
+// The first `length` bytes of an object, for checking its file signature. NULL
+// means "could not read" (no bucket, permissions, network) and callers treat it
+// as inconclusive, the same as objectExists.
+const readObjectStart = async (key, length = 64) => {
+  if (!BUCKET) return null;
+  try {
+    const r = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key, Range: `bytes=0-${length - 1}` }));
+    return Buffer.from(await r.Body.transformToByteArray());
+  } catch {
+    return null;
+  }
+};
 
 // Promote a pending object to active by flipping its tag (no byte copy).
 const putObjectTagging = (key, status = 'active') =>
@@ -73,10 +100,14 @@ const createMultipartUpload = (key, contentType, { tagging = PENDING_TAG } = {})
   s3.send(new CreateMultipartUploadCommand({ Bucket: BUCKET, Key: key, ContentType: contentType, Tagging: tagging }))
     .then((r) => r.UploadId);
 
-const presignUploadPart = (key, uploadId, partNumber, expiresIn = 3600) =>
+// `contentLength` binds the part URL to that exact size, as for a single PUT.
+const presignUploadPart = (key, uploadId, partNumber, expiresIn = 3600, { contentLength } = {}) =>
   getSignedUrl(
     s3,
-    new UploadPartCommand({ Bucket: BUCKET, Key: key, UploadId: uploadId, PartNumber: partNumber }),
+    new UploadPartCommand({
+      Bucket: BUCKET, Key: key, UploadId: uploadId, PartNumber: partNumber,
+      ...(contentLength != null ? { ContentLength: contentLength } : {}),
+    }),
     { expiresIn },
   );
 
@@ -120,7 +151,7 @@ const copyObject = (srcKey, destKey) =>
   s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `${BUCKET}/${srcKey}`, Key: destKey }));
 
 module.exports = {
-  uploadFile, getObjectBuffer, getPresignedUrl, getPresignedPutUrl, putObjectTagging, objectExists,
+  uploadFile, getObjectBuffer, getPresignedUrl, getPresignedPutUrl, putObjectTagging, objectExists, readObjectStart,
   createMultipartUpload, presignUploadPart, completeMultipartUpload, abortMultipartUpload,
   listKeys, deleteObjects, deleteByPrefix, copyObject, deleteFile,
 };

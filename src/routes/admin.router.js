@@ -10,6 +10,7 @@ const importController = require('../controllers/import.controller');
 const dashboardController = require('../controllers/dashboard.controller');
 const { IMPORT_ENTITIES } = require('../services/import.service');
 const fontPreview  = require('../services/fontPreview.service');
+const appSettingRules = require('../services/appSettingRules');
 const models       = require('../models');
 const { ConflictError } = require('../errors');
 const {
@@ -75,7 +76,7 @@ const {
 } = require('../validators/brandSeries.validator');
 const deprecated = require('../middlewares/deprecated');
 const {
-  createAssetSchema, updateAssetSchema,
+  createAssetSchema, updateAssetSchema, assertVideoThumbnail,
   createAssetCategorySchema, updateAssetCategorySchema, setAssetTagsSchema,
 } = require('../validators/asset.validator');
 const {
@@ -1121,11 +1122,22 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *   post:
  *     summary: Presigned single PUT (small files) straight to the final key, tagged pending
  *     description: >-
- *       One file (`target` + `filename`) or a batch under `files` (max 50); targets may be
- *       mixed, so a category icon and its thumbnail can be signed together. The response
- *       mirrors whichever shape was sent — flat for one file, a `files` array for a batch.
- *       Unlike confirm, presign is all-or-nothing: the whole batch is validated before any
- *       URL is issued, and the error names the entry (`files.3.target.slot`).
+ *       One file (`target` + `filename`) or a batch under `files`; targets may be mixed,
+ *       so a category icon and its thumbnail can be signed together. The response mirrors
+ *       whichever shape was sent — flat for one file, a `files` array for a batch. Unlike
+ *       confirm, presign is all-or-nothing: the whole batch is validated before any URL is
+ *       issued, and the error names the entry (`files.3.target.slot`).
+ *
+ *
+ *       **Types and sizes** (app settings `upload_admin_*`; defaults): a `video` asset must
+ *       be mp4/webm/mov, ≤ 500 MB; `icon`/`emoji`/`shape`/`bg` assets and every image slot
+ *       must be jpeg/png/webp/gif/svg, ≤ 25 MB. The extension must match the type. Audio,
+ *       `animated`, `font_file` and `template_file` are not type-checked. Per request: at
+ *       most 50 non-video files and 10 videos, 2 GB combined.
+ *
+ *
+ *       Send `size` (bytes) with `content_type` and the URL is signed for exactly that size
+ *       and type — S3 refuses any other body. For files over ~100 MB use multipart instead.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -1141,6 +1153,7 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *                   target:       { type: object, description: "{ type: image_slot|asset|template_file, ... }" }
  *                   filename:     { type: string }
  *                   content_type: { type: string }
+ *                   size:         { type: integer, minimum: 1, description: "Bytes. Requires content_type." }
  *               - type: object
  *                 title: Batch
  *                 required: [files]
@@ -1148,7 +1161,6 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *                   files:
  *                     type: array
  *                     minItems: 1
- *                     maxItems: 50
  *                     items:
  *                       type: object
  *                       required: [target, filename]
@@ -1156,24 +1168,40 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *                         target:       { type: object }
  *                         filename:     { type: string }
  *                         content_type: { type: string }
+ *                         size:         { type: integer, minimum: 1 }
  *     responses:
- *       200: { description: "One file → { key, upload_url, required_headers: { x-amz-tagging }, expires_in }. Batch → { files: [{ key, upload_url, required_headers }], expires_in }" }
+ *       200: { description: "One file → { key, upload_url, required_headers: { x-amz-tagging, Content-Type? }, upload_method: single, expires_in, limits }. Batch → { files: [{ key, upload_url, required_headers, upload_method }], expires_in, limits }" }
+ *       400: { description: "Unknown target, wrong type for the target, extension/type mismatch, over a size cap, or too many files / MB in one request" }
  * /admin/uploads/multipart/initiate:
  *   post:
  *     summary: Begin a multipart upload (large files); returns key + upload_id
  *     description: >-
  *       One file only — a multipart upload is one key and one upload_id. There is no
- *       batch form here; presign several files instead, or initiate one at a time.
+ *       batch form here; presign several files instead, or initiate one at a time. Same
+ *       type and size rules as presign. With `size` (bytes, plus `content_type`) the
+ *       response adds `part_size` and `part_count`: cut the file at `part_size` (the last
+ *       part is the remainder) and send the same `size` to presign-parts.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "{ key, upload_id, upload_method: multipart, part_size?, part_count? }" }
  * /admin/uploads/multipart/presign-parts:
  *   post:
  *     summary: Get presigned PUT URLs for the given part numbers
+ *     description: >-
+ *       With `size` (the same value sent to initiate), each part URL is signed for that
+ *       part's exact length, returned as `size` on each part, and part numbers beyond
+ *       `part_count` are refused.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "{ parts: [{ part_number, url, size? }] }" }
  * /admin/uploads/multipart/complete:
  *   post:
  *     summary: Complete a multipart upload (parts = [{ part_number, etag }])
+ *     description: >-
+ *       Once assembled, the object is checked against its size cap and file signature; one
+ *       that fails is deleted and the call returns 400.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  * /admin/uploads/multipart/abort:
@@ -1190,6 +1218,11 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *       rejected — a `200` does not mean every key succeeded, so read `results`. `keys`
  *       lists the confirmed ones only. If every key fails the request fails with the
  *       first error (400), so a single-key confirm is unchanged.
+ *
+ *
+ *       Each type-checked key is verified first: the object must exist, be within its size
+ *       cap, and start with the bytes its extension implies. A file that fails is DELETED
+ *       and reported as rejected.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -1199,7 +1232,7 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *           schema: { type: object, required: [keys], properties: { keys: { type: array, items: { type: string } } } }
  *     responses:
  *       200: { description: "{ keys, results: [{ key, status, reason?, code? }] } — at least one key was promoted" }
- *       400: { description: "Every key was rejected (outside the allowed upload roots)" }
+ *       400: { description: "Every key was rejected (outside the allowed upload roots, missing, oversized, or not the type its extension says)" }
  */
 router.post('/uploads/presign',                 authenticate, authorizeAdmin(), validate(presignSchema),          uploadController.presign);
 router.post('/uploads/multipart/initiate',      authenticate, authorizeAdmin(), validate(multipartInitiateSchema), uploadController.multipartInitiate);
@@ -1887,7 +1920,8 @@ const syncFontPreview = async (row, req, { action }) => {
   }
 };
 C('/fonts',               { model: models.Font,             resource: 'font',             permission: 'fonts', reorderable: true, filterable: ['is_active', 'is_premium'], beforeWrite: assertLibraryFamilyFree, afterWrite: syncFontPreview, createSchema: createFontSchema, updateSchema: updateFontSchema, listOptions: { where: { user_id: null } }, include: [{ model: models.FontFile }, { model: models.Language, through: { attributes: [] } }] });
-C('/assets',              { model: models.Asset,            resource: 'asset',            permission: 'assets', filterable: ['category_id', 'asset_type', 'status'], createSchema: createAssetSchema, updateSchema: updateAssetSchema });
+// `beforeWrite`: a video asset must keep a thumbnail (see asset.validator).
+C('/assets',              { model: models.Asset,            resource: 'asset',            permission: 'assets', filterable: ['category_id', 'asset_type', 'status'], createSchema: createAssetSchema, updateSchema: updateAssetSchema, beforeWrite: assertVideoThumbnail });
 C('/asset-categories',    { model: models.AssetCategory,    resource: 'asset_category',   permission: 'assets', unique: ['slug'], autoSlug: true, createSchema: createAssetCategorySchema, updateSchema: updateAssetCategorySchema });
 C('/special-events',      { model: models.SpecialEvent,     resource: 'special_event',    permission: 'events', unique: ['name'], createSchema: createSpecialEventSchema, updateSchema: updateSpecialEventSchema });
 C('/banners',             { model: models.AppBanner,        resource: 'banner',           permission: 'banners' });
@@ -1930,7 +1964,9 @@ C('/coupons',             { model: models.Coupon,           resource: 'coupon', 
 // — which is why it goes through the service rather than calling the gate directly.
 // `reorderable` drives the shelf order on the buy screen.
 C('/quota-packs',         { model: models.QuotaPack,        resource: 'quota_pack',       permission: 'quota_packs', unique: ['name'], reorderable: true, filterable: ['status', 'feature_type_id'], createSchema: createQuotaPackSchema, updateSchema: updateQuotaPackSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => quotaPackService.assertPackWritable(payload, row), include: [{ model: models.FeatureType }] });
-C('/app-settings',        { model: models.AppSetting,       resource: 'app_setting',      permission: 'settings', idField: 'id', hasUid: false, createSchema: createAppSettingSchema, updateSchema: updateAppSettingSchema });
+// `beforeWrite` enforces per-key value rules (services/appSettingRules.js), e.g.
+// account_deletion_grace_minutes must be a whole number ≥ 1.
+C('/app-settings',        { model: models.AppSetting,       resource: 'app_setting',      permission: 'settings', idField: 'id', hasUid: false, createSchema: createAppSettingSchema, updateSchema: updateAppSettingSchema, beforeWrite: appSettingRules.assertSettingValue });
 
 // ---- Notifications ----
 //

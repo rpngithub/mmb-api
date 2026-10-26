@@ -357,15 +357,10 @@ async function createBusiness(userId, data) {
   const user = await userRepo.findById(userId);
   if (!user) throw new NotFoundError('User not found');
 
-  // A PERSONAL account has no business by definition, and the type is frozen once
-  // signup finishes — so this is a dead end rather than something they can resolve
-  // by switching. An account that never answered step 2 is answered by this call:
-  // creating a business IS the business path, so don't make the client PATCH first
-  // and leave a window where the two disagree.
-  if (user.account_type === 'personal') {
-    throw new ConflictError('This is a personal account and cannot have a business');
-  }
-
+  // Creating a business IS the business path: an account that never answered
+  // step 2, or a PERSONAL account upgrading, becomes BUSINESS in the same
+  // transaction — so don't make the client PATCH first and leave a window where
+  // the two disagree. (BUSINESS → PERSONAL is the direction that is refused.)
   const existing = await businessRepo.findAllByUser(userId);
   if (existing.length >= MAX_BUSINESSES_PER_USER) {
     throw new ConflictError('You already have a business. Only one business per account is supported.');

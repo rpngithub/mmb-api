@@ -35,11 +35,12 @@ const SIGNATURES = [
   { type: 'image/webp', ext: 'webp', match: (b) => b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP' },
 ];
 
-const bad = (message) => new ValidationError('Invalid thumbnail', [{ field: 'thumbnail', message }]);
-
 // Accepts `data:image/…;base64,<payload>` or the bare base64 payload. Returns the
-// bytes and what they actually are.
-function decode(input) {
+// bytes and what they actually are. `field` names the request field in errors —
+// a video poster (userUpload.service) is decoded by the same rules.
+function decode(input, { field = 'thumbnail' } = {}) {
+  const bad = (message) => new ValidationError(`Invalid ${field}`, [{ field, message }]);
+
   const str = String(input || '').trim();
   const payload = str.startsWith('data:') ? str.slice(str.indexOf(',') + 1) : str;
   if (!payload) throw bad('empty');

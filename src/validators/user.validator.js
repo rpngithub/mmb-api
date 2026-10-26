@@ -7,7 +7,8 @@ const Joi = require('joi');
 // identity and changes only through an OTP-verified flow, which does not exist
 // yet; `email` is not verified either, but it is display/contact data only.)
 const updateProfileSchema = Joi.object({
-  name:  Joi.string().min(1).max(100).optional(),
+  // Optional on the account; null (or '') clears it.
+  name:  Joi.string().trim().max(100).allow(null, '').optional(),
   email: Joi.string().email().max(255).allow(null, '').optional(),
   // Step 2 of signup, "What brings you here?". Settable only while onboarding is
   // still open — the service rejects it afterwards.

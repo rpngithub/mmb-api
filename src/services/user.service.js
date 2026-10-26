@@ -49,18 +49,28 @@ async function updateProfile(userId, data) {
   const user = await userRepo.findById(userId);
   if (!user) throw new NotFoundError('User not found');
 
-  if (data.account_type !== undefined) {
-    // Settable only while the flow is open — that window covers the in-flow
-    // "SWITCH TO PERSONAL" button and the back arrow. Once onboarding is stamped
-    // the answer is frozen, because switching afterwards would strand a business
+  // PERSONAL → BUSINESS is an upgrade and is allowed at any time.
+  const upgradingToBusiness = data.account_type === 'business' && user.account_type === 'personal';
+
+  if (data.account_type !== undefined && !upgradingToBusiness) {
+    // Anything else is settable only while the flow is open — that window covers
+    // the in-flow "SWITCH TO PERSONAL" button and the back arrow. Once onboarding
+    // is stamped BUSINESS → PERSONAL is refused, because it would strand a business
     // (and its industry, keywords and logo) behind an account that no longer has
     // one. Re-sending the SAME value is a harmless no-op, so it is allowed.
     if (user.onboarding_completed_at && data.account_type !== user.account_type) {
-      throw new ConflictError('Account type cannot be changed after signup');
+      throw new ConflictError('A business account cannot be changed to personal');
     }
   }
 
   const patch = { ...data };
+
+  // A cleared name is stored as NULL, never '', so "has no name" has one shape.
+  if (typeof patch.name === 'string') patch.name = patch.name.trim() || null;
+
+  // The upgraded account has no business yet, so the flow reopens at the business
+  // details step — the app resumes there, and POST /businesses stamps it again.
+  if (upgradingToBusiness) patch.onboarding_completed_at = null;
 
   // Verify the photo is one this caller uploaded to their own profile slot.
   if (patch.profile_photo_s3_key !== undefined) {

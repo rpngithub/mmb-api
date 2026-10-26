@@ -33,8 +33,11 @@ const {
  *       Only `name`, `email` and `account_type` are writable — every other column on
  *       the user is server-owned. `account_type` answers step 2 of signup ("What brings
  *       you here?"): `personal` completes onboarding immediately, `business` continues
- *       into the industry picker. It can only be set while onboarding is still open;
- *       afterwards changing it is a 409.
+ *       into the industry picker. `personal` → `business` is allowed at any time and
+ *       reopens onboarding (`completed: false`) until POST /businesses creates the
+ *       business — or skip this PATCH and call POST /businesses directly, which
+ *       upgrades the account in the same step. `business` → `personal` is allowed
+ *       only while onboarding is still open; afterwards it is a 409.
  *     tags: [User]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -45,7 +48,7 @@ const {
  *             type: object
  *             minProperties: 1
  *             properties:
- *               name:         { type: string }
+ *               name:         { type: string, nullable: true, description: "Optional; null or empty clears it. OTP signup leaves it null." }
  *               email:        { type: string, format: email, nullable: true }
  *               account_type: { type: string, enum: [business, personal] }
  *               profile_photo_s3_key: { type: string, nullable: true, description: "Key from POST /uploads/presign with slot `profile_photo`. Send null to clear." }
@@ -54,7 +57,7 @@ const {
  *         description: Updated profile (with the `onboarding` block)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/UserResponse' } } }
  *       409:
- *         description: Account type cannot be changed after signup
+ *         description: A business account cannot be changed to personal
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.get('/me', authenticate, controller.getProfile);
@@ -144,7 +147,7 @@ router.post('/me/sessions/revoke-others', authenticate, controller.revokeOtherSe
  *       public directory.
  *
  *       This also starts a deletion clock. Once the grace period passes (admin setting
- *       `account_deletion_grace_hours`, default 24) everything the account owns —
+ *       `account_deletion_grace_minutes`, default 1440 = 24 hours) everything the account owns —
  *       business, products, projects, uploads, purchased frames, quota, preferences — is
  *       permanently deleted and cannot be recovered. `deletion_scheduled_at` in the
  *       response is when that happens; show it to the user. Within the window an admin
