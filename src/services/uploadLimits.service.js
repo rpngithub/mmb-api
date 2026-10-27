@@ -123,11 +123,16 @@ const SNIFF_BYTES = 64;
 const hasSignature = (type) => Boolean(SIGNATURES[type]);
 const matchesSignature = (type, bytes) => !SIGNATURES[type] || SIGNATURES[type](bytes);
 
+// The words a per-file confirm rejection reports. A ValidationError's message is
+// only its title ("Validation failed"); the cause ("file exceeds the 25 MB
+// limit") is in its details, and that is what a client can show the user.
+const rejectionReason = (err) => (err.details && err.details[0] && err.details[0].message) || err.message;
+
 // The type a stored key's extension implies — the extension was checked against
 // the type at presign, so it is what the bytes have to be.
 const typeOfKey = (k) => typeForExtension(ext(k));
 
 module.exports = {
   MB, SNIFF_BYTES, toMb, ext, load, resolveType, assertFileSize, assertBatch,
-  hasSignature, matchesSignature, typeOfKey,
+  hasSignature, matchesSignature, typeOfKey, rejectionReason,
 };

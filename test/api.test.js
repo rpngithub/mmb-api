@@ -3578,7 +3578,7 @@ test('confirm reports each key separately and keeps the good files in a partly b
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.data.results.map((x) => x.status), ['confirmed', 'rejected', 'confirmed']);
     assert.equal(r.body.data.results[1].code, 'VALIDATION_ERROR');
-    assert.ok(r.body.data.results[1].reason);
+    assert.equal(r.body.data.results[1].reason, 'key is outside your upload namespace', 'the cause, not the error title');
     assert.deepEqual(r.body.data.keys, [keys[0], keys[1]], 'keys lists the confirmed ones only');
     assert.deepEqual(calls.tagged, [[keys[0], 'active'], [keys[1], 'active']], 'the foreign key was never promoted');
 
@@ -5936,6 +5936,7 @@ test('admin confirm reports each key separately and keeps the good ones', async 
 
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.data.results.map((x) => x.status), ['confirmed', 'rejected', 'confirmed']);
+    assert.equal(r.body.data.results[1].reason, 'key is outside the allowed upload roots', 'the cause, not the error title');
     assert.deepEqual(r.body.data.keys, [keys[0], keys[1]], 'keys lists the confirmed ones only');
     assert.deepEqual(calls.tagged, [[keys[0], 'active'], [keys[1], 'active']], 'the bad key was never promoted');
 
@@ -6034,6 +6035,20 @@ test('admin confirm deletes a file whose bytes do not match its extension', asyn
     assert.deepEqual(calls.deleted, [key]);
     assert.deepEqual(calls.tagged, []);
   }, { contentType: 'video/mp4', start: PNG_START });
+
+  // In a mixed batch the rejection says why, in words the panel can show.
+  await withStubbedS3(async () => {
+    const keys = (await h.request('POST', `${P}/admin/uploads/presign`, {
+      token, body: { files: [
+        { target: { type: 'asset', asset_type: 'audio' },  filename: 'chime.mp3' },   // not size-checked
+        { target: { type: 'image_slot', slot: 'banner' }, filename: 'huge.png' },
+      ] },
+    })).body.data.files.map((f) => f.key);
+    const r = await h.request('POST', `${P}/admin/uploads/confirm`, { token, body: { keys } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.data.results.map((x) => x.status), ['confirmed', 'rejected']);
+    assert.equal(r.body.data.results[1].reason, 'file exceeds the 25 MB limit');
+  }, { size: 26 * MB });
 });
 
 test('a video asset needs a thumbnail, and keeps the metadata the panel reports', async () => {

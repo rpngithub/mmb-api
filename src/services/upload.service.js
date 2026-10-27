@@ -303,7 +303,7 @@ async function confirm({ keys }) {
       // caller would read as "that file was invalid".
       if (!err.isOperational) throw err;
       failures.push(err);
-      results.push({ key, status: 'rejected', reason: err.message, code: err.errorCode });
+      results.push({ key, status: 'rejected', reason: uploadLimits.rejectionReason(err), code: err.errorCode });
     }
   }
 

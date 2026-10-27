@@ -242,7 +242,7 @@ async function confirm(body, userId) {
     } catch (err) {
       if (!err.isOperational) throw err;      // a real fault, not this file's fault
       failures.push(err);
-      results.push({ key: item.key, status: 'rejected', reason: err.message, code: err.errorCode });
+      results.push({ key: item.key, status: 'rejected', reason: uploadLimits.rejectionReason(err), code: err.errorCode });
     }
   }
 
