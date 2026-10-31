@@ -4,6 +4,7 @@ const billingRepo = require('../repositories/userBillingDetail.repository');
 const userUpload  = require('./userUpload.service');
 const sessionService = require('./session.service');
 const accountPurge   = require('./accountPurge.service');
+const emailService   = require('./email.service');
 const { Op } = require('sequelize');
 const { Business, UserPreference, Language, UserLanguage, sequelize } = require('../models');
 const { NotFoundError, ConflictError, ValidationError } = require('../errors');
@@ -41,6 +42,9 @@ async function getProfile(userId) {
   return {
     ...user.toJSON(),
     has_password: Boolean(withHash && withHash.password_hash),
+    // Whether "Lost my mobile" can use this address (subject to its 30-day age);
+    // see GET /users/me/phone-change/options for the full answer.
+    email_verified: Boolean(user.email && user.email_verified_at),
     onboarding:   await onboardingState(user),
   };
 }
@@ -63,10 +67,18 @@ async function updateProfile(userId, data) {
     }
   }
 
+  // A verified email is a recovery channel, so it is refused here (403) and changes
+  // only through the OTP route; see email.service. Re-sending the same address is
+  // not a change.
+  const emailChanging = emailService.assertProfileEmailChangeAllowed(user, data.email);
+
   const patch = { ...data };
 
   // A cleared name is stored as NULL, never '', so "has no name" has one shape.
   if (typeof patch.name === 'string') patch.name = patch.name.trim() || null;
+
+  // Applied on its own below — it also clears the verification and retires links.
+  delete patch.email;
 
   // The upgraded account has no business yet, so the flow reopens at the business
   // details step — the app resumes there, and POST /businesses stamps it again.
@@ -83,7 +95,16 @@ async function updateProfile(userId, data) {
     patch.onboarding_completed_at = new Date();
   }
 
-  await userRepo.update(userId, patch);
+  if (emailChanging) {
+    const next = data.email ? String(data.email).trim() : null;
+    if (next) {
+      const taken = await userRepo.findByEmail(next);
+      if (taken && taken.id !== user.id) throw new ConflictError('This email address is already in use');
+    }
+    await emailService.applyEmailChange(user, next);
+  }
+
+  if (Object.keys(patch).length) await userRepo.update(userId, patch);
 
   // Replacing or clearing the photo orphans the old file — delete it and refund
   // the storage. After the write, so a storage hiccup cannot undo the save.

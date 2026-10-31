@@ -2,8 +2,12 @@ const express      = require('express');
 const router       = express.Router();
 const controller   = require('../controllers/user.controller');
 const favourites   = require('../controllers/favourite.controller');
+const phoneChange  = require('../controllers/phoneChange.controller');
+const email        = require('../controllers/email.controller');
 const authenticate = require('../middlewares/authenticate');
 const validate     = require('../middlewares/validate');
+const rateLimiter  = require('../middlewares/rateLimiter');
+const { otpSchema, newPhoneSchema, changeEmailSchema } = require('../validators/phoneChange.validator');
 const { upsertBillingSchema } = require('../validators/billing.validator');
 const {
   updateProfileSchema, setPasswordSchema, changePasswordSchema, updatePreferencesSchema,
@@ -38,6 +42,11 @@ const {
  *       business — or skip this PATCH and call POST /businesses directly, which
  *       upgrades the account in the same step. `business` → `personal` is allowed
  *       only while onboarding is still open; afterwards it is a 409.
+ *
+ *       `email` can be set or changed here only while it is UNVERIFIED (check
+ *       `email_verified` on `GET /users/me`); changing it keeps it unverified. A verified
+ *       email is refused with 403 `EMAIL_CHANGE_REQUIRES_OTP` — use
+ *       `POST /users/me/email/change/send-otp` then `PUT /users/me/email`.
  *     tags: [User]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -172,6 +181,195 @@ router.post('/me/sessions/revoke-others', authenticate, controller.revokeOtherSe
  *                     deletion_scheduled_at: { type: string, format: date-time, description: When the account's data is permanently deleted unless an admin reactivates it first }
  */
 router.post('/me/deactivate', authenticate, controller.deactivate);
+
+/**
+ * @swagger
+ * /users/me/email/verification:
+ *   post:
+ *     summary: Email me a link to verify my email address
+ *     description: >-
+ *       Mails a link to `{APP_WEB_URL}/verify-email?token=…`. The page behind it calls
+ *       `POST /auth/email/verify` with the token. The link lasts 24 hours and requesting
+ *       another retires it. A verified email is what "Lost my mobile" relies on, once it
+ *       has been verified for 30 days. In development/test nothing is mailed and the
+ *       response carries `dev_link` / `dev_token` instead (like the echoed OTP).
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "Sent — `{ message, email (masked), expires_at }`" }
+ *       409: { description: "`EMAIL_NOT_SET` or `EMAIL_ALREADY_VERIFIED`" }
+ *       429: { $ref: '#/components/responses/RateLimitError' }
+ */
+router.post('/me/email/verification', authenticate, rateLimiter.mailLink, email.sendVerification);
+
+/**
+ * @swagger
+ * /users/me/email/change/send-otp:
+ *   post:
+ *     summary: OTP to my current phone, to change a verified email
+ *     description: >-
+ *       A VERIFIED email can't be changed with `PATCH /users/me` (that returns 403
+ *       `EMAIL_CHANGE_REQUIRES_OTP`). Call this, then `PUT /users/me/email` with the OTP.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "`{ message, phone (masked) }` — plus `otp` in development/test" }
+ *       429: { $ref: '#/components/responses/RateLimitError' }
+ */
+router.post('/me/email/change/send-otp', authenticate, rateLimiter.accountOtpSend, email.sendChangeOtp);
+
+/**
+ * @swagger
+ * /users/me/email:
+ *   put:
+ *     summary: Change or remove my email, proven by an OTP to my phone
+ *     description: >-
+ *       Sets, replaces or (with `email: null`) removes the address. The new address is
+ *       unverified, so verify it again; the 30-day clock for "Lost my mobile" restarts.
+ *       The old verified address is told about the change.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email, otp]
+ *             properties:
+ *               email: { type: string, format: email, nullable: true }
+ *               otp:   { type: string, example: "123456" }
+ *     responses:
+ *       200: { description: "`{ message, email, email_verified: false }`" }
+ *       401: { description: Wrong or expired OTP }
+ *       409: { description: Email already in use }
+ */
+router.put('/me/email', authenticate, validate(changeEmailSchema), rateLimiter.auth, email.changeEmail);
+
+/**
+ * @swagger
+ * /users/me/phone-change/options:
+ *   get:
+ *     summary: What the "Change my mobile number" screen can offer
+ *     description: >-
+ *       Call before showing the screen. `otp_to_current` is option 1 ("Send OTP to
+ *       99xxxxxx88"). `lost_phone` is option 2 ("Lost my mobile"); when
+ *       `available` is false, show it disabled with the `reason`:
+ *       `EMAIL_NOT_SET`, `EMAIL_NOT_VERIFIED`, or `EMAIL_VERIFICATION_TOO_RECENT`
+ *       (with `eligible_from`).
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Options
+ *         content:
+ *           application/json:
+ *             example:
+ *               success: true
+ *               data:
+ *                 current_phone: "+91 99xxxxxx88"
+ *                 otp_to_current: { available: true }
+ *                 lost_phone: { available: false, reason: EMAIL_VERIFICATION_TOO_RECENT, email: "ra***@gmail.com", eligible_from: "2026-11-28T10:00:00.000Z" }
+ */
+router.get('/me/phone-change/options', authenticate, phoneChange.options);
+
+/**
+ * @swagger
+ * /users/me/phone-change/start:
+ *   post:
+ *     summary: "Option 1, step 1: OTP to my CURRENT number"
+ *     description: >-
+ *       Opens a change request (15 minutes) and texts an OTP to the current number.
+ *       Calling it again restarts the request — that is the "resend". Next:
+ *       `verify-old`, `new-phone`, `verify-new`, each with the returned `request_uid`.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "`{ request_uid, phone (masked), expires_at, next_step: verify_old }` — plus `otp` in development/test" }
+ *       429: { $ref: '#/components/responses/RateLimitError' }
+ */
+router.post('/me/phone-change/start', authenticate, rateLimiter.accountOtpSend, phoneChange.start);
+
+/**
+ * @swagger
+ * /users/me/phone-change/{uid}/verify-old:
+ *   post:
+ *     summary: "Option 1, step 2: confirm the OTP sent to my current number"
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [otp], properties: { otp: { type: string } } } } }
+ *     responses:
+ *       200: { description: "`{ request_uid, next_step: new_phone }`" }
+ *       401: { description: Wrong or expired OTP }
+ *       404: { description: Request not found, not yours, or expired — start again }
+ *       429: { description: Five wrong attempts — the OTP is dead; start again }
+ */
+router.post('/me/phone-change/:uid/verify-old', authenticate, validate(otpSchema), rateLimiter.auth, phoneChange.verifyOld);
+
+/**
+ * @swagger
+ * /users/me/phone-change/{uid}/new-phone:
+ *   post:
+ *     summary: "Option 1, step 3: the new number — texts it an OTP"
+ *     description: Call again to resend, or to correct the number.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [phone], properties: { phone: { type: string, example: "+919876543210" } } } } }
+ *     responses:
+ *       200: { description: "`{ phone (masked), next_step: verify_new }` — plus `otp` in development/test" }
+ *       400: { description: Not an Indian mobile, or it is already your number }
+ *       409: { description: "`PHONE_TAKEN` (another account has it) or `STEP_OUT_OF_ORDER` (current number not confirmed yet)" }
+ */
+router.post('/me/phone-change/:uid/new-phone', authenticate, validate(newPhoneSchema), rateLimiter.otpSend, rateLimiter.accountOtpSend, phoneChange.submitNewPhone);
+
+/**
+ * @swagger
+ * /users/me/phone-change/{uid}/verify-new:
+ *   post:
+ *     summary: "Option 1, step 4: confirm the new number's OTP — the number is changed"
+ *     description: >-
+ *       Swaps the number and ends EVERY session on the account, this one included, then
+ *       returns a fresh `access_token` / `refresh_token` for this device: replace the
+ *       stored tokens with these. Other devices must sign in again with the new number.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [otp], properties: { otp: { type: string } } } } }
+ *     responses:
+ *       200: { description: "`{ message, phone, access_token, refresh_token }`" }
+ *       401: { description: Wrong or expired OTP }
+ *       409: { description: "`PHONE_TAKEN`, `STEP_OUT_OF_ORDER`, or the number changed meanwhile" }
+ */
+router.post('/me/phone-change/:uid/verify-new', authenticate, validate(otpSchema), rateLimiter.auth, phoneChange.verifyNew);
+
+/**
+ * @swagger
+ * /users/me/phone-change/lost-phone:
+ *   post:
+ *     summary: "Option 2 (Lost my mobile): email me a link to change my number"
+ *     description: >-
+ *       Needs an email verified at least 30 days ago; otherwise 403 with `error.code`
+ *       `EMAIL_NOT_SET`, `EMAIL_NOT_VERIFIED` or `EMAIL_VERIFICATION_TOO_RECENT`
+ *       (`details[0].eligible_from` says when). Mails a link to
+ *       `{APP_WEB_URL}/change-phone?token=…`, valid 30 minutes and once. The page or app
+ *       screen behind it uses the public `/auth/phone-reset/*` endpoints. In
+ *       development/test nothing is mailed and the response carries `dev_link` / `dev_token`.
+ *     tags: [User]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200: { description: "`{ message, email (masked), expires_at }`" }
+ *       403: { description: Email not eligible — see the codes above }
+ *       429: { $ref: '#/components/responses/RateLimitError' }
+ */
+router.post('/me/phone-change/lost-phone', authenticate, rateLimiter.mailLink, phoneChange.lostPhone);
 
 /**
  * @swagger

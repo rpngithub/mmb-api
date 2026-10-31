@@ -5,7 +5,7 @@ const notifyController = require('../controllers/devNotification.controller');
 const authenticate = require('../middlewares/authenticate');
 const validate     = require('../middlewares/validate');
 const rateLimiter  = require('../middlewares/rateLimiter');
-const { testSmsSchema, testNotificationSchema } = require('../validators/dev.validator');
+const { testSmsSchema, testNotificationSchema, testEmailSchema } = require('../validators/dev.validator');
 
 /**
  * @swagger
@@ -61,6 +61,14 @@ const { testSmsSchema, testNotificationSchema } = require('../validators/dev.val
 // AND an explicit opt-in (this).
 if (process.env.ENABLE_SMS_TEST === 'true') {
   router.post('/test-sms', rateLimiter.smsTest, validate(testSmsSchema), controller.testSms);
+}
+
+// POST /dev/test-email — sends a real email through the configured SMTP server, with
+// `dry_run` to check the connection and login only. Undocumented on purpose and
+// development only (not staging, where the rest of this router is mounted): it is
+// unauthenticated and mails any address it is given.
+if (process.env.NODE_ENV === 'development') {
+  router.post('/test-email', rateLimiter.mailTest, validate(testEmailSchema), controller.testEmail);
 }
 
 /**

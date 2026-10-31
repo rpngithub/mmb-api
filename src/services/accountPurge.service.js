@@ -9,7 +9,7 @@ const {
   User, Business, Project, ProjectExport, UserFrame, UserVariant, UserUpload, UserQuotaUsage, UserQuotaCounter, UserQuotaGrant,
   QuotaUsageEvent, UserBillingDetail, UserPreference, UserLanguage, UserNotification,
   UserNotificationSetting, Feedback, Font, UserSession, TokenBlacklist, OtpCode, UserSubscription,
-  Payment, BusinessCategory, ActivityLog,
+  Payment, BusinessCategory, ActivityLog, UserOtpChallenge, EmailVerificationToken, PhoneChangeRequest,
 } = models;
 
 // Editable from the admin panel (/admin/app-settings), in MINUTES. Migration 053
@@ -131,6 +131,11 @@ async function purgeUser(user) {
     await UserSession.destroy({ where: { actor_type: 'user', actor_id: user.id }, transaction });
     await TokenBlacklist.destroy({ where: { actor_type: 'user', actor_id: user.id }, transaction });
     if (user.phone) await OtpCode.destroy({ where: { phone: user.phone }, transaction });
+    // These do have an FK, but it only cascades on a DELETE and the user row stays
+    // as a tombstone. They hold phone numbers and email addresses, so they go.
+    await UserOtpChallenge.destroy(byUser);
+    await EmailVerificationToken.destroy(byUser);
+    await PhoneChangeRequest.destroy(byUser);
 
     // A suggested industry outlives its suggester (SET NULL, per migration 014).
     await BusinessCategory.update({ suggested_by_user_id: null }, { where: { suggested_by_user_id: user.id }, transaction });
@@ -141,6 +146,7 @@ async function purgeUser(user) {
       name:                 'Deleted User',
       phone:                null,
       email:                null,
+      email_verified_at:    null,
       password_hash:        null,
       profile_photo_s3_key: null,
       account_type:         null,

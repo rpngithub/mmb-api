@@ -26,4 +26,11 @@ const testNotificationSchema = Joi.object({
   variables: Joi.object(),
 });
 
-module.exports = { testSmsSchema, testNotificationSchema };
+// POST /dev/test-email — the SMTP diagnostic. `dry_run` only checks the connection
+// and login. (No .default(): see the note above — the service defaults it.)
+const testEmailSchema = Joi.object({
+  to:      Joi.string().email().required(),
+  dry_run: Joi.boolean(),
+});
+
+module.exports = { testSmsSchema, testNotificationSchema, testEmailSchema };
