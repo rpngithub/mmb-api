@@ -6151,14 +6151,40 @@ const mkFrameCategory = async (over = {}) => {
   return c;
 };
 
-// A publishable frame by default — the gate is exercised explicitly below.
+// The size a frame version is drawn for: the configured default, else any size,
+// else one made for the run (the seeders ship no sizes).
+let fallbackFrameSize = null;
+const frameSizeId = async () => {
+  const configured = await require('../src/services/templateFamilyPicker').defaultSizeId();
+  if (configured) return configured;
+  const any = await models.TemplateSize.findOne({ order: [['id', 'ASC']] });
+  if (any) return any.id;
+  if (!fallbackFrameSize) {
+    const stamp = `${Date.now()}${frameSeq++}`;
+    fallbackFrameSize = await models.TemplateSize.create({ uid: uuid(), name: `TST Frame Default ${stamp}`, slug: `tst-frame-default-${stamp}`, width: 1080, height: 1350 });
+    track.templateSizes.push(fallbackFrameSize.id);
+  }
+  return fallbackFrameSize.id;
+};
+
+// One version of a frame — active, text-free, default size unless overridden.
+// Cascades away with its frame.
+const mkFrameVersion = async (frame, over = {}) => models.FrameVersion.create({
+  uid: uuid(), frame_id: frame.id, language_id: null, size_id: await frameSizeId(),
+  content: '{"layers":[]}', thumbnail_s3_key: 'frames/thumbnail/x.png', status: 'active', ...over,
+});
+
+// A publishable frame by default, with one version carrying `content` and
+// `thumbnail_s3_key` — pass both as null for a frame with no version at all. The
+// gate is exercised explicitly below.
 const mkFrame = async (over = {}) => {
   const stamp = `${Date.now()}${frameSeq++}`;
+  const { content = '{"layers":[]}', thumbnail_s3_key = 'frames/thumbnail/x.png', ...frameOver } = over;
   const f = await models.Frame.create({
-    uid: uuid(), name: `TST Frame ${stamp}`, content: '{"layers":[]}',
-    thumbnail_s3_key: 'frames/thumbnail/x.png', status: 'active', ...over,
+    uid: uuid(), name: `TST Frame ${stamp}`, status: 'active', ...frameOver,
   });
   track.frames.push(f.id);
+  if (content !== null || thumbnail_s3_key !== null) await mkFrameVersion(f, { content, thumbnail_s3_key });
   return f;
 };
 
@@ -6580,11 +6606,37 @@ test('the admin publish gate holds a frame back until it is complete and priced 
   const bare = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { status: 'active' } });
   assert.equal(bare.status, 400);
   const fields = bare.body.error.details.map((d) => d.field);
-  assert.ok(['category_id', 'content', 'thumbnail_s3_key'].every((f) => fields.includes(f)), fields.join(','));
+  assert.ok(['category_id', 'versions'].every((f) => fields.includes(f)), fields.join(','));
 
-  await h.request('PATCH', `${P}/admin/frames/${uid}`, {
-    token, body: { category_id: cat.id, content: '{"layers":[]}', thumbnail_s3_key: 'frames/thumbnail/y.png' },
+  // The design lives on versions now; the frame itself refuses it outright.
+  const oldShape = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { content: '{"layers":[]}' } });
+  assert.equal(oldShape.status, 400, 'content on the frame is the old shape — a loud 400, not a silent drop');
+
+  // A version publishes only once it can render.
+  const sizeId = await frameSizeId();
+  const v = await h.request('POST', `${P}/admin/frame-versions`, {
+    token, body: { frame_id: created.body.data.id, language_id: null, size_id: sizeId, status: 'active' },
   });
+  assert.equal(v.status, 400);
+  assert.deepEqual(v.body.error.details.map((d) => d.field).sort(), ['content', 'thumbnail_s3_key']);
+
+  const version = await h.request('POST', `${P}/admin/frame-versions`, {
+    token, body: { frame_id: created.body.data.id, language_id: null, size_id: sizeId, content: '{"layers":[]}', thumbnail_s3_key: 'frames/thumbnail/y.png', status: 'active' },
+  });
+  assert.equal(version.status, 201);
+
+  // One version per (language, size), and a text-free frame takes no language.
+  const dupe = await h.request('POST', `${P}/admin/frame-versions`, {
+    token, body: { frame_id: created.body.data.id, language_id: null, size_id: sizeId },
+  });
+  assert.equal(dupe.status, 409);
+  const en = await models.Language.findOne({ where: { code: 'en' } });
+  const mixed = await h.request('POST', `${P}/admin/frame-versions`, {
+    token, body: { frame_id: created.body.data.id, language_id: en.id, size_id: sizeId },
+  });
+  assert.equal(mixed.status, 400, 'a frame is all text-free or all languages');
+
+  await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { category_id: cat.id } });
 
   // Priced but not marked premium, and vice versa — both are refused, because the
   // free path skips checkout entirely and would give away a frame with a price.
@@ -6598,6 +6650,11 @@ test('the admin publish gate holds a frame back until it is complete and priced 
   const ok = await h.request('PATCH', `${P}/admin/frames/${uid}`, { token, body: { status: 'active', is_premium: 1, price: 30 } });
   assert.equal(ok.status, 200);
   assert.equal(ok.body.data.status, 'active');
+
+  // Losing the required version takes a live frame back to draft.
+  const pulled = await h.request('PATCH', `${P}/admin/frame-versions/${version.body.data.uid}`, { token, body: { status: 'inactive' } });
+  assert.equal(pulled.status, 200);
+  assert.equal((await models.Frame.findByPk(created.body.data.id)).status, 'draft');
 
   // Frames are their own permission domain, separate from templates.
   assert.equal((await h.request('GET', `${P}/admin/frames`, { token: h.adminToken(['templates.*']) })).status, 403);
@@ -6630,6 +6687,10 @@ test('the admin frames list pages, searches and reports the publish checklist pe
   assert.equal(all.body.meta.total, 4, 'meta.total counts the whole match, not the page');
   assert.equal(all.body.data.length, 4);
   assert.equal(all.body.data[0].content, undefined, 'the heavy payload stays out of the list');
+  const first = all.body.data.find((f) => f.id === made[0].id);
+  assert.equal(Number(first.version_count), 1);
+  assert.equal(first.text_free, true);
+  assert.equal(first.thumbnail_s3_key, 'frames/thumbnail/x.png', 'the list thumbnail comes from a version');
   assert.ok(all.body.data.some((f) => f.status === 'draft'), 'admin sees every status, unlike the store');
 
   const paged = await h.request('GET', `${P}/admin/frames?search=${tag}&limit=2&offset=0`, { token });
@@ -6645,10 +6706,10 @@ test('the admin frames list pages, searches and reports the publish checklist pe
   // The checklist: exactly what the gate would reject, without fetching each row.
   const bad = all.body.data.find((f) => f.id === incomplete.id);
   assert.equal(bad.is_publishable, false);
-  assert.equal(Number(bad.has_content), 0);
-  assert.equal(Number(bad.has_thumbnail), 0);
+  assert.equal(Number(bad.has_required_version), 0);
+  assert.equal(Number(bad.version_count), 0);
   const badFields = bad.missing_for_publish.map((m) => m.field);
-  assert.ok(['category_id', 'content', 'thumbnail_s3_key'].every((f) => badFields.includes(f)), badFields.join(','));
+  assert.ok(['category_id', 'versions'].every((f) => badFields.includes(f)), badFields.join(','));
 
   const good = all.body.data.find((f) => f.id === made[0].id);
   assert.equal(good.is_publishable, true);
@@ -6730,6 +6791,329 @@ test('frames reorder in one transaction, and the store honours the order', async
   assert.deepEqual(await storeOrder(), [c.id, a.id, b.id], 'the failed batch left the order untouched');
 
   assert.equal((await h.request('PATCH', `${P}/admin/frames/reorder`, { token: h.adminToken(['frames.read']), body: { ids: [a.uid] } })).status, 403);
+});
+
+// ---------- Frame families: one frame, many language × size versions ----------
+const mkFrameSize = async (label, width, height) => {
+  const stamp = `${Date.now()}${frameSeq++}`;
+  const s = await models.TemplateSize.create({ uid: uuid(), name: `TST Frame ${label} ${stamp}`, slug: `tst-frame-${label}-${stamp}`, width, height });
+  track.templateSizes.push(s.id);
+  return s;
+};
+const lang = async (code) => models.Language.findOne({ where: { code } });
+
+test('the frames store shows one card per frame, picked by language and size like templates', async () => {
+  const cat    = await mkFrameCategory();
+  const square = await mkFrameSize('1x1', 1080, 1080);
+  const tall   = await mkFrameSize('4x5', 1080, 1350);
+  const [en, ta, hi] = await Promise.all([lang('en'), lang('ta'), lang('hi')]);
+
+  // One design in English 1:1, Tamil 1:1 and Tamil 4:5.
+  const multi = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(multi, { language_id: en.id, size_id: square.id, thumbnail_s3_key: 'frames/thumbnail/en-1x1.png' });
+  await mkFrameVersion(multi, { language_id: ta.id, size_id: square.id, thumbnail_s3_key: 'frames/thumbnail/ta-1x1.png' });
+  await mkFrameVersion(multi, { language_id: ta.id, size_id: tall.id,   thumbnail_s3_key: 'frames/thumbnail/ta-4x5.png' });
+  // Hindi only — hidden from anyone who did not ask for Hindi.
+  const hindi = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(hindi, { language_id: hi.id, size_id: square.id });
+  // Text-free — shown to everyone.
+  const plain = await mkFrame({ category_id: cat.id });
+
+  const ids = (r) => r.body.data.map((f) => f.id);
+
+  const guest = await h.request('GET', `${P}/frames?category=${cat.slug}`);
+  assert.equal(guest.status, 200);
+  assert.ok(ids(guest).includes(multi.id) && ids(guest).includes(plain.id));
+  assert.ok(!ids(guest).includes(hindi.id), 'no version in the viewer languages (English by default) → hidden');
+  const card = guest.body.data.find((f) => f.id === multi.id);
+  assert.equal(card.version.language_id, en.id, 'an English viewer sees the English version');
+  assert.equal(card.thumbnail_s3_key, 'frames/thumbnail/en-1x1.png', 'the card thumbnail is the picked version');
+  assert.equal(card.available_sizes.length, 2);
+  assert.equal(card.available_languages.length, 2);
+  assert.equal(card.content, undefined);
+  assert.equal(guest.body.data.filter((f) => f.id === multi.id).length, 1, 'one card per frame, not per version');
+
+  const tamil = await h.request('GET', `${P}/frames?category=${cat.slug}&language=ta`);
+  assert.equal(tamil.body.data.find((f) => f.id === multi.id).version.language_id, ta.id);
+
+  const tallOnly = await h.request('GET', `${P}/frames?category=${cat.slug}&language=ta&size=${tall.slug}`);
+  assert.deepEqual(ids(tallOnly), [multi.id], 'a size filter keeps only frames drawn for that size');
+  assert.equal(tallOnly.body.data[0].version.size_id, tall.id);
+  assert.equal(tallOnly.body.meta.total, 1);
+
+  const everything = await h.request('GET', `${P}/frames?category=${cat.slug}&all_languages=1`);
+  assert.ok(ids(everything).includes(hindi.id), 'all_languages opts out of the language narrowing');
+
+  // A switched-off category takes its frames out of the store.
+  await cat.update({ is_active: 0 });
+  assert.deepEqual(ids(await h.request('GET', `${P}/frames?category=${cat.slug}`)), []);
+  assert.ok(!ids(await h.request('GET', `${P}/frames?all_languages=1&limit=100`)).includes(plain.id));
+  await cat.update({ is_active: 1 });
+});
+
+test('frame detail serves the version for the poster size, and its content only to an owner', async () => {
+  const cat    = await mkFrameCategory();
+  const square = await mkFrameSize('d1x1', 1080, 1080);
+  const tall   = await mkFrameSize('d4x5', 1080, 1350);
+  const story  = await mkFrameSize('d9x16', 1080, 1920);
+  const [en, ta] = await Promise.all([lang('en'), lang('ta')]);
+
+  const frame = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(frame, { language_id: en.id, size_id: square.id, content: '{"v":"en-1x1"}' });
+  await mkFrameVersion(frame, { language_id: en.id, size_id: tall.id,   content: '{"v":"en-4x5"}' });
+  await mkFrameVersion(frame, { language_id: ta.id, size_id: tall.id,   content: '{"v":"ta-4x5"}' });
+  await mkFrameVersion(frame, { language_id: ta.id, size_id: story.id,  content: '{"v":"ta-draft"}', status: 'draft' });
+
+  const u = await mkUser('FrameDetail');
+  const token = h.userTokenFor(u.id);
+
+  const before = await h.request('GET', `${P}/frames/${frame.uid}?size=${tall.slug}`, { token });
+  assert.equal(before.status, 200);
+  assert.equal(before.body.data.version.size_id, tall.id);
+  assert.equal(before.body.data.content, undefined, 'not owned → no payload, whatever version');
+  assert.equal(before.body.data.versions.length, 3, 'every ACTIVE version is listed for a switcher');
+
+  await h.request('POST', `${P}/frames/${frame.uid}/add`, { token });
+
+  const tamil = await h.request('GET', `${P}/frames/${frame.uid}?size=${tall.slug}&language=ta`, { token });
+  assert.equal(tamil.body.data.content, '{"v":"ta-4x5"}');
+
+  // Language falls back: no Tamil 1:1, so the English 1:1 is served.
+  const fallback = await h.request('GET', `${P}/frames/${frame.uid}?size=${square.slug}&language=ta`, { token });
+  assert.equal(fallback.body.data.content, '{"v":"en-1x1"}');
+
+  // Size does not: a frame has no live 9:16 version, so nothing is served for it.
+  const noFit = await h.request('GET', `${P}/frames/${frame.uid}?size=${story.slug}`, { token });
+  assert.equal(noFit.status, 200);
+  assert.equal(noFit.body.data.version, null, 'size is strict — a 4:5 frame never lands on a 9:16 poster');
+  assert.equal(noFit.body.data.content, undefined);
+  assert.equal(noFit.body.data.available_sizes.length, 2, 'but the client still learns what it comes in');
+
+  // Without a size it is picked like a card.
+  const plain = await h.request('GET', `${P}/frames/${frame.uid}`, { token });
+  assert.equal(plain.body.data.version.language_id, en.id);
+  assert.ok(plain.body.data.content);
+
+  // My Frames carries a thumbnail and what the frame comes in.
+  const mine = (await h.request('GET', `${P}/frames/mine`, { token })).body.data;
+  assert.equal(mine[0].Frame.uid, frame.uid);
+  assert.equal(mine[0].Frame.available_sizes.length, 2);
+  assert.equal(mine[0].Frame.content, undefined);
+});
+
+test('merging a frame moves its versions and its owners, without giving a premium frame away', async () => {
+  const token  = h.adminToken();
+  const cat    = await mkFrameCategory();
+  const square = await mkFrameSize('m1x1', 1080, 1080);
+  const tall   = await mkFrameSize('m4x5', 1080, 1350);
+
+  // The same design uploaded twice, once per size. The target is premium.
+  const target = await mkFrame({ category_id: cat.id, is_premium: 1, price: 40, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(target, { size_id: square.id });
+  const source = await mkFrame({ category_id: cat.id, is_premium: 1, price: 40, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(source, { size_id: tall.id });
+  const clash  = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(clash, { size_id: square.id });
+
+  const buyer   = await mkUser('MergeBuyer');
+  const both    = await mkUser('MergeBoth');
+  const freebie = await mkUser('MergeFree');
+  const own = (user, frame, over) => models.UserFrame.create({ uid: uuid(), user_id: user.id, frame_id: frame.id, status: 'active', acquired_at: new Date(), ...over });
+  const buyerRow = await own(buyer, source, { acquired_via: 'purchase' });
+  await own(both, source, { acquired_via: 'purchase' });
+  const bothTarget = await own(both, target, { acquired_via: 'purchase', status: 'removed' });
+  const freebieRow = await own(freebie, source, { acquired_via: 'free' });
+
+  const biz = await models.Business.create({ uid: uuid(), user_id: buyer.id, name: `TST Merge Biz ${Date.now()}`, active_frame_id: source.id });
+
+  // A slot clash refuses the whole merge.
+  const conflict = await h.request('POST', `${P}/admin/frames/${clash.uid}/merge`, { token, body: { into_frame_uid: target.uid } });
+  assert.equal(conflict.status, 409);
+
+  const dry = await h.request('POST', `${P}/admin/frames/${source.uid}/merge?dry_run=1`, { token, body: { into_frame_uid: target.uid } });
+  assert.equal(dry.status, 200);
+  assert.equal(dry.body.data.applied, false);
+  assert.deepEqual(dry.body.data.owners, { carried: 1, combined: 1, dropped: 1 });
+  assert.equal((await models.FrameVersion.count({ where: { frame_id: source.id } })), 1, 'a dry run changes nothing');
+
+  const merged = await h.request('POST', `${P}/admin/frames/${source.uid}/merge`, { token, body: { into_frame_uid: target.uid } });
+  assert.equal(merged.status, 200);
+  assert.equal(merged.body.data.applied, true);
+
+  assert.equal(await models.FrameVersion.count({ where: { frame_id: target.id } }), 2, 'the target now comes in both sizes');
+  assert.equal((await models.Frame.findByPk(source.id)).status, 'inactive', 'the emptied source is archived, never deleted');
+
+  assert.equal((await buyerRow.reload()).frame_id, target.id, 'a sole owner is carried, purchase intact');
+  assert.equal((await bothTarget.reload()).status, 'active', 'an owner of both keeps one row, upgraded to the better');
+  assert.equal((await freebieRow.reload()).status, 'removed', 'a free owner never carries into a premium frame');
+  assert.equal((await biz.reload()).active_frame_id, target.id, 'businesses wearing the source follow it');
+
+  const buyerMine = await h.request('GET', `${P}/frames/mine`, { token: h.userTokenFor(buyer.id) });
+  assert.deepEqual(buyerMine.body.data.map((r) => r.Frame.uid), [target.uid]);
+});
+
+test('moving a version takes it to another frame and drafts a live source left without its required one', async () => {
+  const token  = h.adminToken();
+  const cat    = await mkFrameCategory();
+  const square = await mkFrameSize('v1x1', 1080, 1080);
+  const tall   = await mkFrameSize('v4x5', 1080, 1350);
+  const en     = await lang('en');
+  const ta     = await lang('ta');
+
+  const source = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  const enV    = await mkFrameVersion(source, { language_id: en.id, size_id: square.id });
+  await mkFrameVersion(source, { language_id: ta.id, size_id: square.id });
+  const target = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(target, { language_id: en.id, size_id: tall.id });
+
+  const dry = await h.request('POST', `${P}/admin/frame-versions/${enV.uid}/move?dry_run=1`, { token, body: { frame_uid: target.uid } });
+  assert.equal(dry.status, 200);
+  assert.equal(dry.body.data.source.outcome, 'draft', 'only a Tamil version would be left');
+
+  const moved = await h.request('POST', `${P}/admin/frame-versions/${enV.uid}/move`, { token, body: { frame_uid: target.uid } });
+  assert.equal(moved.status, 200);
+  assert.equal((await enV.reload()).frame_id, target.id);
+  assert.equal((await source.reload()).status, 'draft');
+
+  // A text-free version cannot join a frame with languages.
+  const textFree = await mkFrame({ category_id: cat.id });
+  const tfV = await models.FrameVersion.findOne({ where: { frame_id: textFree.id } });
+  const refused = await h.request('POST', `${P}/admin/frame-versions/${tfV.uid}/move`, { token, body: { frame_uid: target.uid } });
+  assert.equal(refused.status, 409);
+});
+
+// ---------- Frame version bundles (ZIP per version, like templates) ----------
+// S3 is swapped for an in-memory folder: the listing, tag flips and deletes are what
+// the bundle routes decide, and those are what is asserted.
+const withFakeBucket = async (fn) => {
+  const s3 = require('../src/utils/s3Helper');
+  const original = { listKeys: s3.listKeys, putObjectTagging: s3.putObjectTagging, deleteByPrefix: s3.deleteByPrefix };
+  const bucket = new Map();   // key -> tag
+  const deleted = [];
+  s3.listKeys = async (prefix) => [...bucket.keys()].filter((k) => k.startsWith(prefix));
+  s3.putObjectTagging = async (key, status) => { bucket.set(key, status); };
+  s3.deleteByPrefix = async (prefix) => {
+    deleted.push(prefix);
+    for (const k of [...bucket.keys()]) if (k.startsWith(prefix)) bucket.delete(k);
+  };
+  try { return await fn({ bucket, deleted }); } finally { Object.assign(s3, original); }
+};
+
+test('frame files presign under frames/<version uid>/, and need frames.update', async () => {
+  const frame = await mkFrame();
+  const v = await models.FrameVersion.findOne({ where: { frame_id: frame.id } });
+
+  await withStubbedS3(async () => {
+    const r = await h.request('POST', `${P}/admin/uploads/presign`, {
+      token: h.adminToken(['frames.*']),
+      body: { files: [
+        { target: { type: 'frame_file', frame_version_uid: v.uid }, filename: 'frame.json' },
+        { target: { type: 'frame_file', frame_version_uid: v.uid }, filename: 'intro.mp4', content_type: 'video/mp4', size: 4096 },
+      ] },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.data.files.map((f) => f.key), [`frames/${v.uid}/frame.json`, `frames/${v.uid}/intro.mp4`],
+      'names preserved, flat — the design references them by bare filename; an mp4 is not refused as a non-image');
+    assert.equal(r.body.data.files[0].required_headers['x-amz-tagging'], 'status=pending');
+
+    const denied = await h.request('POST', `${P}/admin/uploads/presign`, {
+      token: h.adminToken(['templates.*']),
+      body: { target: { type: 'frame_file', frame_version_uid: v.uid }, filename: 'frame.json' },
+    });
+    assert.equal(denied.status, 403, 'writing into a frame bundle is frames content');
+
+    const noUid = await h.request('POST', `${P}/admin/uploads/presign`, {
+      token: h.adminToken(['*']), body: { target: { type: 'frame_file' }, filename: 'x.json' },
+    });
+    assert.equal(noUid.status, 400);
+  });
+});
+
+test('frame bundle confirm activates the files and saves content + thumbnail; reset clears them', async () => {
+  const token = h.adminToken(['frames.*']);
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id, status: 'draft', content: null, thumbnail_s3_key: null });
+  const v     = await mkFrameVersion(frame, { content: null, thumbnail_s3_key: null, status: 'draft' });
+  const prefix = `frames/${v.uid}/`;
+
+  await withFakeBucket(async ({ bucket, deleted }) => {
+    bucket.set(`${prefix}frame.json`, 'pending');
+    bucket.set(`${prefix}thumbnail.jpg`, 'pending');
+    bucket.set(`${prefix}logo.svg`, 'pending');
+    const confirm = (body) => h.request('POST', `${P}/admin/frame-versions/${v.uid}/bundle/confirm`, { token, body });
+
+    assert.equal((await confirm({})).status, 400, 'at least one of content / thumbnail_filename');
+    assert.equal((await confirm({ content: '{not json' })).status, 400);
+
+    const missing = await confirm({ content: '{"layers":[]}', thumbnail_filename: 'cover.png' });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error.details[0].field, 'thumbnail_filename');
+    assert.ok([...bucket.values()].every((t) => t === 'pending'), 'a refused confirm activates nothing');
+
+    const ok = await confirm({ content: '{"layers":["logo.svg"]}', thumbnail_filename: 'thumbnail.jpg' });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.data.thumbnail_s3_key, `${prefix}thumbnail.jpg`);
+    assert.ok([...bucket.values()].every((t) => t === 'active'), 'every file in the folder is activated');
+
+    // Thumbnail-only swap keeps the saved design.
+    bucket.set(`${prefix}thumb2.png`, 'pending');
+    const swap = await confirm({ thumbnail_filename: 'thumb2.png' });
+    assert.equal(swap.status, 200);
+    await v.reload();
+    assert.equal(v.content, '{"layers":["logo.svg"]}');
+    assert.equal(v.thumbnail_s3_key, `${prefix}thumb2.png`);
+
+    // Now publishable, and the admin detail says so with the server's own checklist.
+    await h.request('PATCH', `${P}/admin/frame-versions/${v.uid}`, { token, body: { status: 'active' } });
+    const detail = await h.request('GET', `${P}/admin/frames/${frame.uid}`, { token });
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.data.is_publishable, true);
+    assert.deepEqual(detail.body.data.missing_for_publish, []);
+    assert.equal(detail.body.data.versions[0].content, undefined);
+    await h.request('PATCH', `${P}/admin/frames/${frame.uid}`, { token, body: { status: 'active' } });
+
+    // The version list carries the thumbnail key the grid needs.
+    const rows = (await h.request('GET', `${P}/admin/frame-versions?frame_uid=${frame.uid}`, { token })).body.data;
+    assert.equal(rows[0].thumbnail_s3_key, `${prefix}thumb2.png`);
+
+    // The app learns the folder bare filenames resolve against.
+    const pub = await h.request('GET', `${P}/frames/${frame.uid}`);
+    assert.equal(pub.body.data.version.asset_prefix, prefix);
+
+    // Reset wipes the folder, clears what pointed into it, and drafts what can no longer be live.
+    const reset = await h.request('POST', `${P}/admin/frame-versions/${v.uid}/bundle/reset`, { token });
+    assert.equal(reset.status, 200);
+    assert.deepEqual(deleted, [prefix]);
+    assert.equal(reset.body.data.content, null);
+    assert.equal(reset.body.data.thumbnail_s3_key, null);
+    assert.equal(reset.body.data.status, 'draft');
+    assert.equal(reset.body.meta.frame_drafted, true);
+    assert.equal((await frame.reload()).status, 'draft');
+
+    assert.equal((await h.request('POST', `${P}/admin/frame-versions/${v.uid}/bundle/reset`, { token: h.adminToken(['frames.read']) })).status, 403);
+  });
+});
+
+test('frame bundle reset keeps a thumbnail stored outside the folder; deleting a version removes its folder', async () => {
+  const token = h.adminToken(['frames.*']);
+  const frame = await mkFrame({ status: 'draft' });   // a 058-style version: slot thumbnail
+  const v = await models.FrameVersion.findOne({ where: { frame_id: frame.id } });
+
+  await withFakeBucket(async ({ deleted }) => {
+    const reset = await h.request('POST', `${P}/admin/frame-versions/${v.uid}/bundle/reset`, { token });
+    assert.equal(reset.status, 200);
+    assert.equal(reset.body.data.thumbnail_s3_key, 'frames/thumbnail/x.png', 'not under frames/<uid>/ → kept');
+    assert.equal(reset.body.data.content, null);
+
+    const gone = await h.request('DELETE', `${P}/admin/frame-versions/${v.uid}`, { token });
+    assert.equal(gone.status, 200);
+    assert.deepEqual(deleted, [`frames/${v.uid}/`, `frames/${v.uid}/`], 'reset, then the delete, each cleared the folder');
+  });
+});
+
+test('frame names are unique in the database too', async () => {
+  const a = await mkFrame();
+  await assert.rejects(models.Frame.create({ uid: uuid(), name: a.name }), (err) => err.name === 'SequelizeUniqueConstraintError');
 });
 
 // ---------- Quota top-ups ----------

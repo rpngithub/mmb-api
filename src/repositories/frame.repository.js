@@ -1,51 +1,56 @@
 const { literal } = require('sequelize');
 const BaseRepository = require('./base.repository');
 const { Frame, FrameCategory } = require('../models');
+const { requiredVersionAttr } = require('../services/framePublish');
 
-// Completeness signals for the admin list, mirroring the publish gate without
-// shipping the heavy `content` blob: SQL answers "is it non-empty?", which is all
-// the checklist needs. Booleans come back as MySQL 1/0.
-const COMPLETENESS_ATTRS = [
-  [literal("(`Frame`.`content` IS NOT NULL AND `Frame`.`content` <> '')"), 'has_content'],
-  [literal("(`Frame`.`thumbnail_s3_key` IS NOT NULL AND `Frame`.`thumbnail_s3_key` <> '')"), 'has_thumbnail'],
+const FRAME = '`Frame`.`id`';
+
+// Correlated count against frame_versions — one query for the whole page.
+const versionCount = (alias, extra = '') =>
+  [literal(`(SELECT COUNT(*) FROM \`frame_versions\` v WHERE v.frame_id = ${FRAME}${extra})`), alias];
+
+// What the admin list needs per row without loading versions' heavy `content`:
+// version counts and the signal the publish checklist reads.
+const ADMIN_ATTRS = [
+  versionCount('version_count'),
+  versionCount('active_version_count', " AND v.status = 'active'"),
+  requiredVersionAttr(FRAME),
 ];
+
+const CATEGORY_ATTRS = ['id', 'uid', 'name', 'slug'];
 
 class FrameRepository extends BaseRepository {
   constructor() { super(Frame); }
 
-  // Store browse. `content` is deliberately excluded: it is the heavy design
-  // payload and no grid needs it — the detail endpoint serves it, and only to
-  // someone who owns the frame.
+  // Store browse. The designs live on frame_versions and are picked per viewer by
+  // the service, so this returns the frames only.
   findForStore(where, options = {}) {
     // `distinct` so the count is COUNT(DISTINCT Frame.id): the category include is
     // a belongsTo and cannot multiply rows today, but a paged total that silently
     // depends on that staying true is the kind of thing that breaks on the next join.
     return this.findAndCountAll(where, {
       distinct: true,
-      attributes: { exclude: ['content'] },
-      include:    [{ model: FrameCategory, attributes: ['id', 'uid', 'name', 'slug'] }],
-      order:      [['display_order', 'ASC'], ['id', 'DESC']],
+      include:  [{ model: FrameCategory, attributes: CATEGORY_ATTRS }],
+      order:    [['display_order', 'ASC'], ['id', 'DESC']],
       ...options,
     });
   }
 
-  // Admin browse. Same exclusion of `content` as the store — the detail route
-  // serves it — plus the completeness signals the publish checklist reads.
+  // Admin browse, with the counts and readiness signal above.
   findForAdmin(where, options = {}) {
-    // `distinct` so the count is COUNT(DISTINCT Frame.id): the category include is
-    // a belongsTo and cannot multiply rows today, but a paged total that silently
-    // depends on that staying true is the kind of thing that breaks on the next join.
     return this.findAndCountAll(where, {
-      distinct: true,
-      attributes: { exclude: ['content'], include: COMPLETENESS_ATTRS },
-      include:    [{ model: FrameCategory, attributes: ['id', 'uid', 'name', 'slug'] }],
+      distinct:   true,
+      attributes: { include: ADMIN_ATTRS },
+      include:    [{ model: FrameCategory, attributes: CATEGORY_ATTRS }],
       order:      [['display_order', 'ASC'], ['id', 'DESC']],
       ...options,
     });
   }
 
   findActiveByUid(uid) {
-    return this.findOne({ uid, status: 'active' });
+    return this.findOne({ uid, status: 'active' }, {
+      include: [{ model: FrameCategory, attributes: CATEGORY_ATTRS }],
+    });
   }
 }
 

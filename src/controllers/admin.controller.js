@@ -2,6 +2,8 @@ const adminService    = require('../services/admin.service');
 const templateService = require('../services/template.service');
 const familyAdmin     = require('../services/templateFamilyAdmin.service');
 const frameService    = require('../services/frame.service');
+const frameFamilyAdmin = require('../services/frameFamilyAdmin.service');
+const frameBundle     = require('../services/frameBundle.service');
 const quotaPackService = require('../services/quotaPack.service');
 const activity        = require('../services/activity.service');
 const uploadService   = require('../services/upload.service');
@@ -364,6 +366,48 @@ const listFrames = async (req, res) => {
   res.json({ success: true, data: result.rows, meta: { total: result.count } });
 };
 
+const getFrameForAdmin = async (req, res) => {
+  res.json({ success: true, data: await frameService.getFrameForAdmin(req.params.uid) });
+};
+
+// Finalize a frame version bundle (files already PUT under frames/<uid>/ with target
+// { type:'frame_file', frame_version_uid }): activate them, save content/thumbnail.
+const confirmFrameBundle = async (req, res) => {
+  const { version, objects } = await frameBundle.confirmBundle(req.params.uid, req.body);
+  await activity.log(req, { action: 'frame_version.bundle_confirmed', entityType: 'frame_version', entityId: version.id, metadata: { objects } });
+  res.json({ success: true, data: version });
+};
+
+// Wipe a frame version's bundle folder and clear what pointed into it.
+const resetFrameBundle = async (req, res) => {
+  const { version, frame_drafted } = await frameBundle.resetBundle(req.params.uid);
+  await activity.log(req, { action: 'frame_version.bundle_reset', entityType: 'frame_version', entityId: version.id, metadata: { frame_drafted } });
+  res.json({ success: true, data: version, meta: { frame_drafted } });
+};
+
+const listFrameVersions = async (req, res) => {
+  const result = await frameService.listVersionsForAdmin(req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+// Move one frame version into another frame. ?dry_run=1 returns the plan.
+const moveFrameVersion = async (req, res) => {
+  const plan = await frameFamilyAdmin.moveVersion(req.params.uid, req.body.frame_uid, { dryRun: isDryRun(req) });
+  if (plan.applied) {
+    await activity.log(req, { action: 'frame_version.moved', entityType: 'frame_version', metadata: { version_uid: req.params.uid, from: plan.source.uid, to: plan.target.uid, source_outcome: plan.source.outcome, owners: plan.owners } });
+  }
+  res.json({ success: true, data: plan });
+};
+
+// Merge a whole frame into another (all versions and owners, all-or-nothing). ?dry_run=1 previews.
+const mergeFrame = async (req, res) => {
+  const plan = await frameFamilyAdmin.mergeFrame(req.params.uid, req.body.into_frame_uid, { dryRun: isDryRun(req) });
+  if (plan.applied) {
+    await activity.log(req, { action: 'frame.merged', entityType: 'frame', metadata: { from: plan.source.uid, into: plan.target.uid, versions: plan.source.versions, owners: plan.owners } });
+  }
+  res.json({ success: true, data: plan });
+};
+
 // ---- Quota top-ups ----
 
 const listQuotaPacks = async (req, res) => {
@@ -657,4 +701,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, rebuildFontPreviews, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };
+module.exports = { setFontFiles, setFontLanguages, rebuildFontPreviews, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, getFrameForAdmin, listFrameVersions, moveFrameVersion, mergeFrame, confirmFrameBundle, resetFrameBundle, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

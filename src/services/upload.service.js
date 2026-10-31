@@ -7,6 +7,7 @@ const { ValidationError } = require('../errors');
 // Two key strategies:
 //   'uuid'        -> <prefix>/<uuid>.<ext>           (standalone images & assets; name dropped)
 //   'preserveName'-> templates/<uid>/<filename>      (bundle files; JSON references the name)
+//                    frames/<version uid>/<filename> (frame version bundles, same contract)
 const IMAGE_SLOTS = {
   business_category_icon:      'categories/business/icon',
   business_category_thumbnail: 'categories/business/thumbnail',
@@ -79,10 +80,20 @@ function buildKey(target, filename) {
       if (!target.template_uid) throw bad('target.template_uid', 'template_uid is required');
       return `templates/${target.template_uid}/${safeName(filename)}`;
     }
+    case 'frame_file': {
+      if (!target.frame_version_uid) throw bad('target.frame_version_uid', 'frame_version_uid is required');
+      return `${frameBundlePrefix(target.frame_version_uid)}${safeName(filename)}`;
+    }
     default:
-      throw bad('target.type', 'target.type must be image_slot | asset | template_file');
+      throw bad('target.type', 'target.type must be image_slot | asset | template_file | frame_file');
   }
 }
+
+// A frame version's bundle folder. Distinct from the `frames/thumbnail/` image slot,
+// which is why the uid is required to be a UUID before a key is ever built here.
+const frameBundlePrefix = (versionUid) => `frames/${versionUid}/`;
+const FRAME_BUNDLE_KEY = /^frames\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\//i;
+const isFrameBundleKey = (key) => FRAME_BUNDLE_KEY.test(String(key || ''));
 
 // Guard for keys the client passes back (multipart complete/abort, confirm).
 function assertAllowedKey(key) {
@@ -94,7 +105,8 @@ function assertAllowedKey(key) {
 // ---- Type and size rules (app_settings `upload_admin_*`, see uploadLimits) ----
 // Which kind of file a target must be. null = not type- or size-checked: audio,
 // Lottie (`animated`), library fonts and template bundle files keep today's
-// behaviour until they get rules of their own.
+// behaviour until they get rules of their own. Frame bundle files are treated as
+// template bundle files: a frame may carry mp4/webm, Lottie JSON or fonts.
 const IMAGE_ASSET_TYPES = ['icon', 'emoji', 'shape', 'bg'];
 const kindOfAssetType = (assetType) => {
   if (assetType === 'video') return 'video';
@@ -109,7 +121,7 @@ function kindForTarget(target) {
 
 // The same rule read back off a stored key, for the steps that only have the key.
 function kindForKey(key) {
-  if (key.startsWith('fonts/') || key.startsWith('templates/')) return null;
+  if (key.startsWith('fonts/') || key.startsWith('templates/') || isFrameBundleKey(key)) return null;
   const asset = /^assets\/([^/]+)\//.exec(key);
   if (asset && asset[1] !== 'thumbnail') return kindOfAssetType(asset[1]);
   return 'image';
@@ -313,6 +325,6 @@ async function confirm({ keys }) {
 }
 
 module.exports = {
-  buildKey, assertAllowedKey, IMAGE_SLOTS, ASSET_TYPES, ALLOWED_ROOTS, partPlan,
+  buildKey, assertAllowedKey, IMAGE_SLOTS, ASSET_TYPES, ALLOWED_ROOTS, partPlan, frameBundlePrefix, isFrameBundleKey,
   presign, multipartInitiate, multipartPresignParts, multipartComplete, multipartAbort, confirm,
 };

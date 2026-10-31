@@ -50,6 +50,7 @@ const notificationCampaigns    = require('../services/notificationCampaign.servi
 const { bundleConfirmSchema } = require('../validators/templateBundle.validator');
 const templatePublish = require('../services/templatePublish');
 const framePublish    = require('../services/framePublish');
+const frameBundle     = require('../services/frameBundle.service');
 const quotaPackService = require('../services/quotaPack.service');
 const couponRules     = require('../services/couponRules');
 const planRules       = require('../services/planRules');
@@ -86,6 +87,7 @@ const {
 } = require('../validators/template.validator');
 const {
   createFrameSchema, updateFrameSchema, createFrameCategorySchema, updateFrameCategorySchema,
+  createFrameVersionSchema, updateFrameVersionSchema, moveFrameVersionSchema, mergeFrameSchema,
 } = require('../validators/frame.validator');
 const {
   createQuotaPackSchema, updateQuotaPackSchema, adminGrantSchema,
@@ -811,8 +813,9 @@ router.get('/template-families', authenticate, authorizeAdmin('templates.read'),
 router.get('/templates', authenticate, authorizeAdmin('templates.read'), controller.listTemplates);
 
 // Same override for frames: the generic factory's list has no paging or search,
-// which a growing store outgrows. Create/update/delete and GET /:uid (full
-// content, any status) still come from the factory below.
+// which a growing store outgrows. Create/update/delete and GET /:uid still come
+// from the factory below. A frame is a FAMILY (migration 058): its designs are
+// frame versions, one per language × size, managed at /admin/frame-versions.
 /**
  * @swagger
  * /admin/frames:
@@ -821,24 +824,165 @@ router.get('/templates', authenticate, authorizeAdmin('templates.read'), control
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: query, name: status,      schema: { type: string, enum: [active, inactive, draft] }, description: "Omit to list all statuses. `active` IS the published state — only these appear in the public GET /frames." }
- *       - { in: query, name: search,      schema: { type: string }, description: Name contains }
- *       - { in: query, name: category_id, schema: { type: integer } }
- *       - { in: query, name: frame_type,  schema: { type: string, enum: [static, animated] } }
- *       - { in: query, name: is_premium,  schema: { type: integer, enum: [0, 1] } }
- *       - { in: query, name: limit,       schema: { type: integer, default: 30, maximum: 100 } }
- *       - { in: query, name: offset,      schema: { type: integer, default: 0 } }
+ *       - { in: query, name: status,         schema: { type: string, enum: [active, inactive, draft] }, description: "Omit to list all statuses. `active` IS the published state — only these appear in the public GET /frames." }
+ *       - { in: query, name: search,         schema: { type: string }, description: Name contains }
+ *       - { in: query, name: category_id,    schema: { type: integer } }
+ *       - { in: query, name: frame_type,     schema: { type: string, enum: [static, animated] } }
+ *       - { in: query, name: is_premium,     schema: { type: integer, enum: [0, 1] } }
+ *       - { in: query, name: single_version, schema: { type: integer, enum: [1] }, description: "Only frames with exactly one version — migration 058 leftovers, for merging size/language copies." }
+ *       - { in: query, name: limit,          schema: { type: integer, default: 30, maximum: 100 } }
+ *       - { in: query, name: offset,         schema: { type: integer, default: 0 } }
  *     responses:
  *       200:
  *         description: >-
- *           Paged frames (meta.total), ordered by display_order then newest, with `content`
- *           excluded. Each row carries `has_content`, `has_thumbnail`, `is_publishable` and
- *           `missing_for_publish` — the very list the publish gate would throw — so an
- *           "incomplete" column and a publish checklist need no request per row.
+ *           Paged frames (meta.total), ordered by display_order then newest. Each row carries
+ *           `version_count`, `active_version_count`, `languages`, `sizes`, `text_free`, a
+ *           `thumbnail_s3_key` taken from a version (default size + English/text-free first),
+ *           `has_required_version`, `is_publishable` and `missing_for_publish` — the very list
+ *           the publish gate would throw.
  *         content: { application/json: { schema: { $ref: '#/components/schemas/FrameAdminListResponse' } } }
  *       403: { description: Missing frames.read }
  */
 router.get('/frames', authenticate, authorizeAdmin('frames.read'), controller.listFrames);
+
+/**
+ * @swagger
+ * /admin/frame-versions:
+ *   get:
+ *     summary: List frame versions for admin (paged, filterable)
+ *     description: >
+ *       One version = one language × size of a frame, with its own design `content` and
+ *       thumbnail. Create/update/delete/get-one use the generic CRUD at
+ *       /admin/frame-versions (create needs `frame_id`, `language_id` — null for
+ *       text-free — and `size_id`). A version may reach `active` only with content, a
+ *       thumbnail and a size; its language must match the frame's kind and its
+ *       (language, size) slot must be free (409). A live frame that loses its active
+ *       English/text-free version goes back to draft.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: frame_id,    schema: { type: integer } }
+ *       - { in: query, name: frame_uid,   schema: { type: string, format: uuid } }
+ *       - { in: query, name: status,      schema: { type: string, enum: [active, inactive, draft] } }
+ *       - { in: query, name: language_id, schema: { type: string }, description: "An id, or `null` for text-free versions." }
+ *       - { in: query, name: size_id,     schema: { type: integer } }
+ *       - { in: query, name: limit,       schema: { type: integer, default: 30, maximum: 100 } }
+ *       - { in: query, name: offset,      schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: "Paged versions (meta.total); `content` excluded. Each row carries `Frame`, `Language`, `TemplateSize`, `has_content`, `has_thumbnail`."
+ *       403: { description: Missing frames.read }
+ */
+router.get('/frame-versions', authenticate, authorizeAdmin('frames.read'), controller.listFrameVersions);
+
+/**
+ * @swagger
+ * /admin/frame-versions/{uid}/move:
+ *   post:
+ *     summary: Move one version into another frame (dry run available)
+ *     description: >
+ *       The target's details (category, type, premium, price) win. `?dry_run=1` returns the
+ *       plan without doing it: `changes`, the source's `outcome` (unchanged | draft |
+ *       archived), `owners` (when the source is emptied and archived: how many owners are
+ *       `carried` to the target, `combined` with a row they already have there, or
+ *       `dropped` — a free owner never carries into a premium frame) and `conflicts`.
+ *       Applying with conflicts is a 409.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path,  name: uid,     required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: dry_run, schema: { type: integer, enum: [0, 1] } }
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [frame_uid], properties: { frame_uid: { type: string, format: uuid } } } } }
+ *     responses:
+ *       200: { description: The plan; `applied` is true when it was carried out }
+ *       409: { description: The version cannot join that frame (details list each conflict) }
+ * /admin/frames/{uid}/merge:
+ *   post:
+ *     summary: Merge a whole frame into another (dry run available)
+ *     description: >
+ *       Every version moves, all-or-nothing; the emptied source is archived (inactive) and
+ *       its owners and businesses using it follow to the target by the rules above.
+ *       `?dry_run=1` previews.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path,  name: uid,     required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: dry_run, schema: { type: integer, enum: [0, 1] } }
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [into_frame_uid], properties: { into_frame_uid: { type: string, format: uuid } } } } }
+ *     responses:
+ *       200: { description: The plan; `applied` is true when it was carried out }
+ *       409: { description: The frames cannot be merged (details list each conflict) }
+ */
+router.post('/frame-versions/:uid/move', authenticate, authorizeAdmin('frames.update'), validate(moveFrameVersionSchema), controller.moveFrameVersion);
+router.post('/frames/:uid/merge',        authenticate, authorizeAdmin('frames.update'), validate(mergeFrameSchema),       controller.mergeFrame);
+
+/**
+ * @swagger
+ * /admin/frames/{uid}:
+ *   get:
+ *     summary: Get one frame for admin, with its versions and publish readiness
+ *     description: >
+ *       Any status. `versions[]` (no content) with `Language` / `TemplateSize`, plus
+ *       `has_required_version`, `is_publishable` and `missing_for_publish[]` — the same
+ *       checklist the list rows carry and the publish gate throws.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: The frame }
+ *       404: { description: Not found }
+ * /admin/frame-versions/{uid}/bundle/confirm:
+ *   post:
+ *     summary: Finalize a frame version bundle — activate its files, save content + thumbnail
+ *     description: >-
+ *       The template bundle flow, for one frame version. Upload every file of the designer
+ *       ZIP first with target `{ type: 'frame_file', frame_version_uid }` — keys are
+ *       `frames/{uid}/{filename}`, flat by filename, created pending; these files are not
+ *       type- or size-checked (mp4 / webm / Lottie JSON / fonts are all fine) and need
+ *       `frames.update`. Then call this with `content`, `thumbnail_filename`, or both (at
+ *       least one). Only `thumbnail_filename` swaps the thumbnail and keeps the saved design.
+ *       Everything is checked before any file is activated. The design references its files
+ *       by bare filename, resolved against `frames/{uid}/` (`asset_prefix` on public versions).
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             minProperties: 1
+ *             properties:
+ *               content:            { type: string, description: Design JSON (bare asset names) }
+ *               thumbnail_filename: { type: string, description: "Filename of an image already uploaded under frames/{uid}/" }
+ *     responses:
+ *       200: { description: The updated version }
+ *       400: { description: "Empty body; `content` not valid JSON; `thumbnail_filename` not found under frames/{uid}/" }
+ *       404: { description: No such version }
+ * /admin/frame-versions/{uid}/bundle/reset:
+ *   post:
+ *     summary: Delete everything under frames/{uid}/ and clear what pointed into it
+ *     description: >-
+ *       Clears `content`, and `thumbnail_s3_key` when it lives under `frames/{uid}/` (a
+ *       thumbnail kept elsewhere — migration 058 versions use the old `frames/thumbnail/`
+ *       slot — is kept). A live version goes back to draft; `meta.frame_drafted` is true when
+ *       the frame thereby lost its required version and went to draft too. 409 while another
+ *       version still uses these files.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: "The cleared version; `meta.frame_drafted`" }
+ *       409: { description: Another version uses these files }
+ */
+router.get('/frames/:uid', authenticate, authorizeAdmin('frames.read'), controller.getFrameForAdmin);
+router.post('/frame-versions/:uid/bundle/confirm', authenticate, authorizeAdmin('frames.update'), validate(bundleConfirmSchema), controller.confirmFrameBundle);
+router.post('/frame-versions/:uid/bundle/reset',   authenticate, authorizeAdmin('frames.update'), controller.resetFrameBundle);
 
 // ---- Quota top-ups ----
 // Same override pattern as /frames above: create/update/delete/get-one still come
@@ -1132,7 +1276,7 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *       **Types and sizes** (app settings `upload_admin_*`; defaults): a `video` asset must
  *       be mp4/webm/mov, ≤ 500 MB; `icon`/`emoji`/`shape`/`bg` assets and every image slot
  *       must be jpeg/png/webp/gif/svg, ≤ 25 MB. The extension must match the type. Audio,
- *       `animated`, `font_file` and `template_file` are not type-checked. Per request: at
+ *       `animated`, `font_file`, `template_file` and `frame_file` are not type-checked. Per request: at
  *       most 50 non-video files and 10 videos, 2 GB combined.
  *
  *
@@ -1150,7 +1294,7 @@ router.post('/template-families/:uid/merge', authenticate, authorizeAdmin('templ
  *                 title: One file
  *                 required: [target, filename]
  *                 properties:
- *                   target:       { type: object, description: "{ type: image_slot|asset|template_file, ... }" }
+ *                   target:       { type: object, description: "{ type: image_slot|asset|template_file|frame_file, ... } — frame_file takes frame_version_uid (key frames/<uid>/<filename>) and needs frames.update" }
  *                   filename:     { type: string }
  *                   content_type: { type: string }
  *                   size:         { type: integer, minimum: 1, description: "Bytes. Requires content_type." }
@@ -1867,7 +2011,8 @@ C('/template-categories', { model: models.TemplateCategory, resource: 'template_
 //
 // `reorderable` drives the store's display_order (the shelf is hand-curated, so
 // the panel needs drag-reorder, not one PATCH per card).
-C('/frames',              { model: models.Frame,            resource: 'frame',            permission: 'frames', unique: ['name'], reorderable: true, filterable: ['status', 'frame_type', 'category_id', 'is_premium'], createSchema: createFrameSchema, updateSchema: updateFrameSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => framePublish.assertPublishable(row, payload), include: [{ model: models.FrameCategory }] });
+C('/frames',              { model: models.Frame,            resource: 'frame',            permission: 'frames', unique: ['name'], reorderable: true, filterable: ['status', 'frame_type', 'category_id', 'is_premium'], createSchema: createFrameSchema, updateSchema: updateFrameSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => framePublish.assertPublishable(row, payload), include: [{ model: models.FrameCategory }, { model: models.FrameVersion, as: 'versions', attributes: { exclude: ['content'] }, include: [{ model: models.Language }, { model: models.TemplateSize }] }] });
+C('/frame-versions',      { model: models.FrameVersion,     resource: 'frame_version',    permission: 'frames', createSchema: createFrameVersionSchema, updateSchema: updateFrameVersionSchema, injectOnCreate: (req) => ({ created_by: req.user.userId }), beforeWrite: (payload, row) => framePublish.assertVersionWritable(payload, row), afterWrite: async (row, req, { action }) => { if (action === 'deleted') await frameBundle.removeFiles(row); await framePublish.reconcileFrame(row.frame_id); } });
 C('/frame-categories',    { model: models.FrameCategory,    resource: 'frame_category',   permission: 'frames', unique: ['name', 'slug'], autoSlug: true, reorderable: true, createSchema: createFrameCategorySchema, updateSchema: updateFrameCategorySchema });
 // The moderation queue for user-suggested sub-industries ("Others" at signup) is
 // just `GET /admin/business-categories?status=pending` — `suggestedBy` names who

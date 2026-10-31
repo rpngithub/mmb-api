@@ -198,25 +198,36 @@ module.exports = {
     },
   },
 
-  // A store frame. `content` is the design payload and is served only to an owner,
-  // so it is absent from every list and from a locked detail response.
+  // A store frame = a FAMILY of versions (language × size). The design payload is
+  // a version's and is served only to an owner, as `content`, on the detail call.
   Frame: {
     views: {
       // Public/store shape: hides the admin-only creator, adds the computed flags.
       Frame: {
         exclude: ['created_by'],
         add: {
-          owned:     { type: 'boolean', description: 'true when the frame is in the caller\'s My Frames. Always false for guests. This — not `is_locked` — is what governs whether `content` is returned.' },
+          owned:     { type: 'boolean', description: 'true when the frame is in the caller\'s My Frames. Always false for guests. This — not `is_locked` — is what governs whether `content` is returned. Owning a frame means owning every version of it.' },
           is_locked: { type: 'boolean', description: 'A premium frame the caller has not bought: "costs money you have not paid". Means the same on a list card and on the detail response, so one padlock badge can be driven from it. A free frame is never locked, but its `content` still arrives only after it has been added. Note frames are bought per frame — a paid PLAN never unlocks one.' },
           strike_price: { type: 'number', nullable: true, description: 'Display-only "was" price, struck through beside `price`. Nothing is ever charged against it.' },
+          thumbnail_s3_key: { type: 'string', nullable: true, description: 'The picked version\'s thumbnail.' },
+          version: { type: 'object', nullable: true, description: 'The version picked for the caller: { id, uid, language_id, size_id, thumbnail_s3_key, Language, TemplateSize }. On detail with `size`, null when the frame has no live version in that size.' },
+          available_languages: { type: 'array', items: { type: 'object' }, description: 'Languages the frame has an active version in (text-free versions add none).' },
+          available_sizes:     { type: 'array', items: { type: 'object' }, description: 'Sizes the frame has an active version in.' },
+          versions: { type: 'array', items: { type: 'object' }, description: 'Detail only: every active version (no content), for a switcher.' },
+          content:  { type: 'string', description: 'Detail only, owners only: the picked version\'s design payload.' },
         },
       },
       // Admin shape: the full row plus the publish-checklist signals the list adds,
       // so the panel can flag incomplete frames without a request per row.
       FrameAdmin: {
         add: {
-          has_content:   { type: 'integer', description: '1 when the design payload is set' },
-          has_thumbnail: { type: 'integer', description: '1 when thumbnail_s3_key is set' },
+          version_count:        { type: 'integer' },
+          active_version_count: { type: 'integer' },
+          has_required_version: { type: 'integer', description: '1 when an active English or text-free version exists (any size)' },
+          languages:            { type: 'array', items: { type: 'object' } },
+          sizes:                { type: 'array', items: { type: 'object' } },
+          text_free:            { type: 'boolean' },
+          thumbnail_s3_key:     { type: 'string', nullable: true, description: 'From a version: default size and English/text-free first' },
           is_publishable: { type: 'boolean', description: 'true when `status` may be set to `active` — i.e. `missing_for_publish` is empty' },
           missing_for_publish: {
             type: 'array',
