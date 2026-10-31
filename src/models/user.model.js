@@ -7,6 +7,10 @@ module.exports = (sequelize) => {
     // Optional — OTP signup has no name to give, and the app collects one later.
     name:                 { type: DataTypes.STRING(100), allowNull: true },
     email:                { type: DataTypes.STRING(255), unique: true, allowNull: true },
+    // When the user proved they own `email` (the emailed link). Cleared whenever the
+    // email changes. "Lost my mobile" recovery only trusts an address verified at
+    // least 30 days ago — see services/phoneChange.service.js.
+    email_verified_at:    { type: DataTypes.DATE, allowNull: true },
     phone:                { type: DataTypes.STRING(20), unique: true, allowNull: true },
     password_hash:        { type: DataTypes.STRING(255), allowNull: true },
     // "What brings you here?" — a BUSINESS account continues into the industry

@@ -33,4 +33,4 @@ const adminLoginSchema = Joi.object({
   password: Joi.string().min(8).required(),
 });
 
-module.exports = { sendOtpSchema, verifyOtpSchema, refreshSchema, adminLoginSchema };
+module.exports = { sendOtpSchema, verifyOtpSchema, refreshSchema, adminLoginSchema, indianMobile };

@@ -321,4 +321,11 @@ async function _rotateSession(session, actor, actorType, permissions, extraClaim
   return { access_token: minted.accessToken, refresh_token: minted.refreshToken };
 }
 
-module.exports = { sendOtpService, verifyOtpService, loginAdmin, refreshTokens, logout };
+// A fresh user session outside OTP login — for a flow that has just ended every
+// session the account had and should leave the device that ran it signed in
+// (changing the phone number). Same claims as a login.
+async function issueUserSession(user, clientType) {
+  return _issueTokens(user, 'user', clientType, null, { tier: await _resolveTier(user.id) });
+}
+
+module.exports = { sendOtpService, verifyOtpService, loginAdmin, refreshTokens, logout, issueUserSession };

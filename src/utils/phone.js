@@ -48,4 +48,14 @@ function toE164(raw) {
 
 const normalizePhone = (raw) => toE164(raw) ?? raw;
 
-module.exports = { toE164, normalizePhone };
+// For showing a number back to its owner without spelling it out:
+// `+919912345688` -> `+91 99xxxxxx88`. Anything that is not E.164 +91 is masked
+// down to its last two digits.
+function maskPhone(phone) {
+  const str = String(phone ?? '');
+  const m   = /^\+91(\d{10})$/.exec(str);
+  if (m) return `+91 ${m[1].slice(0, 2)}xxxxxx${m[1].slice(-2)}`;
+  return str ? `xxxxxx${str.slice(-2)}` : '';
+}
+
+module.exports = { toE164, normalizePhone, maskPhone };

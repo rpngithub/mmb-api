@@ -4,7 +4,10 @@ const controller   = require('../controllers/auth.controller');
 const validate     = require('../middlewares/validate');
 const authenticate = require('../middlewares/authenticate');
 const rateLimiter  = require('../middlewares/rateLimiter');
+const phoneChange  = require('../controllers/phoneChange.controller');
+const email        = require('../controllers/email.controller');
 const { sendOtpSchema, verifyOtpSchema, refreshSchema, adminLoginSchema } = require('../validators/auth.validator');
+const { linkSendOtpSchema, linkVerifySchema, verifyEmailSchema } = require('../validators/phoneChange.validator');
 
 /**
  * @swagger
@@ -130,5 +133,78 @@ router.post('/logout', authenticate, controller.logout);
  *     tags: [Auth]
  */
 router.post('/admin/login', validate(adminLoginSchema), rateLimiter.auth, controller.adminLogin);
+
+/**
+ * @swagger
+ * /auth/email/verify:
+ *   post:
+ *     summary: Verify an email address from the emailed link
+ *     description: >-
+ *       Public — the token from `{APP_WEB_URL}/verify-email?token=…` is the proof. Refused
+ *       (`LINK_INVALID`) once used, after 24 hours, or if the account's email changed since.
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [token], properties: { token: { type: string } } } } }
+ *     responses:
+ *       200: { description: "`{ message, email (masked) }`" }
+ *       400: { description: "`LINK_INVALID`" }
+ */
+router.post('/email/verify', validate(verifyEmailSchema), rateLimiter.auth, email.verify);
+
+/**
+ * @swagger
+ * /auth/phone-reset/{token}:
+ *   get:
+ *     summary: "Lost my mobile: open the emailed link"
+ *     description: >-
+ *       Public — the token from `{APP_WEB_URL}/change-phone?token=…` is the credential.
+ *       Read-only, so a mail scanner opening the link first does not spend it. Use
+ *       `next_step` to show the right screen: `new_phone` (ask for the number) or
+ *       `verify_new` (an OTP was already sent to `new_phone`).
+ *     tags: [Auth]
+ *     parameters: [{ in: path, name: token, required: true, schema: { type: string } }]
+ *     responses:
+ *       200: { description: "`{ current_phone (masked), expires_at, next_step, new_phone? }`" }
+ *       400: { description: "`LINK_INVALID` — used, expired or replaced; request a new one" }
+ */
+router.get('/phone-reset/:token', rateLimiter.guest, phoneChange.inspectLink);
+
+/**
+ * @swagger
+ * /auth/phone-reset/send-otp:
+ *   post:
+ *     summary: "Lost my mobile: the new number — texts it an OTP"
+ *     description: Call again to resend, or to correct the number.
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [token, phone], properties: { token: { type: string }, phone: { type: string, example: "+919876543210" } } } } }
+ *     responses:
+ *       200: { description: "`{ phone (masked), next_step: verify_new }` — plus `otp` in development/test" }
+ *       400: { description: "`LINK_INVALID`, not an Indian mobile, or already the account's number" }
+ *       409: { description: "`PHONE_TAKEN`" }
+ */
+router.post('/phone-reset/send-otp', validate(linkSendOtpSchema), rateLimiter.otpSend, rateLimiter.accountOtpSend, phoneChange.linkSendOtp);
+
+/**
+ * @swagger
+ * /auth/phone-reset/verify:
+ *   post:
+ *     summary: "Lost my mobile: confirm the new number's OTP — the number is changed"
+ *     description: >-
+ *       Swaps the number and ends every session on the account. No tokens are issued
+ *       (this may be a browser on another device): send the user to sign in with the new number.
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { type: object, required: [token, otp], properties: { token: { type: string }, otp: { type: string } } } } }
+ *     responses:
+ *       200: { description: "`{ message, phone (masked) }`" }
+ *       400: { description: "`LINK_INVALID`" }
+ *       401: { description: Wrong or expired OTP }
+ *       409: { description: "`PHONE_TAKEN` or `STEP_OUT_OF_ORDER`" }
+ */
+router.post('/phone-reset/verify', validate(linkVerifySchema), rateLimiter.auth, phoneChange.linkVerify);
 
 module.exports = router;

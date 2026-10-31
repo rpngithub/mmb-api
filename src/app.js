@@ -93,6 +93,9 @@ if (process.env.NODE_ENV !== 'production') {
   if (process.env.ENABLE_SMS_TEST === 'true') {
     console.log('[Dev] SMS test endpoint mounted at POST ' + `${API_PREFIX}/dev/test-sms`);
   }
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[Dev] SMTP test endpoint mounted at POST ' + `${API_PREFIX}/dev/test-email`);
+  }
 }
 
 if (process.env.NODE_ENV !== 'production') {

@@ -2,6 +2,7 @@ const rateLimit  = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
 const redis      = require('../config/redis');
 const { normalizePhone } = require('../utils/phone');
+const { hashToken }      = require('../utils/tokenHash');
 
 const createLimiter = (options) =>
   rateLimit({
@@ -53,6 +54,23 @@ module.exports = {
     // Canonicalised, so +91X and X share one bucket instead of doubling the cap.
     keyGenerator: (req) => `otp:send:${req.body?.phone ? normalizePhone(req.body.phone) : req.ip}`,
   }),
+  // OTPs sent while changing a phone or a verified email. Keyed per account when
+  // signed in, and per link otherwise (the public "Lost my mobile" steps), so one
+  // account cannot spray texts at numbers it does not own.
+  accountOtpSend: createLimiter({
+    windowMs:     10 * 60_000,
+    max:          5,
+    message:      'Too many OTP requests. Try again in 10 minutes.',
+    keyGenerator: (req) => `acct:otp:${req.user?.userId || (req.body?.token ? hashToken(String(req.body.token)) : req.ip)}`,
+  }),
+  // Emails carrying a link (verify my email, lost my mobile). Each one lands in a
+  // real inbox, so it is capped per account.
+  mailLink: createLimiter({
+    windowMs:     60 * 60_000,
+    max:          3,
+    message:      'Too many emails requested. Try again in an hour.',
+    keyGenerator: (req) => `mail:link:${req.user?.userId || req.ip}`,
+  }),
   // Dev SMS diagnostics. Every call spends a real DLT credit and texts a real handset,
   // so it is capped harder than otpSend even though the route is development-only.
   smsTest: createLimiter({
@@ -60,6 +78,13 @@ module.exports = {
     max:          5,
     message:      'Too many SMS test sends. Try again in 10 minutes.',
     keyGenerator: (req) => `sms:test:${req.ip}`,
+  }),
+  // Dev SMTP diagnostics — real emails to real inboxes.
+  mailTest: createLimiter({
+    windowMs:     10 * 60_000,
+    max:          5,
+    message:      'Too many test emails. Try again in 10 minutes.',
+    keyGenerator: (req) => `mail:test:${req.ip}`,
   }),
   admin: createLimiter({
     windowMs:     60_000,

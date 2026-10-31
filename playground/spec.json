@@ -584,6 +584,720 @@
             ]
           },
           {
+            "name": "SMTP Test (dev only)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/dev/test-email",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "dev",
+                  "test-email"
+                ]
+              },
+              "description": "Development only (404 on staging/production). Sends a real email through the configured SMTP server — set `test_email_to` first. `dry_run: true` checks connection + login only.\n\nAlways answers 200: read `data.verify` (connect / TLS / login) and `data.send` (server accepted the message). `self-signed certificate in certificate chain` means a network doing SSL inspection — start the API with `NODE_EXTRA_CA_CERTS` pointing at that network's root certificate, or test from another network.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"to\": \"{{test_email_to}}\",\n  \"dry_run\": false\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Send Email Verification Link",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/email/verification",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "email",
+                  "verification"
+                ]
+              },
+              "description": "Mails `{APP_WEB_URL}/verify-email?token=…` (24 h, one live link). 409 `EMAIL_NOT_SET` / `EMAIL_ALREADY_VERIFIED`. In development the response carries `dev_token`, auto-saved to `email_verify_token`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.dev_token) pm.environment.set('email_verify_token', d.dev_token);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Verify Email (from link)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/auth/email/verify",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "email",
+                  "verify"
+                ]
+              },
+              "description": "Public — the link token is the proof. 400 `LINK_INVALID` when used, expired, or the account's email changed since.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"token\": \"{{email_verify_token}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Change Verified Email — Send OTP",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/email/change/send-otp",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "email",
+                  "change",
+                  "send-otp"
+                ]
+              },
+              "description": "A verified email cannot be changed through PATCH /users/me (403 `EMAIL_CHANGE_REQUIRES_OTP`). This texts an OTP to the current phone; dev auto-saves it to `email_change_otp`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.otp) pm.environment.set('email_change_otp', d.otp);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Change Verified Email",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/email",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "email"
+                ]
+              },
+              "description": "`email: null` removes it. The new address is unverified — verify it again; the 30-day clock for \"Lost my mobile\" restarts.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"email\": \"pramod+{{$timestamp}}@example.com\",\n  \"otp\": \"{{email_change_otp}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Phone Change — Options",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/users/me/phone-change/options",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "phone-change",
+                  "options"
+                ]
+              },
+              "description": "Call before showing \"Change my mobile number\". `otp_to_current` = option 1, `lost_phone` = option 2; when `lost_phone.available` is false show it disabled with `reason` (`EMAIL_NOT_SET` | `EMAIL_NOT_VERIFIED` | `EMAIL_VERIFICATION_TOO_RECENT` + `eligible_from`)."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Phone Change 1 — OTP to Current Number",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/phone-change/start",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "phone-change",
+                  "start"
+                ]
+              },
+              "description": "Opens a 15-minute request. Calling again restarts it (that is the resend). Saves `phone_change_uid`; dev also saves the OTP to `phone_change_otp`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.request_uid) pm.environment.set('phone_change_uid', d.request_uid);",
+                    "if (d.otp) pm.environment.set('phone_change_otp', d.otp);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Phone Change 2 — Verify Current Number",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/phone-change/{{phone_change_uid}}/verify-old",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "phone-change",
+                  "{{phone_change_uid}}",
+                  "verify-old"
+                ]
+              },
+              "description": "401 wrong OTP; 429 after five wrong tries (start again); 404 when the request is gone or not yours.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"otp\": \"{{phone_change_otp}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Phone Change 3 — OTP to New Number",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/phone-change/{{phone_change_uid}}/new-phone",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "phone-change",
+                  "{{phone_change_uid}}",
+                  "new-phone"
+                ]
+              },
+              "description": "409 `PHONE_TAKEN` when another account has it, `STEP_OUT_OF_ORDER` before step 2. Call again to resend or correct the number. Dev saves the OTP to `phone_change_otp`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"phone\": \"{{new_phone}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.otp) pm.environment.set('phone_change_otp', d.otp);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Phone Change 4 — Verify New Number",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/phone-change/{{phone_change_uid}}/verify-new",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "phone-change",
+                  "{{phone_change_uid}}",
+                  "verify-new"
+                ]
+              },
+              "description": "Swaps the number and ends EVERY session (this one included), then returns a fresh token pair for this device — auto-saved. Afterwards set `phone` to the new number to log in again.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"otp\": \"{{phone_change_otp}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.access_token) pm.environment.set('access_token', d.access_token);",
+                    "if (d.refresh_token) pm.environment.set('refresh_token', d.refresh_token);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Lost My Mobile — Email Link",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/users/me/phone-change/lost-phone",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "users",
+                  "me",
+                  "phone-change",
+                  "lost-phone"
+                ]
+              },
+              "description": "Needs an email verified ≥ 30 days ago, else 403 `EMAIL_NOT_SET` / `EMAIL_NOT_VERIFIED` / `EMAIL_VERIFICATION_TOO_RECENT` (`details[0].eligible_from`). Mails `{APP_WEB_URL}/change-phone?token=…` (30 min, single use). Dev saves `dev_token` to `phone_reset_token`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.dev_token) pm.environment.set('phone_reset_token', d.dev_token);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Lost My Mobile — Open Link",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/auth/phone-reset/{{phone_reset_token}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "phone-reset",
+                  "{{phone_reset_token}}"
+                ]
+              },
+              "description": "Public and read-only (mail scanners may open it first). `next_step`: `new_phone` or `verify_new`. 400 `LINK_INVALID` when used or expired.",
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Lost My Mobile — OTP to New Number",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/auth/phone-reset/send-otp",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "phone-reset",
+                  "send-otp"
+                ]
+              },
+              "description": "Public. 409 `PHONE_TAKEN`. Dev saves the OTP to `phone_change_otp`.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"token\": \"{{phone_reset_token}}\",\n  \"phone\": \"{{new_phone}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.otp) pm.environment.set('phone_change_otp', d.otp);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Lost My Mobile — Verify New Number",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/auth/phone-reset/verify",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "auth",
+                  "phone-reset",
+                  "verify"
+                ]
+              },
+              "description": "Public. Swaps the number and ends every session. No tokens are issued — log in with the new number.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"token\": \"{{phone_reset_token}}\",\n  \"otp\": \"{{phone_change_otp}}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              },
+              "auth": {
+                "type": "noauth"
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
             "name": "Deactivate My Account",
             "request": {
               "method": "POST",
@@ -5833,6 +6547,48 @@
         "key": "refresh_token",
         "value": "",
         "type": "secret",
+        "enabled": true
+      },
+      {
+        "key": "new_phone",
+        "value": "+919812345678",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "test_email_to",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "phone_change_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "phone_change_otp",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "phone_reset_token",
+        "value": "",
+        "type": "secret",
+        "enabled": true
+      },
+      {
+        "key": "email_verify_token",
+        "value": "",
+        "type": "secret",
+        "enabled": true
+      },
+      {
+        "key": "email_change_otp",
+        "value": "",
+        "type": "default",
         "enabled": true
       },
       {
