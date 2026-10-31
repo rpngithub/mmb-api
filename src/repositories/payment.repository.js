@@ -1,6 +1,7 @@
 const BaseRepository = require('./base.repository');
 const {
   Payment, UserSubscription, Plan, PlanBillingOption, Coupon, UserQuotaGrant, QuotaPack, UserFrame, Frame,
+  UserVariant, Variant, BrandSeries,
 } = require('../models');
 
 // Everything a history row or an invoice needs to say WHAT was bought, in one
@@ -16,6 +17,9 @@ const DESCRIBE = [
   ] },
   { model: UserQuotaGrant, required: false, attributes: ['quantity'], include: [{ model: QuotaPack, attributes: ['name'] }] },
   { model: UserFrame, required: false, attributes: ['id'], include: [{ model: Frame, attributes: ['name'] }] },
+  { model: UserVariant, required: false, attributes: ['id'], include: [
+    { model: Variant, attributes: ['name'], include: [{ model: BrandSeries, attributes: ['name'] }] },
+  ] },
 ];
 
 class PaymentRepository extends BaseRepository {

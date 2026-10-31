@@ -9,12 +9,11 @@ const productService  = require('./product.service');
 const fontService     = require('./font.service');
 const frameService    = require('./frame.service');
 const variantAccess   = require('./variantAccess.service');
-const { sequelize, Variant, VariantBadge, Plan, TemplateFamily, Tag, Font, BusinessCategory, BusinessVariant, Product } = require('../models');
+const { sequelize, Variant, VariantBadge, TemplateFamily, Tag, Font, BusinessCategory, BusinessVariant, Product } = require('../models');
 const picker = require('./templateFamilyPicker');
 const favourites = require('./favourite.service');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const slugify         = require('../utils/slugify');
-const { heldSeriesCount } = require('../constants/quotaMeters');
 const { NotFoundError, ForbiddenError, ValidationError, ConflictError } = require('../errors');
 
 const DEFAULT_RADIUS_KM = 10;
@@ -528,15 +527,24 @@ async function loadVariantsWithTemplates(where, userId) {
   const families = new Map();
   for (const v of variants) for (const f of v.TemplateFamilies || []) families.set(f.id, f);
   const languageIds = await picker.resolveLanguageRank({}, { userId });
-  // Adopted variants are unlocked for their business, so no card is locked here.
   const cards = new Map((await favourites.markFavourited(
     await picker.familiesToCards([...families.values()], { languageIds }),
     { userId }, 'template',
   )).map((c) => [c.family_id, c]));
 
+  // An added variant is usable only while the owner is subscribed; without a
+  // subscription it stays in the collection, PAUSED, and comes back on resubscribing.
+  const via = await variantAccess.accessVia(variants.map((v) => v.id), { userId });
+
   return variants.map((v) => {
-    const data = v.toJSON();
-    data.Templates = (data.TemplateFamilies || []).map((f) => cards.get(f.id)).filter(Boolean);
+    const data   = v.toJSON();
+    const locked = !via.has(v.id);
+    data.is_locked  = locked;
+    data.access_via = via.get(v.id) || null;
+    data.Templates  = (data.TemplateFamilies || [])
+      .map((f) => cards.get(f.id))
+      .filter(Boolean)
+      .map((c) => (locked ? { ...c, is_locked: true } : c));
     delete data.TemplateFamilies;
     return data;
   });
@@ -550,30 +558,31 @@ async function ownedBusiness(uid, userId) {
   return biz;
 }
 
-// Adopt a variant into a business. Requires the owner's ACTIVE plan to entitle the
-// variant (adoption itself never grants adoption). Idempotent: re-adopting is a no-op.
+// Add a variant to a business — how a subscriber gets to USE one (option B, see
+// variantAccess.service). Any active subscription may add any variant; the plan's
+// Brand Series quota caps how many are added at a time, counted per VARIANT across
+// all the user's businesses. Past the quota, the variant has to be bought instead.
+// Idempotent: adding one the business already has is a no-op.
 async function adoptVariant(userId, businessUid, variantUid) {
   const biz     = await ownedBusiness(businessUid, userId);
-  const variant = await Variant.findOne({
-    where: { uid: variantUid, is_active: 1 },
-    include: [{ model: Plan, attributes: ['id'], through: { attributes: [] } }],
-  });
+  const variant = await Variant.findOne({ where: { uid: variantUid, is_active: 1 } });
   if (!variant) throw new NotFoundError('Variant not found');
 
-  const allowedPlanIds = (variant.Plans || []).map((p) => p.id);
-  if (!(await variantAccess.isPlanEntitled(allowedPlanIds, { userId }))) {
-    throw new ForbiddenError('Your plan does not include this variant');
+  if (!(await variantAccess.activePlanId({ userId }))) {
+    throw new ForbiddenError('An active subscription is needed to add a variant to your business');
+  }
+  // Already theirs for good — spending a quota slot on it would buy nothing.
+  if ((await variantAccess.purchasedVariantIds(userId, [variant.id])).size) {
+    throw new ConflictError('You already own this variant');
   }
 
-  // The plan's brand-series allowance counts distinct SERIES across all the
-  // user's businesses: a second variant of a series they already hold, or the
-  // same series in another business, is not a new one.
-  const newSeries = (await heldSeriesCount(userId, variant.series_id)) === 0;
-  if (newSeries) await quota.assertWithinQuota(userId, 'brand_series');
+  // Adding the same variant to a second business is not a second slot.
+  const newVariant = !(await variantAccess.addedVariantIds(userId, [variant.id])).size;
+  if (newVariant) await quota.assertWithinQuota(userId, 'brand_series');
 
-  const [, created] = await BusinessVariant.findOrCreate({ where: { business_id: biz.id, variant_id: variant.id } });
-  if (newSeries && created) {
-    await quota.consume(userId, 'brand_series', 1, { source: 'brand_series_add', ref_type: 'brand_series', ref_id: variant.series_id });
+  const [link, created] = await BusinessVariant.findOrCreate({ where: { business_id: biz.id, variant_id: variant.id } });
+  if (newVariant && created) {
+    await quota.consume(userId, 'brand_series', 1, { source: 'brand_series_add', ref_type: 'business_variant', ref_id: link.id });
   }
   const [shaped] = await loadVariantsWithTemplates({ id: variant.id }, userId);
   return shaped;

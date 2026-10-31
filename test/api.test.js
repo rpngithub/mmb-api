@@ -47,6 +47,8 @@ after(async () => {
   if (track.faqCategories.length) await models.FaqCategory.destroy({ where: { id: track.faqCategories } });
   if (track.testimonials.length)  await models.Testimonial.destroy({ where: { id: track.testimonials } });
   if (track.specialEvents.length) await models.SpecialEvent.destroy({ where: { id: track.specialEvents } }); // cascades event_templates
+  // Bought variants pin their variant with ON DELETE RESTRICT, so they go first.
+  if (track.variants.length)     await models.UserVariant.destroy({ where: { variant_id: track.variants } });
   if (track.variants.length)     await models.Variant.destroy({ where: { id: track.variants } });        // cascades joins
   if (track.brandSeries.length)  await models.BrandSeries.destroy({ where: { id: track.brandSeries } });  // cascades its taxonomy joins
   if (track.variantBadges.length)      await models.VariantBadge.destroy({ where: { id: track.variantBadges } });
@@ -396,7 +398,7 @@ test('variant detail: card is public and templates are always listed, but locked
   const tpl = await createTemplate({ uid: uuid(), name: 'TST Variant Tpl', content: '{"a":1}', status: 'active' });
   track.templates.push(tpl.id);
   await variant.setTemplateFamilies([tpl.family_id]);
-  await variant.setPlans([2]);                 // entitled: Pro (plan id 2)
+  await variant.setPlans([2]);                 // deprecated allow-list: stored, but must change nothing below
   await variant.setBusinessCategories([1, 5]); // display tags
 
   // guest -> card visible, templates LISTED but without content, entitlement set hidden
@@ -413,31 +415,37 @@ test('variant detail: card is public and templates are always listed, but locked
   assert.equal(guest.body.data.BusinessCategories.length, 2, 'industry tags on the card');
   assert.equal(guest.body.data.Plans, undefined, 'entitlement set never exposed');
 
-  // user with an ACTIVE Pro subscription -> entitled, templates (with content) served
+  assert.equal(guest.body.data.cta, 'sign_in');
+  assert.equal(guest.body.data.access_via, null);
+
+  // Option B: a subscription alone unlocks nothing — even on a plan the (deprecated)
+  // allowed-plans list names. Adding it to the business is what unlocks it.
   const proUserId = await userWithActivePlan(2, 11);
-  const entitled = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
-  assert.equal(entitled.body.data.is_locked, false);
-  assert.equal(entitled.body.data.Templates.length, 1);
-  assert.equal(entitled.body.data.Templates[0].is_locked, false);
-  assert.equal(typeof entitled.body.data.Templates[0].content, 'string', 'content served to entitled viewer');
+  await User.update({ account_type: 'business' }, { where: { id: proUserId } });
+  const biz   = await Business.create({ uid: uuid(), user_id: proUserId, name: 'TST Detail Biz', is_active: 1 });
+  const token = h.userTokenFor(proUserId, 'paid');
 
-  // user on a DIFFERENT plan (Free, id 1) -> locked (proves plan-scoping, not just "any paid")
-  const freeUserId = await userWithActivePlan(1, 22);
-  const wrongPlan = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(freeUserId, 'paid') });
-  assert.equal(wrongPlan.body.data.is_locked, true, 'plan not in the variant allowlist -> locked');
-  assert.equal(wrongPlan.body.data.Templates[0].content, undefined);
-});
+  await withPlanFeature(2, 'brand_series', 2, async () => {
+    const subscribed = await h.request('GET', `${P}/variants/${variant.uid}`, { token });
+    assert.equal(subscribed.body.data.is_locked, true, 'a plan on its own does not unlock a variant');
+    assert.equal(subscribed.body.data.Templates[0].content, undefined);
+    assert.equal(subscribed.body.data.cta, 'add', 'a subscriber with slots left is offered Add');
 
-test('variant with no plan restrictions is locked to everyone (incl. subscribers)', async () => {
-  const { variant } = await makeSeriesWithVariant('Unrestricted');
-  const tpl = await createTemplate({ uid: uuid(), name: 'TST T2', content: '{}', status: 'active' });
-  track.templates.push(tpl.id);
-  await variant.setTemplateFamilies([tpl.family_id]); // no setPlans -> no rows -> nobody
+    assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: variant.uid } })).status, 201);
+    const added = await h.request('GET', `${P}/variants/${variant.uid}`, { token });
+    assert.equal(added.body.data.is_locked, false);
+    assert.equal(added.body.data.access_via, 'added');
+    assert.equal(added.body.data.cta, 'use');
+    assert.equal(added.body.data.Templates[0].is_locked, false);
+    assert.equal(typeof added.body.data.Templates[0].content, 'string', 'content served once added');
+  });
 
-  const proUserId = await userWithActivePlan(2, 33);
-  const r = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(proUserId, 'paid') });
-  assert.equal(r.body.data.is_locked, true);
-  assert.equal(r.body.data.Templates[0].content, undefined);
+  // A personal account has no business to add to and cannot buy: nothing to offer.
+  const personalId = await userWithActivePlan(2, 22);
+  await User.update({ account_type: 'personal' }, { where: { id: personalId } });
+  const personal = await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(personalId, 'paid') });
+  assert.equal(personal.body.data.is_locked, true);
+  assert.equal(personal.body.data.cta, null);
 });
 
 test('brand series list: counts, rollup lock state and the variant preview slice', async () => {
@@ -450,7 +458,6 @@ test('brand series list: counts, rollup lock state and the variant preview slice
   track.templates.push(shared.id, only.id);
   await variant.setTemplateFamilies([shared.family_id, only.family_id]);
   await second.setTemplateFamilies([shared.family_id]);          // shared across both variants of the series
-  await variant.setPlans([2]);
 
   const guest = await h.request('GET', `${P}/brand-series`);
   assert.equal(guest.status, 200);
@@ -463,8 +470,10 @@ test('brand series list: counts, rollup lock state and the variant preview slice
   assert.equal(row.Variants.length, 2, 'preview defaults to 4, so both are returned');
   assert.equal(row.Variants[0].templates_count, 2, 'per-variant tally on the card');
 
-  // an entitled viewer flips the rollup: one of two variants opens
+  // a subscriber who ADDED one of the two flips the rollup: one variant opens
   const proUserId = await userWithActivePlan(2, 44);
+  await Business.create({ uid: uuid(), user_id: proUserId, name: 'TST Rollup Biz', is_active: 1 })
+    .then((b) => models.BusinessVariant.create({ business_id: b.id, variant_id: variant.id }));
   const paid = await h.request('GET', `${P}/brand-series`, { token: h.userTokenFor(proUserId, 'paid') });
   const paidRow = paid.body.data.find((x) => x.uid === series.uid);
   assert.equal(paidRow.unlocked_variants_count, 1);
@@ -579,74 +588,83 @@ test('admin variant relations: set plan entitlements + industries, read back', a
 });
 
 // ---------- "Use This Brand Series" (variant adoption) ----------
-test('add to your business: only an entitled owner can adopt; adoption is durable', async () => {
+test('add to your business: needs a subscription, unlocks while subscribed, pauses when it lapses', async () => {
   const { variant } = await makeSeriesWithVariant('Adopt');
   const tpl = await createTemplate({ uid: uuid(), name: 'TST Adopt Tpl', content: '{"z":1}', status: 'active', category_id: 1 });
   track.templates.push(tpl.id);
   await variant.setTemplateFamilies([tpl.family_id]);
-  await variant.setPlans([2]); // Pro-only
 
-  const ownerId = (await User.create({ uid: uuid(), name: 'TST Owner', phone: `9${String((Date.now() + 41) % 1000000000).padStart(9, '0')}` })).id;
+  const ownerId = (await User.create({ uid: uuid(), name: 'TST Owner', account_type: 'business', phone: `9${String((Date.now() + 41) % 1000000000).padStart(9, '0')}` })).id;
   track.users.push(ownerId);
   const biz = await Business.create({ uid: uuid(), user_id: ownerId, name: 'TST Biz', is_active: 1 });
   const ownerTok = h.userTokenFor(ownerId, 'free');
+  const add = () => h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
 
-  // no entitling plan -> cannot adopt
-  const denied = await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
-  assert.equal(denied.status, 403);
+  // no subscription -> cannot add (buying is the way in without one)
+  assert.equal((await add()).status, 403);
 
-  // grant active Pro -> can adopt
   const sub = await UserSubscription.create({
     uid: uuid(), user_id: ownerId, plan_id: 2, sub_type: 'regular', status: 'active',
     starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
   });
-  const adopt = await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
-  assert.equal(adopt.status, 201);
-  assert.equal(adopt.body.data.Templates.length, 1);
+  await withPlanFeature(2, 'brand_series', 5, async () => {
+    // ANY active plan may add any variant — the allowed-plans list is not consulted
+    const adopt = await add();
+    assert.equal(adopt.status, 201);
+    assert.equal(adopt.body.data.Templates.length, 1);
+    assert.equal(adopt.body.data.is_locked, false);
 
-  // listed in the collection, and idempotent (no duplicate on re-adopt)
-  await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
-  const listed = await h.request('GET', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok });
-  assert.equal(listed.body.data.length, 1);
-  assert.equal(listed.body.data[0].uid, variant.uid);
+    // listed in the collection, and idempotent (no duplicate, no second slot)
+    assert.equal((await add()).status, 201);
+    const listed = await h.request('GET', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok });
+    assert.equal(listed.body.data.length, 1);
+    assert.equal(listed.body.data[0].uid, variant.uid);
+    assert.equal(listed.body.data[0].access_via, 'added');
 
-  // DURABLE: the plan lapses, but the adopted variant stays unlocked...
-  await sub.update({ status: 'expired' });
-  const detail = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
-  assert.equal(detail.body.data.is_locked, false, 'adopted variant stays unlocked after lapse');
-  assert.equal(typeof detail.body.data.Templates[0].content, 'string', 'and its content is served');
-  // ...and its template can still be turned into a project
-  const proj = await h.request('POST', `${P}/projects`, { token: ownerTok, body: { name: 'From adopted', template_id: tpl.id, content: '{"z":1}' } });
-  assert.equal(proj.status, 201);
+    const open = await h.request('POST', `${P}/projects`, { token: ownerTok, body: { name: 'From added', template_id: tpl.id, content: '{"z":1}' } });
+    assert.equal(open.status, 201, 'an added variant opens in the editor');
 
-  // remove adoption -> re-locks (no sub, no adoption)
-  const del = await h.request('DELETE', `${P}/businesses/${biz.uid}/variants/${variant.uid}`, { token: ownerTok });
-  assert.equal(del.status, 200);
-  const relocked = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
-  assert.equal(relocked.body.data.is_locked, true);
+    // The subscription lapses: the variant PAUSES — kept, but locked.
+    await sub.update({ status: 'expired' });
+    const paused = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
+    assert.equal(paused.body.data.is_locked, true, 'added variants need an active subscription');
+    assert.equal(paused.body.data.Templates[0].content, undefined);
+    assert.equal((await h.request('GET', `${P}/templates/${tpl.uid}`, { token: ownerTok })).status, 404);
+    assert.equal((await h.request('POST', `${P}/projects`, { token: ownerTok, body: { name: 'After lapse', template_id: tpl.id, content: '{}' } })).status, 403,
+      'no new projects from a paused variant');
+    assert.equal((await h.request('GET', `${P}/projects/${open.body.data.uid}`, { token: ownerTok })).status, 200,
+      'but the project made before the lapse is still the user\'s own work');
+    const pausedList = await h.request('GET', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok });
+    assert.equal(pausedList.body.data.length, 1, 'still in the collection');
+    assert.equal(pausedList.body.data[0].is_locked, true);
+    assert.equal(pausedList.body.data[0].Templates[0].is_locked, true);
+
+    // Subscribing again brings it straight back.
+    await sub.update({ status: 'active' });
+    assert.equal((await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok })).body.data.is_locked, false);
+
+    // remove -> re-locks
+    const del = await h.request('DELETE', `${P}/businesses/${biz.uid}/variants/${variant.uid}`, { token: ownerTok });
+    assert.equal(del.status, 200);
+    assert.equal((await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok })).body.data.is_locked, true);
+  });
 });
 
-test('adoption is per-variant: it does not unlock siblings in the same brand series', async () => {
+test('adding is per-variant: it does not unlock siblings in the same brand series', async () => {
   const { series, variant } = await makeSeriesWithVariant('Sibling');
   const sibling = await models.Variant.create({ uid: uuid(), series_id: series.id, name: 'TST Sibling Variant 2', is_active: 1 });
   track.variants.push(sibling.id);
-  await variant.setPlans([2]);
-  await sibling.setPlans([2]);
 
-  const ownerId = (await User.create({ uid: uuid(), name: 'TST Sib Owner', phone: `9${String((Date.now() + 63) % 1000000000).padStart(9, '0')}` })).id;
-  track.users.push(ownerId);
+  const ownerId = await userWithActivePlan(2, 63);
   const biz = await Business.create({ uid: uuid(), user_id: ownerId, name: 'TST Sib Biz', is_active: 1 });
-  const ownerTok = h.userTokenFor(ownerId, 'free');
-  const sub = await UserSubscription.create({
-    uid: uuid(), user_id: ownerId, plan_id: 2, sub_type: 'regular', status: 'active',
-    starts_at: new Date(), ends_at: new Date(Date.now() + 30 * 864e5), amount_paid: 299,
+  const ownerTok = h.userTokenFor(ownerId, 'paid');
+
+  await withPlanFeature(2, 'brand_series', 5, async () => {
+    assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } })).status, 201);
   });
 
-  await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token: ownerTok, body: { variant_uid: variant.uid } });
-  await sub.update({ status: 'expired' });   // entitlement gone; only the adoption remains
-
-  const adopted = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
-  assert.equal(adopted.body.data.is_locked, false, 'the adopted variant is open');
+  const added = await h.request('GET', `${P}/variants/${variant.uid}`, { token: ownerTok });
+  assert.equal(added.body.data.is_locked, false, 'the added variant is open');
   const other = await h.request('GET', `${P}/variants/${sibling.uid}`, { token: ownerTok });
   assert.equal(other.body.data.is_locked, true, 'its sibling in the same series stays locked');
 });
@@ -6303,6 +6321,226 @@ test('a purchased frame that was removed comes back free', async () => {
     'someone else cannot remove it');
 });
 
+// ---------- Variants: bought outright ----------
+// A business account with no plan buys one variant. Same payment path as frames:
+// pending row + order, then the shared webhook flips it to owned.
+
+const mkBusinessUser = async (prefix) => {
+  const u = await mkUser(prefix);
+  await u.update({ account_type: 'business' });
+  return u;
+};
+
+let variantSeq = 0;
+const mkPricedVariant = async (over = {}) => {
+  const stamp = `${Date.now()}${variantSeq++}`;
+  const { series, variant } = await makeSeriesWithVariant(`Buy ${stamp}`, { price: 499, strike_price: 799, ...over });
+  // A PREMIUM design: the variant grant must override is_premium for a plan-less buyer.
+  const tpl = await createTemplate({ name: `TST Buy Tpl ${stamp}`, content: '{"v":1}', status: 'active', is_premium: 1 });
+  track.templates.push(tpl.id);
+  await variant.setTemplateFamilies([tpl.family_id]);
+  return { series, variant, tpl };
+};
+
+const payWebhook = async (payment, payId) => {
+  const { raw, sig } = signWebhook({
+    event: 'payment.captured',
+    payload: { payment: { entity: { id: payId, order_id: payment.razorpay_order_id, amount: Math.round(payment.amount * 100) } } },
+  });
+  return h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } });
+};
+
+test('a business account without a plan buys a variant, and it unlocks without touching the brand-series quota', async () => {
+  const { variant, tpl } = await mkPricedVariant();
+  const u     = await mkBusinessUser('VariantBuyer');
+  const token = h.userTokenFor(u.id);
+
+  const before = (await h.request('GET', `${P}/variants/${variant.uid}`, { token })).body.data;
+  assert.equal(before.is_locked, true);
+  assert.equal(before.access_via, null);
+  assert.equal(before.cta, 'buy', 'a business account with no plan is offered Buy');
+  assert.equal(before.is_purchasable, true);
+  assert.equal(before.price, 499);
+  assert.equal(before.strike_price, 799);
+  assert.equal(before.total_price, 588.82, 'the card shows what Razorpay will charge');
+  assert.equal(before.Templates[0].content, undefined);
+  assert.equal((await h.request('GET', `${P}/templates/${tpl.uid}`, { token })).status, 404, 'hard gate holds before purchase');
+
+  const listCard = (await h.request('GET', `${P}/variants`, { token })).body.data.find((v) => v.uid === variant.uid);
+  assert.equal(listCard.is_purchasable, true, 'list cards carry the same price fields');
+
+  const order = await withStubbedRazorpay(async (calls) => {
+    const r = await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.data.type, 'one_time');
+    assert.equal(r.body.data.amount, 588.82);
+    assert.equal(calls[0].amount, 588.82, 'the order is for the post-tax figure');
+    assert.equal(r.body.data.variant_uid, variant.uid);
+    return r.body.data;
+  });
+
+  // Pending grants nothing.
+  assert.equal((await h.request('GET', `${P}/variants/${variant.uid}`, { token })).body.data.is_locked, true);
+  assert.deepEqual((await h.request('GET', `${P}/variants/mine`, { token })).body.data, []);
+
+  const payment = await models.Payment.findOne({ where: { uid: order.payment_uid } });
+  assert.equal(payment.purchase_type, 'variant', 'fulfilment routes on this');
+  assert.equal((await payWebhook(payment, `pay_variant_${u.id}`)).status, 200);
+
+  const after = (await h.request('GET', `${P}/variants/${variant.uid}`, { token })).body.data;
+  assert.equal(after.is_locked, false);
+  assert.equal(after.access_via, 'purchased');
+  assert.equal(after.cta, 'use');
+  assert.equal(after.Templates[0].is_locked, false, 'variant grant supersedes is_premium, even with no plan');
+  assert.equal(after.Templates[0].content, '{"v":1}');
+  assert.equal((await h.request('GET', `${P}/templates/${tpl.uid}`, { token })).status, 200, 'template detail opens');
+
+  const mine = (await h.request('GET', `${P}/variants/mine`, { token })).body.data;
+  assert.deepEqual(mine.map((r) => r.Variant.uid), [variant.uid]);
+  assert.equal(mine[0].payment_id, undefined, 'payment plumbing is not exposed');
+
+  // Outside quota: nothing in business_variants, so the meter reads zero.
+  const { heldVariantCount } = require('../src/constants/quotaMeters');
+  assert.equal(await heldVariantCount(u.id), 0, 'a purchase never takes a Brand Series slot');
+  assert.equal((await models.BusinessVariant.count({ where: { variant_id: variant.id } })), 0);
+
+  // Still out of search — a buyer reaches these through the variant only.
+  const search = await h.request('GET', `${P}/templates?q=${encodeURIComponent(tpl.fam.name)}`, { token });
+  assert.equal(search.status, 200);
+  assert.ok(!search.body.data.some((c) => c.family_id === tpl.family_id), 'variant designs never surface in search, even for a buyer');
+
+  const history = (await h.request('GET', `${P}/subscriptions/payments`, { token })).body.data.items;
+  const row = history.find((p) => p.uid === order.payment_uid);
+  assert.equal(row.purchase_type, 'variant');
+  assert.match(row.description, /TST Buy .* Series – TST Buy .* Variant/);
+
+  const replay = await payWebhook(payment, `pay_variant_${u.id}`);
+  assert.equal(replay.body.idempotent, true);
+  assert.equal((await models.UserVariant.count({ where: { user_id: u.id } })), 1);
+
+  await withStubbedRazorpay(async (calls) => {
+    const again = await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token });
+    assert.equal(again.status, 409, 'no buying it twice');
+    assert.deepEqual(calls, []);
+  });
+
+  assert.equal((await h.request('GET', `${P}/variants/mine`)).status, 401);
+});
+
+test('variant purchase is refused for personal accounts, unpriced variants and access the user already has', async () => {
+  const { variant } = await mkPricedVariant();
+
+  await withStubbedRazorpay(async (calls) => {
+    const personal = await mkUser('VariantPersonal');
+    await personal.update({ account_type: 'personal' });
+    assert.equal((await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token: h.userTokenFor(personal.id) })).status, 403);
+
+    const undecided = await mkUser('VariantNoType');
+    assert.equal((await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token: h.userTokenFor(undecided.id) })).status, 403,
+      'an account that has not chosen business is not one');
+
+    assert.equal((await h.request('POST', `${P}/variants/${variant.uid}/purchase`)).status, 401);
+
+    const { variant: unpriced } = await mkPricedVariant({ price: null, strike_price: null });
+    const biz = await mkBusinessUser('VariantUnpriced');
+    const card = (await h.request('GET', `${P}/variants/${unpriced.uid}`, { token: h.userTokenFor(biz.id) })).body.data;
+    assert.equal(card.is_purchasable, false);
+    assert.equal(card.total_price, null);
+    assert.equal((await h.request('POST', `${P}/variants/${unpriced.uid}/purchase`, { token: h.userTokenFor(biz.id) })).status, 400);
+
+    // A subscriber with Brand Series slots left adds it rather than buying it.
+    const proId = await userWithActivePlan(2, 77);
+    await User.update({ account_type: 'business' }, { where: { id: proId } });
+    const proBiz = await Business.create({ uid: uuid(), user_id: proId, name: 'TST Buy Pro Biz', is_active: 1 });
+    const pro = h.userTokenFor(proId, 'paid');
+    await withPlanFeature(2, 'brand_series', 1, async () => {
+      assert.equal((await h.request('GET', `${P}/variants/${variant.uid}`, { token: pro })).body.data.cta, 'add');
+      const early = await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token: pro });
+      assert.equal(early.status, 409);
+      assert.match(early.body.error.message, /add this variant to your business/);
+
+      // Added already: nothing to buy either.
+      assert.equal((await h.request('POST', `${P}/businesses/${proBiz.uid}/variants`, { token: pro, body: { variant_uid: variant.uid } })).status, 201);
+      const dup = await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token: pro });
+      assert.equal(dup.status, 409);
+      assert.match(dup.body.error.message, /already added/);
+    });
+
+    assert.deepEqual(calls, [], 'no order was created by any refused attempt');
+  });
+});
+
+test('a subscriber whose Brand Series slots are full buys the next variant, outside the quota', async () => {
+  const { variant: held }  = await mkPricedVariant();
+  const { variant: extra } = await mkPricedVariant();
+  const proId = await userWithActivePlan(2, 78);
+  await User.update({ account_type: 'business' }, { where: { id: proId } });
+  const biz   = await Business.create({ uid: uuid(), user_id: proId, name: 'TST Full Biz', is_active: 1 });
+  const token = h.userTokenFor(proId, 'paid');
+
+  await withPlanFeature(2, 'brand_series', 1, async () => {
+    assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: held.uid } })).status, 201);
+    assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: extra.uid } })).status, 402,
+      'the quota is full');
+
+    const card = (await h.request('GET', `${P}/variants/${extra.uid}`, { token })).body.data;
+    assert.equal(card.cta, 'buy', 'a full subscriber is offered Buy');
+
+    const order = await withStubbedRazorpay(async () => {
+      const r = await h.request('POST', `${P}/variants/${extra.uid}/purchase`, { token });
+      assert.equal(r.status, 201);
+      return r.body.data;
+    });
+    await payWebhook(await models.Payment.findOne({ where: { uid: order.payment_uid } }), `pay_variant_full_${proId}`);
+
+    const after = (await h.request('GET', `${P}/variants/${extra.uid}`, { token })).body.data;
+    assert.equal(after.access_via, 'purchased');
+    assert.equal((await usageOf(token, 'brand_series')).used, 1, 'the bought variant takes no slot');
+
+    // Adding a variant they already own would waste a slot.
+    await h.request('DELETE', `${P}/businesses/${biz.uid}/variants/${held.uid}`, { token });
+    assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: extra.uid } })).status, 409);
+  });
+
+  // The subscription ends: the added variant pauses, the bought one keeps working.
+  await UserSubscription.update({ status: 'expired' }, { where: { user_id: proId } });
+  assert.equal((await h.request('GET', `${P}/variants/${extra.uid}`, { token })).body.data.is_locked, false);
+});
+
+test('an abandoned variant checkout is reused, and a retired variant stays open to its buyer only', async () => {
+  const { variant } = await mkPricedVariant();
+  const u     = await mkBusinessUser('VariantRetry');
+  const token = h.userTokenFor(u.id);
+
+  const second = await withStubbedRazorpay(async () => {
+    assert.equal((await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token })).status, 201);
+    const r = await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token });
+    assert.equal(r.status, 201, 'a pending checkout does not block a retry');
+    return r.body.data;
+  });
+
+  const rows = await models.UserVariant.findAll({ where: { user_id: u.id, variant_id: variant.id } });
+  assert.equal(rows.length, 1, 'one ownership row, repointed');
+  const payment = await models.Payment.findOne({ where: { uid: second.payment_uid } });
+  assert.equal(rows[0].payment_id, payment.id);
+  await payWebhook(payment, `pay_variant_retry_${u.id}`);
+
+  // Retire it: off the shelf, but not out of the buyer's hands.
+  await variant.update({ is_active: 0 });
+  const stranger = await mkBusinessUser('VariantStranger');
+  assert.equal((await h.request('GET', `${P}/variants/${variant.uid}`, { token: h.userTokenFor(stranger.id) })).status, 404);
+  assert.equal((await h.request('POST', `${P}/variants/${variant.uid}/purchase`, { token: h.userTokenFor(stranger.id) })).status, 404,
+    'a retired variant is not for sale');
+  const own = await h.request('GET', `${P}/variants/${variant.uid}`, { token });
+  assert.equal(own.status, 200);
+  assert.equal(own.body.data.access_via, 'purchased');
+  assert.ok(!(await h.request('GET', `${P}/variants`, { token })).body.data.some((v) => v.uid === variant.uid),
+    'but it is gone from the catalogue');
+
+  // A bought variant cannot be deleted out from under its buyer.
+  await assert.rejects(variant.destroy(), (err) => err.name === 'SequelizeForeignKeyConstraintError');
+});
+
 test('a business can only apply a frame from its owner shelf', async () => {
   const cat     = await mkFrameCategory();
   const mine    = await mkFrame({ category_id: cat.id });
@@ -8477,36 +8715,67 @@ test('projects from templates count against Business Posts or Video by template 
   }));
 });
 
-test('brand series count distinct series across businesses, not variants', async () => {
+test('the Brand Series quota counts variants added at a time, across businesses', async () => {
+  const ft = await models.FeatureType.findOne({ where: { key: 'brand_series' } });
+  assert.equal(ft.reset_period, 'never', 'a ceiling on what is held, not a monthly tally (migration 056)');
+
   const userId = await userWithActivePlan(2, 9502);
   const token  = h.userTokenFor(userId, 'paid');
   const a  = await makeSeriesWithVariant('MeterA');
   const a2 = await models.Variant.create({ uid: uuid(), series_id: a.series.id, name: 'TST MeterA Variant 2', is_active: 1 });
   track.variants.push(a2.id);
   const b  = await makeSeriesWithVariant('MeterB');
-  for (const v of [a.variant, a2, b.variant]) await v.setPlans([2]);
 
   const biz1 = await Business.create({ uid: uuid(), user_id: userId, name: 'TST Meter Biz 1', is_active: 1 });
   const biz2 = await Business.create({ uid: uuid(), user_id: userId, name: 'TST Meter Biz 2', is_active: 1 });
   const adopt  = (biz, v) => h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: v.uid } });
   const remove = (biz, v) => h.request('DELETE', `${P}/businesses/${biz.uid}/variants/${v.uid}`, { token });
 
-  await withPlanFeature(2, 'brand_series', 1, async () => {
+  await withPlanFeature(2, 'brand_series', 2, async () => {
     assert.equal((await adopt(biz1, a.variant)).status, 201);
-    assert.equal((await adopt(biz1, a2)).status, 201, 'a second variant of a held series is not a new series');
-    assert.equal((await adopt(biz2, a.variant)).status, 201, 'nor is the same series in another business');
-    assert.equal((await adopt(biz1, a.variant)).status, 201, 're-adopting stays idempotent');
-    assert.equal((await adopt(biz1, b.variant)).status, 402, 'a second distinct series is over a limit of 1');
-    assert.equal((await usageOf(token, 'brand_series')).used, 1, 'charged once for series A');
+    assert.equal((await adopt(biz1, a2)).status, 201, 'a second variant of the same series is a second slot');
+    assert.equal((await adopt(biz2, a.variant)).status, 201, 'the same variant in another business is not');
+    assert.equal((await adopt(biz1, a.variant)).status, 201, 're-adding stays idempotent');
+    const over = await adopt(biz1, b.variant);
+    assert.equal(over.status, 402, 'a third variant is over a limit of 2');
+    assert.equal(over.body.error.code, 'QUOTA_EXCEEDED');
+    assert.equal((await usageOf(token, 'brand_series')).used, 2);
 
-    for (const [biz, v] of [[biz1, a.variant], [biz1, a2], [biz2, a.variant]]) await remove(biz, v);
-    assert.equal((await adopt(biz1, b.variant)).status, 402, 'monthly: removing a series does not refund the add');
-
-    await withResetPeriod('brand_series', 'never', async () => {
-      assert.equal((await usageOf(token, 'brand_series')).used, 0, 'nothing held any more');
-      assert.equal((await adopt(biz1, b.variant)).status, 201, 'as a ceiling, removing series A freed the slot');
-    });
+    // A ceiling: removing a variant frees its slot.
+    await remove(biz1, a2);
+    assert.equal((await usageOf(token, 'brand_series')).used, 1);
+    assert.equal((await adopt(biz1, b.variant)).status, 201);
   });
+});
+
+test('a downgrade keeps the most recently added variants up to the new limit', async () => {
+  const userId = await userWithActivePlan(2, 9505);
+  const token  = h.userTokenFor(userId, 'paid');
+  const biz    = await Business.create({ uid: uuid(), user_id: userId, name: 'TST Trim Biz', is_active: 1 });
+  const vs     = [];
+  for (const label of ['Trim1', 'Trim2', 'Trim3']) vs.push((await makeSeriesWithVariant(label)).variant);
+
+  await withPlanFeature(2, 'brand_series', 3, async () => {
+    for (const v of vs) {
+      assert.equal((await h.request('POST', `${P}/businesses/${biz.uid}/variants`, { token, body: { variant_uid: v.uid } })).status, 201);
+    }
+  });
+  // Spread the add times so "most recent" is unambiguous at second resolution.
+  const links = await models.BusinessVariant.findAll({ where: { business_id: biz.id }, order: [['id', 'ASC']] });
+  for (const [i, l] of links.entries()) {
+    await models.sequelize.query('UPDATE business_variants SET created_at = :at WHERE id = :id',
+      { replacements: { at: new Date(Date.now() - (links.length - i) * 60000), id: l.id } });
+  }
+
+  // The plan activating is where the trim runs; the new limit is what it reads.
+  const trimToQuota = require('../src/services/variantQuota.service').trimToQuota;
+  const removed = await withPlanFeature(2, 'brand_series', 1, () => trimToQuota(userId));
+  assert.equal(removed, 2);
+  const left = await models.BusinessVariant.findAll({ where: { business_id: biz.id } });
+  assert.deepEqual(left.map((l) => l.variant_id), [vs[2].id], 'the newest add survives');
+
+  // An unlimited plan trims nothing.
+  assert.equal(await withPlanFeature(2, 'brand_series', -1, () => trimToQuota(userId)), 0);
 });
 
 test('frames added for free count against the plan; frames bought outright never do', async () => {

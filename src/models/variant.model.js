@@ -13,6 +13,9 @@ module.exports = (sequelize) => {
     description:      { type: DataTypes.TEXT, allowNull: true },
     thumbnail_s3_key: { type: DataTypes.STRING(500), allowNull: true },
     likes_count:      { type: DataTypes.INTEGER, defaultValue: 0 },   // display-only figure on the variant card (no per-user like table yet)
+    // Outright purchase (user_variants). PRE-tax; NULL = not for sale.
+    price:            { type: DataTypes.DECIMAL(10, 2), allowNull: true },
+    strike_price:     { type: DataTypes.DECIMAL(10, 2), allowNull: true },   // display-only "was" price
     display_order:    { type: DataTypes.INTEGER, defaultValue: 0 },
     is_active:        { type: DataTypes.TINYINT, defaultValue: 1 },
   }, { tableName: 'variants' });

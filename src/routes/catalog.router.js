@@ -1,6 +1,8 @@
 const express      = require('express');
 const router       = express.Router();
 const controller   = require('../controllers/catalog.controller');
+const purchaseController = require('../controllers/variantPurchase.controller');
+const authenticate = require('../middlewares/authenticate');
 const optionalAuth = require('../middlewares/optionalAuth');
 const rateLimiter  = require('../middlewares/rateLimiter');
 const deprecated   = require('../middlewares/deprecated');
@@ -371,18 +373,79 @@ router.get('/variants', controller.variants);
 
 /**
  * @swagger
+ * /variants/mine:
+ *   get:
+ *     summary: List the variants the caller has bought
+ *     description: >-
+ *       Variants bought outright, newest first, each with its variant card. Pending
+ *       checkouts are not included. Variants reached through a plan or a business
+ *       adoption are not listed here — see `access_via` on the variant itself.
+ *     tags: [Catalog]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Bought variants
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/UserVariantListResponse' } } }
+ *       401:
+ *         description: Not signed in
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.get('/variants/mine', authenticate, purchaseController.listMine);
+
+/**
+ * @swagger
+ * /variants/{uid}/purchase:
+ *   post:
+ *     summary: Buy a variant outright
+ *     description: >-
+ *       For a BUSINESS account: without a subscription at any time; with one, only once the
+ *       plan's Brand Series slots are full (409 otherwise - add it to the business instead).
+ *       Creates a Razorpay order for the variant's `price` plus GST and records the purchase
+ *       as pending; confirm it with
+ *       `POST /subscriptions/verify-payment` (or let the webhook do it). On confirmation
+ *       the variant unlocks permanently for the user — every template in it opens, in
+ *       full, regardless of plan — and nothing is counted against the plan's Brand
+ *       Series quota. Variant templates still never appear in search or industry /
+ *       category listings; they are reached through the variant.
+ *     tags: [Catalog]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       201:
+ *         description: Razorpay order to check out
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantPurchaseResponse' } } }
+ *       400:
+ *         description: The variant is not for sale (no price set)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       403:
+ *         description: Not a business account
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       404:
+ *         description: No active variant with that uid
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       409:
+ *         description: The caller already has this variant (bought, or added to their business), or is a subscriber with Brand Series slots left
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.post('/variants/:uid/purchase', authenticate, purchaseController.purchase);
+
+/**
+ * @swagger
  * /variants/{uid}:
  *   get:
  *     summary: Get a variant with its templates (locked ones included as upsell teasers)
  *     description: >-
  *       The variant card (name, description, thumbnail, badge, industries, likes_count) is public,
  *       and so is the TEMPLATE LIST: templates are always returned so a visitor can see what they
- *       would be buying. When the caller is not entitled the response carries `is_locked=true` and
+ *       would be buying. When the caller cannot use it the response carries `is_locked=true` and
  *       every template is returned WITHOUT its `content` (the design payload) - thumbnails only.
- *       Access requires the caller's ACTIVE subscription plan to entitle the variant, or one of
- *       their businesses to have adopted it. A variant with no plan restrictions is locked to
- *       everyone, and guests are always locked. Opening a template or starting a project from one
- *       is still refused outright while locked.
+ *       A subscription alone unlocks nothing. Use requires the caller to have BOUGHT the variant
+ *       (`POST /variants/{uid}/purchase`), or ADDED it to their business
+ *       (`POST /businesses/{uid}/variants`) while holding an active subscription; `access_via`
+ *       says which (`purchased` | `added`). Guests are always locked. Opening a template or
+ *       starting a project from a locked variant is refused outright.
+ *       `cta` is the one action to offer: `use`, `add`, `buy`, `upgrade`, `subscribe`,
+ *       `sign_in`, or null (personal accounts). `is_purchasable` / `total_price` price the Buy button.
  *       `Templates` is one card per design (template family), picked for the viewer by the same
  *       rules as `GET /templates`: a design with no active version in the viewer's languages (or
  *       a text-free one) is not listed, and the card shows the highest-ranked language, then the
@@ -461,7 +524,7 @@ router.get('/variants/:uid', controller.variantDetail);
  *     deprecated: true
  *     description: >-
  *       Identical to `GET /variants/{uid}`, including the gating: the card and template list
- *       are public, but a caller who is not entitled gets `is_locked=true` and templates
+ *       are public, but a caller who cannot use it gets `is_locked=true` and templates
  *       stripped of their `content`. **Use `/variants/{uid}`.**
  *     tags: [Catalog]
  *     security: []

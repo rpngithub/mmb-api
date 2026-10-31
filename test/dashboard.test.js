@@ -204,7 +204,7 @@ test('revenue_trend: success payments only, by IST day, NULL purchase_type count
   assert.deepEqual(d.totals, { gross: 1298, net: 1100, count: 2 });
   assert.equal(d.points.length, 10);                                  // gap-filled
   const day = d.points.find((p) => p.date === '2001-03-05');
-  assert.deepEqual(day.by_type, { subscription: 1180, frame: 118, quota_pack: 0 });
+  assert.deepEqual(day.by_type, { subscription: 1180, frame: 118, quota_pack: 0, variant: 0 });
   assert.equal(d.points.filter((p) => p.count).length, 1);
 
   const monthly = (await widget('revenue_trend', `from=${FROM}&to=${TO}&granularity=month`)).body.data;

@@ -332,6 +332,9 @@ router.put('/:uid/brand-colors', authenticate, validate(setBrandColorsSchema), c
  *       `Templates` on each variant is one card per design (template family), picked for the
  *       owner by their Preferred Languages then the default size — the same rules as
  *       `GET /templates`. A design with no version in the owner's languages is not listed.
+ *       Each variant carries `is_locked` / `access_via`: an added variant is usable only while
+ *       the owner has an active subscription. Without one it stays listed but PAUSED
+ *       (`is_locked=true`, no design content) and resumes on resubscribing.
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -340,13 +343,16 @@ router.put('/:uid/brand-colors', authenticate, validate(setBrandColorsSchema), c
  *         description: Array of adopted variants, each with its active design cards (`Templates`)
  *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantListResponse' } } }
  *   post:
- *     summary: Adopt a variant into this business ("Use This Brand Series")
+ *     summary: Add a variant to this business ("Add to your Business")
  *     description: >-
- *       Requires the owner's ACTIVE subscription plan to entitle the VARIANT (403 otherwise).
- *       Note the button label says brand series but the grant is per-variant: adopting one
- *       variant does not unlock its siblings in the same series. Idempotent - re-adopting an
- *       already-added variant is a no-op. The adoption is a durable grant: the business keeps
- *       access to the variant's templates even if the plan later lapses.
+ *       How a subscriber gets to USE a variant: a subscription alone unlocks nothing. Needs an
+ *       ACTIVE subscription (any plan, 403 otherwise) and a free Brand Series slot: the plan's
+ *       `brand_series` limit is how many variants may be added at a time, across all the owner's
+ *       businesses (402 `QUOTA_EXCEEDED` when full - the variant can then be bought with
+ *       `POST /variants/{uid}/purchase`). Removing a variant frees its slot. The grant is
+ *       per-variant and lasts only while subscribed; on a downgrade the most recently added
+ *       variants are kept up to the new limit and the rest removed. Idempotent - adding an
+ *       already-added variant is a no-op. 409 when the owner already bought it.
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -363,8 +369,14 @@ router.put('/:uid/brand-colors', authenticate, validate(setBrandColorsSchema), c
  *       201:
  *         description: The adopted variant with its template cards
  *         content: { application/json: { schema: { $ref: '#/components/schemas/VariantResponse' } } }
+ *       402:
+ *         description: Brand Series quota full - buy the variant instead
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *       403:
- *         description: Plan does not include this variant, or business not owned by caller
+ *         description: No active subscription, or business not owned by caller
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       409:
+ *         description: The owner already bought this variant
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  * /businesses/{uid}/variants/{variantUid}:
  *   delete:
@@ -407,9 +419,8 @@ router.delete('/:uid/variants/:variantUid', authenticate, controller.removeVaria
  *     summary: "[Deprecated] Pre-rename alias of POST /businesses/{uid}/variants"
  *     deprecated: true
  *     description: >-
- *       Identical to `POST /businesses/{uid}/variants`, including the per-VARIANT
- *       entitlement check (403 when the owner's active plan does not cover it) and the
- *       durable grant. Either `variant_uid` or the pre-rename `theme_uid` is accepted on
+ *       Identical to `POST /businesses/{uid}/variants`, including the subscription and
+ *       Brand Series quota checks. Either `variant_uid` or the pre-rename `theme_uid` is accepted on
  *       both paths. **Use `/businesses/{uid}/variants`.**
  *     tags: [Business]
  *     security: [{ bearerAuth: [] }]

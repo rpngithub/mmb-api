@@ -241,6 +241,12 @@ module.exports = {
     add: { Frame: { $ref: '#/components/schemas/Frame' } },
   },
 
+  // "My variants" — a variant bought outright. Same rule as UserFrame for payment_id.
+  UserVariant: {
+    exclude: ['payment_id'],
+    add: { Variant: { $ref: '#/components/schemas/Variant' } },
+  },
+
   // A top-up pack on the shelf. Prices are stored pre-tax, so the store shape adds
   // the tax-inclusive figure the buyer is actually charged.
   QuotaPack: {
@@ -301,6 +307,14 @@ module.exports = {
     add: {
       is_locked:       { type: 'boolean' },
       templates_count: { type: 'integer' },
+      // Outright purchase (POST /variants/{uid}/purchase). `price` is pre-tax.
+      price:           { type: 'number', nullable: true, description: 'Pre-tax price; null = not for sale' },
+      strike_price:    { type: 'number', nullable: true, description: 'Display-only "was" price' },
+      is_purchasable:  { type: 'boolean', description: 'Has a price, so a Buy button can be shown' },
+      gst_amount:      { type: 'number', nullable: true },
+      total_price:     { type: 'number', nullable: true, description: 'What Razorpay will charge (price + GST)' },
+      access_via:      { type: 'string', nullable: true, enum: ['purchased', 'added', null], description: 'How the viewer uses this variant; null = locked. `added` = added to their business, counts only while subscribed. A purchase wins when both apply.' },
+      cta:             { type: 'string', nullable: true, enum: ['use', 'add', 'buy', 'upgrade', 'subscribe', 'sign_in', null], description: 'The one action the card should offer this viewer. null = nothing applies (personal account).' },
     },
   },
 

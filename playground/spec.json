@@ -983,7 +983,7 @@
       },
       {
         "name": "Businesses",
-        "description": "Owner-scoped business management, the Brand Kit (keywords, palette, fonts, watermark), the public \"Near Me\" storefront, and adopted (premium) variants.",
+        "description": "Owner-scoped business management, the Brand Kit (keywords, palette, fonts, watermark), the public \"Near Me\" storefront, and Brand Series variants added to the business.",
         "item": [
           {
             "name": "Create Business",
@@ -1580,7 +1580,7 @@
             ]
           },
           {
-            "name": "List Adopted Variants",
+            "name": "List Added Variants",
             "request": {
               "method": "GET",
               "header": [],
@@ -1595,7 +1595,7 @@
                   "variants"
                 ]
               },
-              "description": "Variants added to this business, each with its active template cards."
+              "description": "Variants added to this business, each with its template cards. `is_locked: true` = PAUSED (no active subscription); resumes on resubscribing."
             },
             "event": [
               {
@@ -1616,7 +1616,7 @@
             ]
           },
           {
-            "name": "Adopt Variant (\"Use This Brand Series\")",
+            "name": "Add Variant to Business (\"Add to your Business\")",
             "request": {
               "method": "POST",
               "header": [
@@ -1636,7 +1636,7 @@
                   "variants"
                 ]
               },
-              "description": "The button says brand series, but the grant is per-VARIANT — adopting one does not unlock its siblings. Requires the owner's ACTIVE plan to entitle the variant (403 otherwise). Idempotent, and the grant is durable — access survives a lapsed plan.",
+              "description": "How a subscriber gets to USE a variant — a subscription alone unlocks nothing. Needs an ACTIVE subscription (any plan, 403 otherwise) and a free Brand Series slot (402 QUOTA_EXCEEDED when full — buy it instead). The plan's `brand_series` limit = variants added at a time; removing one frees its slot. Works only while subscribed. Idempotent. 409 if already bought.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"variant_uid\": \"{{variant_uid}}\"\n}",
@@ -1666,7 +1666,7 @@
             ]
           },
           {
-            "name": "Remove Adopted Variant",
+            "name": "Remove Added Variant",
             "request": {
               "method": "DELETE",
               "header": [],
@@ -4739,10 +4739,84 @@
                   }
                 ]
               },
-              "description": "The variant card is public, and so is the TEMPLATE LIST — templates are always returned so a visitor can see what they would be buying. When the caller is not entitled, `is_locked=true` and every template comes back WITHOUT its `content` (thumbnails only). Send `Bearer {{access_token}}` to be entitled — guests are always locked. Opening a template or starting a project from one is still refused while locked.\n\nTemplates are one card per design, picked by the same language rules as `GET /templates` (`language` / `all_languages` behave the same; a design with no version in the viewer's languages is not listed).",
+              "description": "The variant card is public, and so is the TEMPLATE LIST — templates are always returned so a visitor can see what they would be buying. When the caller cannot use it, `is_locked=true` and every template comes back WITHOUT its `content` (thumbnails only). A subscription alone unlocks nothing: the caller must have BOUGHT the variant, or ADDED it to their business while subscribed. Guests are always locked. Opening a template or starting a project from a locked variant is refused.\n\nTemplates are one card per design, picked by the same language rules as `GET /templates` (`language` / `all_languages` behave the same; a design with no version in the viewer's languages is not listed).\n\n`access_via` is `purchased` | `added` | null. `cta` is the one action to offer: `use` | `add` | `buy` | `upgrade` | `subscribe` | `sign_in` | null. `is_purchasable` / `total_price` price the Buy button.",
               "auth": {
                 "type": "noauth"
               }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Buy Variant",
+            "request": {
+              "method": "POST",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/variants/{{variant_uid}}/purchase",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "variants",
+                  "{{variant_uid}}",
+                  "purchase"
+                ]
+              },
+              "description": "Business accounts only (subscribed or not). Creates a Razorpay order for the variant's `price` plus GST and records the purchase as pending. Confirm it with **Subscriptions > Verify Payment** or let the webhook do it. On confirmation the variant unlocks permanently, and it never counts against the plan's Brand Series quota. Subscribers may buy only once their Brand Series slots are full. 409 when already bought or added, or when a subscriber still has slots; 400 when the variant has no price."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "if (d.order_id) pm.environment.set('variant_order_id', d.order_id);",
+                    "if (d.payment_uid) pm.environment.set('payment_uid', d.payment_uid);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List My Variants",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/variants/mine",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "variants",
+                  "mine"
+                ]
+              },
+              "description": "Variants you bought outright, newest first. Pending checkouts, and variants added to a business, are not listed."
             },
             "event": [
               {
@@ -5534,7 +5608,7 @@
       },
       {
         "name": "Quota",
-        "description": "The Plan Usage screen and AI-credit top-ups. Every integer plan feature is a metered limit: Business Posts / Video Templates count projects created from a template of that type, Brand Series counts distinct series adopted, Brand Frames counts frames added for free. A metered action over its limit returns **402 `QUOTA_EXCEEDED`**. Users without a subscription are held to the free plan.",
+        "description": "The Plan Usage screen and AI-credit top-ups. Every integer plan feature is a metered limit: Business Posts / Video Templates count projects created from a template of that type, Brand Series counts variants currently added to the business (a ceiling, not monthly), Brand Frames counts frames added for free. A metered action over its limit returns **402 `QUOTA_EXCEEDED`**. Users without a subscription are held to the free plan.",
         "item": [
           {
             "name": "My Usage",
@@ -5859,6 +5933,12 @@
       },
       {
         "key": "variant_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "variant_order_id",
         "value": "",
         "type": "default",
         "enabled": true

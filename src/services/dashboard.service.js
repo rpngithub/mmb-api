@@ -146,7 +146,7 @@ async function revenueSummary() {
 }
 
 // Rows from before `purchase_type` existed are all frames (see payment.model.js).
-const PURCHASE_TYPES = ['subscription', 'frame', 'quota_pack'];
+const PURCHASE_TYPES = ['subscription', 'frame', 'quota_pack', 'variant'];
 
 async function revenueTrend(query) {
   const w = resolveRange(query, 30);

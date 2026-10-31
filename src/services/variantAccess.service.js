@@ -1,17 +1,24 @@
 const { Op } = require('sequelize');
-const { Business, BusinessVariant, Template, VariantTemplate, VariantPlanRestriction } = require('../models');
+const { Business, BusinessVariant, UserVariant, Template, VariantTemplate } = require('../models');
 const userSubRepo = require('../repositories/userSubscription.repository');
 
 // Central authority for premium-variant access. Gating sits on the VARIANT, not on its
-// parent Brand Series. Two ways to reach a variant's templates:
-//   1. ENTITLEMENT — the viewer's ACTIVE subscription plan is in the variant's allowed set.
-//   2. ADOPTION    — the viewer owns a business that has adopted the variant. Adoption is
-//      gated by entitlement at add-time, so it stands as a DURABLE grant afterwards
-//      (a lapsed plan still keeps adopted variants usable).
-// A variant with no allowed plans can never be entitled or adopted → locked to everyone.
+// parent Brand Series. Every variant is SHOWN to everyone (guests included) as a teaser;
+// USING one — its design content, opening a template, starting a project — takes one of:
+//   1. PURCHASE — the viewer bought the variant outright (user_variants, active).
+//      Permanent, with or without a subscription (see variantPurchase.service).
+//   2. ADDED    — a business the viewer owns added the variant ("Add to your Business")
+//      AND the viewer holds an active subscription. Adding is limited by the plan's
+//      Brand Series quota (variantQuota.service); when the subscription lapses the
+//      added variants pause, and come back on resubscribing.
+// A subscription on its own unlocks nothing. The per-variant "allowed plans" list
+// (variant_plan_restrictions) is no longer read anywhere: it dates from when the
+// variant was hidden from everyone but its plans, and now that every variant is
+// shown to everyone it has no job.
 //
-// The JWT only carries a coarse paid/free tier, never the plan_id, so plan checks use a
-// per-request DB lookup (an upgrade must grant access immediately, not on token refresh).
+// The JWT only carries a coarse paid/free tier, so "is there an active subscription?"
+// is a per-request DB lookup — a renewal must restore access immediately, not on
+// token refresh.
 
 const asArray = (v) => (Array.isArray(v) ? v : [v]);
 
@@ -22,59 +29,57 @@ async function activePlanId(viewer) {
   return sub ? sub.plan_id : null;
 }
 
-// Does the viewer own a business that has adopted any of the given variant(s)?
-async function hasAdopted(userId, variantIds) {
-  if (!userId) return false;
-  const ids = asArray(variantIds);
-  if (!ids.length) return false;
+// Variant ids, among `ids`, that a business owned by `userId` has added. Says nothing
+// about whether they are usable right now — that also needs an active subscription.
+async function addedVariantIds(userId, ids) {
+  if (!userId || !ids.length) return new Set();
   const businesses = await Business.findAll({ where: { user_id: userId }, attributes: ['id'] });
-  if (!businesses.length) return false;
-  const count = await BusinessVariant.count({
+  if (!businesses.length) return new Set();
+  const rows = await BusinessVariant.findAll({
     where: { business_id: { [Op.in]: businesses.map((b) => b.id) }, variant_id: { [Op.in]: ids } },
+    attributes: ['variant_id'],
   });
-  return count > 0;
+  return new Set(rows.map((r) => r.variant_id));
 }
 
-// Is the viewer's active plan in the given allowed set? (Strict entitlement — the
-// rule for ADOPTING a variant; adoption itself does not count here.)
-async function isPlanEntitled(allowedPlanIds, viewer) {
-  if (!allowedPlanIds.length || !viewer?.userId) return false;
-  const planId = await activePlanId(viewer);
-  return Boolean(planId && allowedPlanIds.includes(planId));
+// Variant ids, among `ids`, the user bought. Pending checkouts grant nothing.
+async function purchasedVariantIds(userId, ids) {
+  if (!userId || !ids.length) return new Set();
+  const rows = await UserVariant.findAll({
+    where: { user_id: userId, variant_id: { [Op.in]: ids }, status: 'active' },
+    attributes: ['variant_id'],
+  });
+  return new Set(rows.map((r) => r.variant_id));
 }
 
-// Can the viewer open a variant's templates? Entitled OR adopted.
-async function isVariantUnlocked({ id, allowedPlanIds }, viewer) {
-  if (viewer?.userId && (await hasAdopted(viewer.userId, id))) return true;
-  return isPlanEntitled(allowedPlanIds, viewer);
-}
-
-// Bulk form of isVariantUnlocked: which of these variants can the viewer open?
-// Fixed query count (3) no matter how many variants are asked about, so the brand
+// HOW the viewer reaches each of these variants: Map<variantId, 'purchased' | 'added'>;
+// a variant they cannot use is absent. A purchase wins when both apply — it is the
+// one that survives the subscription ending.
+//
+// Fixed query count (≤4) no matter how many variants are asked about, so the brand
 // series list can report an unlocked tally without a per-variant round trip.
-async function unlockedVariantIds(variantIds, viewer) {
+async function accessVia(variantIds, viewer) {
   const ids = [...new Set(asArray(variantIds))];
-  const unlocked = new Set();
-  if (!ids.length || !viewer?.userId) return unlocked;   // guests unlock nothing
+  const via = new Map();
+  if (!ids.length || !viewer?.userId) return via;   // guests unlock nothing
 
-  const businesses = await Business.findAll({ where: { user_id: viewer.userId }, attributes: ['id'] });
-  if (businesses.length) {
-    const adopted = await BusinessVariant.findAll({
-      where: { business_id: { [Op.in]: businesses.map((b) => b.id) }, variant_id: { [Op.in]: ids } },
-      attributes: ['variant_id'],
-    });
-    adopted.forEach((r) => unlocked.add(r.variant_id));
-  }
+  (await purchasedVariantIds(viewer.userId, ids)).forEach((id) => via.set(id, 'purchased'));
 
-  const planId = await activePlanId(viewer);
-  if (planId) {
-    const entitled = await VariantPlanRestriction.findAll({
-      where: { variant_id: { [Op.in]: ids }, plan_id: planId },
-      attributes: ['variant_id'],
-    });
-    entitled.forEach((r) => unlocked.add(r.variant_id));
+  const rest = ids.filter((id) => !via.has(id));
+  if (rest.length && (await activePlanId(viewer))) {
+    (await addedVariantIds(viewer.userId, rest)).forEach((id) => via.set(id, 'added'));
   }
-  return unlocked;
+  return via;
+}
+
+// Can the viewer use this variant's templates?
+async function isVariantUnlocked(variantId, viewer) {
+  return (await accessVia([variantId], viewer)).has(variantId);
+}
+
+// Bulk form of isVariantUnlocked: which of these variants can the viewer use?
+async function unlockedVariantIds(variantIds, viewer) {
+  return new Set((await accessVia(variantIds, viewer)).keys());
 }
 
 // Variant ids a design (template family) belongs to (empty = not a variant design).
@@ -92,23 +97,17 @@ async function templateVariantIds(templateId) {
 
 // Access decision for a design, used by the public template endpoint and by
 // project creation. `variantGated` = the design belongs to ≥1 variant (so it must
-// never be publicly browsable); `allowed` = the viewer may use it (adopted any
-// containing variant, or entitled to any of them).
+// never be publicly browsable); `allowed` = the viewer may use it (bought, or added
+// with an active subscription, ANY variant containing it).
 //
-// This is the HARD gate and is deliberately unchanged by the "show locked templates"
-// work: a locked template may now be *listed* on a variant page, but opening one still
-// fails here.
+// This is the HARD gate: a locked template may be *listed* on a variant page, but
+// opening one or starting a project from it fails here. Projects already created
+// stay the user's own work and are not re-checked.
 async function canAccessFamily(familyId, viewer) {
   const variantIds = await familyVariantIds(familyId);
   if (!variantIds.length) return { variantGated: false, allowed: true };
-  if (!viewer?.userId)    return { variantGated: true, allowed: false };
-
-  if (await hasAdopted(viewer.userId, variantIds)) return { variantGated: true, allowed: true };
-
-  const planId = await activePlanId(viewer);
-  if (!planId) return { variantGated: true, allowed: false };
-  const matches = await VariantPlanRestriction.count({ where: { variant_id: { [Op.in]: variantIds }, plan_id: planId } });
-  return { variantGated: true, allowed: matches > 0 };
+  const via = await accessVia(variantIds, viewer);
+  return { variantGated: true, allowed: via.size > 0 };
 }
 
 // Same gate for one version (template row), via its family.
@@ -119,6 +118,6 @@ async function canAccessTemplate(templateId, viewer) {
 }
 
 module.exports = {
-  activePlanId, hasAdopted, isPlanEntitled, isVariantUnlocked, unlockedVariantIds,
+  activePlanId, addedVariantIds, purchasedVariantIds, isVariantUnlocked, accessVia, unlockedVariantIds,
   familyVariantIds, templateVariantIds, canAccessFamily, canAccessTemplate,
 };
