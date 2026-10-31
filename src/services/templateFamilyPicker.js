@@ -1,5 +1,5 @@
 const { Op, literal } = require('sequelize');
-const { Template, TemplateSize, Language } = require('../models');
+const { Template, FrameVersion, TemplateSize, Language } = require('../models');
 const userService   = require('./user.service');
 const configService = require('./config.service');
 const { resolveRefList } = require('../utils/catalogRef');
@@ -16,6 +16,9 @@ const { resolveRefList } = require('../utils/catalogRef');
 //            then the default size (app_settings.default_template_size), then
 //            the lowest size id. Language beats size: a Tamil 1:1 version wins
 //            over an English 4:5 one for a Tamil-first viewer.
+//
+// Frames are families too (frames + frame_versions, migration 058) and follow the
+// same rules: pass `source: FRAME_SOURCE` to the functions that read versions.
 
 const DEFAULT_SIZE_KEY = 'default_template_size';
 const ENGLISH = 'en';
@@ -25,6 +28,14 @@ const SIZE_ATTRS     = ['id', 'uid', 'slug', 'name', 'width', 'height', 'platfor
 
 // Version rows for cards never carry the heavy design JSON unless asked.
 const VERSION_ATTRS = ['id', 'uid', 'family_id', 'language_id', 'size_id', 'name', 'thumbnail_s3_key', 'status', 'created_at', 'updated_at'];
+
+// Where a kind of family keeps its versions: the model, its table, and the column
+// naming the family.
+const TEMPLATE_SOURCE = { model: Template, table: 'templates', fk: 'family_id', attrs: VERSION_ATTRS };
+const FRAME_SOURCE    = {
+  model: FrameVersion, table: 'frame_versions', fk: 'frame_id',
+  attrs: ['id', 'uid', 'frame_id', 'language_id', 'size_id', 'thumbnail_s3_key', 'status', 'created_at', 'updated_at'],
+};
 
 // The viewer's languages in rank order, or null for "no narrowing".
 //
@@ -60,15 +71,15 @@ async function defaultSizeId() {
 // SQL: "this family has an active version the viewer may see". `familyRef` is the
 // quoted column holding the family id in the outer query. Every id is a sanitized
 // positive integer, so interpolation is injection-safe.
-function versionMatchSql(familyRef, { languageIds = null, sizeId } = {}) {
-  const parts = [`v.family_id = ${familyRef}`, "v.status = 'active'"];
+function versionMatchSql(familyRef, { languageIds = null, sizeId, source = TEMPLATE_SOURCE } = {}) {
+  const parts = [`v.${source.fk} = ${familyRef}`, "v.status = 'active'"];
   if (languageIds) {
     parts.push(languageIds.length
       ? `(v.language_id IS NULL OR v.language_id IN (${languageIds.map(Number).join(',')}))`
       : 'v.language_id IS NULL');
   }
   if (sizeId !== undefined && sizeId !== null) parts.push(`v.size_id = ${Number(sizeId) || 0}`);
-  return `EXISTS (SELECT 1 FROM \`templates\` v WHERE ${parts.join(' AND ')})`;
+  return `EXISTS (SELECT 1 FROM \`${source.table}\` v WHERE ${parts.join(' AND ')})`;
 }
 
 const versionMatchClause = (familyRef, opts) => literal(versionMatchSql(familyRef, opts));
@@ -104,18 +115,18 @@ const uniqueBy = (items, key) => {
  * Pick the version each family shows for this viewer.
  *
  * @param {number[]} familyIds
- * @param {object}   opts  { languageIds, sizeId, defaultSize, withContent, hide }
+ * @param {object}   opts  { languageIds, sizeId, defaultSize, withContent, hide, source }
  *   hide=false keeps a family even when nothing matches the viewer, falling back
  *   to its best version by the same ranking — used for a direct link to a design.
  * @returns {Promise<Map<number, {version, versions, available_languages, available_sizes}>>}
  */
-async function pickVersions(familyIds, { languageIds = null, sizeId, defaultSize = null, withContent = false, hide = true } = {}) {
+async function pickVersions(familyIds, { languageIds = null, sizeId, defaultSize = null, withContent = false, hide = true, source = TEMPLATE_SOURCE } = {}) {
   const picks = new Map();
   if (!familyIds.length) return picks;
 
-  const rows = await Template.findAll({
-    where:      { family_id: { [Op.in]: familyIds }, status: 'active' },
-    attributes: withContent ? [...VERSION_ATTRS, 'content'] : VERSION_ATTRS,
+  const rows = await source.model.findAll({
+    where:      { [source.fk]: { [Op.in]: familyIds }, status: 'active' },
+    attributes: withContent ? [...source.attrs, 'content'] : source.attrs,
     include:    [
       { model: Language,     attributes: LANGUAGE_ATTRS },
       { model: TemplateSize, attributes: SIZE_ATTRS },
@@ -125,8 +136,9 @@ async function pickVersions(familyIds, { languageIds = null, sizeId, defaultSize
   const byFamily = new Map();
   for (const row of rows) {
     const v = row.toJSON();
-    if (!byFamily.has(v.family_id)) byFamily.set(v.family_id, []);
-    byFamily.get(v.family_id).push(v);
+    const familyId = v[source.fk];
+    if (!byFamily.has(familyId)) byFamily.set(familyId, []);
+    byFamily.get(familyId).push(v);
   }
 
   for (const [familyId, versions] of byFamily) {
@@ -208,5 +220,5 @@ async function familiesToCards(families, { languageIds = null, sizeId, withConte
 module.exports = {
   resolveLanguageRank, defaultSizeId, versionMatchSql, versionMatchClause,
   pickVersions, toCard, familiesToCards,
-  LANGUAGE_ATTRS, SIZE_ATTRS, DEFAULT_SIZE_KEY,
+  LANGUAGE_ATTRS, SIZE_ATTRS, DEFAULT_SIZE_KEY, TEMPLATE_SOURCE, FRAME_SOURCE,
 };

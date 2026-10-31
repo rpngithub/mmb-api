@@ -53,6 +53,7 @@ const modelFiles = [
   'specialEventTemplate.model',
   'frameCategory.model',
   'frame.model',
+  'frameVersion.model',
   'userFrame.model',
   'userVariant.model',
   'project.model',

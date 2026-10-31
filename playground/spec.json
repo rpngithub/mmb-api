@@ -3192,10 +3192,28 @@
                     "value": "",
                     "description": "Category slug, uid or legacy id. An unknown value returns an empty page, not the whole store.",
                     "disabled": true
+                  },
+                  {
+                    "key": "size",
+                    "value": "",
+                    "description": "Poster size slug/uid/id — only frames drawn for it.",
+                    "disabled": true
+                  },
+                  {
+                    "key": "language",
+                    "value": "",
+                    "description": "Comma list of language codes in rank order (e.g. ta,en).",
+                    "disabled": true
+                  },
+                  {
+                    "key": "all_languages",
+                    "value": "1",
+                    "description": "No language narrowing.",
+                    "disabled": true
                   }
                 ]
               },
-              "description": "Active frames only. The design payload (`content`) is never in a list response."
+              "description": "Active frames in active categories, ONE card per frame. Hidden without a version in your languages (or a text-free one); the card shows the picked `version` plus `available_languages` / `available_sizes`. The design payload (`content`) is never in a list response."
             },
             "event": [
               {
@@ -3265,9 +3283,23 @@
                 "path": [
                   "frames",
                   "{{frame_uid}}"
+                ],
+                "query": [
+                  {
+                    "key": "size",
+                    "value": "",
+                    "description": "The poster being framed. STRICT: no version in that size → `version: null`, no content.",
+                    "disabled": true
+                  },
+                  {
+                    "key": "language",
+                    "value": "",
+                    "description": "Preferred language codes; falls back to any language.",
+                    "disabled": true
+                  }
                 ]
               },
-              "description": "`content` is served only once you own the frame — a free frame still has to be added first."
+              "description": "`content` (the picked version's design) is served only once you own the frame — a free frame still has to be added first. `versions` lists every active version for a switcher."
             },
             "event": [
               {

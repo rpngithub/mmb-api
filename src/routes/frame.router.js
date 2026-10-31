@@ -22,8 +22,13 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *   get:
  *     summary: Browse the frames store
  *     description: >
- *       Active frames only. Signing in is optional — a bearer token marks each card
- *       with `owned` and unlocks nothing else.
+ *       Active frames in active categories only, ONE card per frame. A frame is a family
+ *       of versions (language × size) and follows the template catalogue's rules: it is
+ *       shown only with an active version in one of the viewer's languages (their saved
+ *       Preferred Languages, else English) or a text-free one — and, with `size`, in that
+ *       size. The card shows the version in their top language, then the default size,
+ *       as `version`, with `available_languages` / `available_sizes`. Signing in is
+ *       optional — a bearer token marks each card with `owned` and unlocks nothing else.
  *     tags: [Frames]
  *     parameters:
  *       - in: query
@@ -34,6 +39,18 @@ const rateLimiter  = require('../middlewares/rateLimiter');
  *         name: category
  *         schema: { type: string }
  *         description: "Frame category as a slug, uid, or legacy integer id. An unknown value returns an empty page, not the whole store."
+ *       - in: query
+ *         name: size
+ *         schema: { type: string }
+ *         description: "Template size slug, uid or id — only frames drawn for that poster size. An unknown value returns an empty page."
+ *       - in: query
+ *         name: language
+ *         schema: { type: string }
+ *         description: "Comma list of language codes, in rank order (e.g. `ta,en`). Overrides the viewer's saved languages."
+ *       - in: query
+ *         name: all_languages
+ *         schema: { type: integer, enum: [1] }
+ *         description: No language narrowing at all.
  *       - in: query
  *         name: is_premium
  *         schema: { type: integer, enum: [0, 1] }
@@ -106,14 +123,24 @@ router.delete('/mine/:uid', authenticate, controller.remove);
  *   get:
  *     summary: Get one frame
  *     description: >
- *       `content` — the design payload — is served only to a caller who owns the
- *       frame. A free frame must still be added first, so the shelf stays an
- *       honest record of what is in use.
+ *       `content` — the design payload of the picked `version` — is served only to a
+ *       caller who owns the frame (owning a frame means every version of it). A free
+ *       frame must still be added first, so the shelf stays an honest record of what
+ *       is in use.
+ *
+ *       The editor passes the poster it is framing. `size` is STRICT: with no live
+ *       version in that size, `version` is null and no `content` is sent — a 4:5 frame
+ *       never lands on a 1:1 poster. `language` falls back (the viewer's languages,
+ *       then any language, English first). Without `size` the version is picked as a
+ *       store card would be. `versions` always lists every active version.
  *     tags: [Frames]
- *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     parameters:
+ *       - { in: path,  name: uid,      required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: size,     schema: { type: string }, description: "Poster size: template size slug, uid or id" }
+ *       - { in: query, name: language, schema: { type: string }, description: "Comma list of language codes in rank order" }
  *     responses:
  *       200:
- *         description: Frame; `content` present only when `owned` is true
+ *         description: Frame; `content` present only when `owned` is true and a version was picked
  *         content: { application/json: { schema: { $ref: '#/components/schemas/FrameResponse' } } }
  *       404:
  *         description: No active frame with that uid

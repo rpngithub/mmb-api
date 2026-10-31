@@ -3,10 +3,11 @@ const { IMAGE_SLOTS, ASSET_TYPES } = require('../services/upload.service');
 
 // Typed target — the server derives the final key from this (client never sends a raw key).
 const targetSchema = Joi.object({
-  type:         Joi.string().valid('image_slot', 'asset', 'template_file').required(),
-  slot:         Joi.when('type', { is: 'image_slot',    then: Joi.string().valid(...Object.keys(IMAGE_SLOTS)).required(), otherwise: Joi.forbidden() }),
-  asset_type:   Joi.when('type', { is: 'asset',         then: Joi.string().valid(...ASSET_TYPES).required(),            otherwise: Joi.forbidden() }),
-  template_uid: Joi.when('type', { is: 'template_file', then: Joi.string().uuid().required(),                            otherwise: Joi.forbidden() }),
+  type:              Joi.string().valid('image_slot', 'asset', 'template_file', 'frame_file').required(),
+  slot:              Joi.when('type', { is: 'image_slot',    then: Joi.string().valid(...Object.keys(IMAGE_SLOTS)).required(), otherwise: Joi.forbidden() }),
+  asset_type:        Joi.when('type', { is: 'asset',         then: Joi.string().valid(...ASSET_TYPES).required(),            otherwise: Joi.forbidden() }),
+  template_uid:      Joi.when('type', { is: 'template_file', then: Joi.string().uuid().required(),                            otherwise: Joi.forbidden() }),
+  frame_version_uid: Joi.when('type', { is: 'frame_file',    then: Joi.string().uuid().required(),                            otherwise: Joi.forbidden() }),
 });
 
 // One file. Kept as its own schema because multipart initiate takes EXACTLY this

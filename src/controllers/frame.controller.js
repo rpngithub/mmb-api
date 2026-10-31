@@ -10,12 +10,12 @@ const listCategories = async (req, res) => {
 };
 
 const getOne = async (req, res) => {
-  const frame = await frameService.getFrame(req.params.uid, req.user || null);
+  const frame = await frameService.getFrame(req.params.uid, req.user || null, req.query);
   res.json({ success: true, data: frame });
 };
 
 const listMine = async (req, res) => {
-  res.json({ success: true, data: await frameService.listMine(req.user.userId) });
+  res.json({ success: true, data: await frameService.listMine(req.user.userId, req.user) });
 };
 
 const add = async (req, res) => {
