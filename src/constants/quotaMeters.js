@@ -51,17 +51,18 @@ async function liveTemplateProjects(userId, meterKey) {
   });
 }
 
-// Distinct brand series the user holds through any of their businesses. With
-// `seriesId`, whether they hold that one series (0 or 1).
-async function heldSeriesCount(userId, seriesId = null) {
+// Distinct VARIANTS the user has added ("Add to your Business") across every business
+// they own. The product calls them Brand Series, but the unit added — and counted — is
+// the variant. Bought variants (user_variants) are deliberately not in this table, so
+// they never count.
+async function heldVariantCount(userId) {
   const sequelize = require('../config/db');
   const [[row]] = await sequelize.query(
-    `SELECT COUNT(DISTINCT v.series_id) AS n
+    `SELECT COUNT(DISTINCT bv.variant_id) AS n
        FROM business_variants bv
        JOIN businesses b ON b.id = bv.business_id
-       JOIN variants   v ON v.id = bv.variant_id
-      WHERE b.user_id = :userId${seriesId ? ' AND v.series_id = :seriesId' : ''}`,
-    { replacements: { userId, seriesId } },
+      WHERE b.user_id = :userId`,
+    { replacements: { userId } },
   );
   return Number(row?.n || 0);
 }
@@ -81,12 +82,13 @@ const METERS = {
     label: 'Video Templates', resets: ALL_RESETS,
     liveCount: (userId) => liveTemplateProjects(userId, 'video_templates'),
   },
-  // Distinct SERIES, across every business the user owns — a second variant of a
-  // series they already hold is not a second brand series.
+  // Variants added to the user's businesses. A HOLDING, so a gauge only: "Basic = 2"
+  // means two at a time, and removing one frees its slot. As a monthly flow the same
+  // plan would hand out two more every month (migration 20260101000056).
   brand_series: {
-    label: 'Brand Series', resets: ALL_RESETS,
+    label: 'Brand Series', resets: ['never'],
     // Raw SQL: business_variants deliberately has no associations (see its model).
-    liveCount: (userId) => heldSeriesCount(userId),
+    liveCount: (userId) => heldVariantCount(userId),
   },
   // Only frames added for free count. A premium frame was bought outright, per
   // frame, so the plan cap must never stand between a user and what they paid for.
@@ -139,5 +141,5 @@ const listMeters = () => Object.entries(METERS).map(([key, m]) => ({
 
 module.exports = {
   METERS, TEMPLATE_METER, isMeter, scaleFor, unitFor, templateMeterFor, modeOf,
-  assertMeterable, listMeters, heldSeriesCount,
+  assertMeterable, listMeters, heldVariantCount,
 };

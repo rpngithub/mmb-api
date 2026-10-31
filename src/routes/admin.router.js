@@ -1526,12 +1526,12 @@ router.post('/page-sections/clone', authenticate, authorizeAdmin('page_content.c
 router.get('/variants/:uid/templates', authenticate, authorizeAdmin('variants.read'),   controller.getVariantTemplates);
 router.put('/variants/:uid/templates', authenticate, authorizeAdmin('variants.update'), validate(setVariantTemplatesSchema), controller.setVariantTemplates);
 
-// ---- Variant relations: plan entitlements (premium gating) + industries (display/filter) ----
+// ---- Variant relations: industries (display/filter) + deprecated plan_ids ----
 /**
  * @swagger
  * /admin/variants/{uid}/relations:
  *   get:
- *     summary: Read a variant's relations (entitled plans, industries, badge)
+ *     summary: Read a variant's relations (industries, badge, deprecated plans)
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -1540,10 +1540,12 @@ router.put('/variants/:uid/templates', authenticate, authorizeAdmin('variants.up
  *   put:
  *     summary: Set a variant's relations (any subset; each provided key is a full replace)
  *     description: >-
- *       plan_ids define the premium entitlement - a user may open the variant's templates only if
- *       their active subscription plan is listed. An empty array locks the variant to everyone.
- *       Gating is per-VARIANT, not per-brand-series. industry_ids are the display/filter tags
- *       shown on the variant card.
+ *       industry_ids are the display/filter tags shown on the variant card.
+ *       **`plan_ids` is deprecated and has no effect** (since 2026-10-28): it is still stored
+ *       so existing admin screens keep working, but access no longer reads it. Any active
+ *       subscription may add any variant to a business, up to the plan's Brand Series quota;
+ *       beyond that, or without a subscription, a business account buys it (`price`).
+ *       Remove the "allowed plans" picker from the admin panel.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -1555,7 +1557,7 @@ router.put('/variants/:uid/templates', authenticate, authorizeAdmin('variants.up
  *             type: object
  *             minProperties: 1
  *             properties:
- *               plan_ids:              { type: array, items: { type: integer } }
+ *               plan_ids:              { type: array, items: { type: integer }, deprecated: true, description: "Stored but ignored — no longer controls access" }
  *               industry_ids:          { type: array, items: { type: integer } }
  *               business_category_ids: { type: array, items: { type: integer }, deprecated: true, description: "Deprecated alias of industry_ids" }
  *     responses:
@@ -1646,8 +1648,8 @@ router.put('/brand-series/:uid/relations', authenticate, authorizeAdmin('brand_s
  *     summary: "[Deprecated] Pre-rename alias of PUT /admin/variants/{uid}/relations"
  *     deprecated: true
  *     description: >-
- *       Identical to the successor, including that `plan_ids` IS the premium entitlement —
- *       an empty array locks the variant to everyone. **Use `/admin/variants/{uid}/relations`.**
+ *       Identical to the successor, including that `plan_ids` is deprecated and ignored.
+ *       **Use `/admin/variants/{uid}/relations`.**
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]

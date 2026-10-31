@@ -14,7 +14,7 @@
  *           type: string
  *           example: Premium – Monthly Plan
  *           description: What was bought. "<Plan> – Monthly|Annual Plan", "<Plan> – Access Pass", "<Pack> – Top-up" or "Frame – <name>".
- *         purchase_type: { type: string, enum: [subscription, frame, quota_pack] }
+ *         purchase_type: { type: string, enum: [subscription, frame, quota_pack, variant] }
  *         order_type:    { type: string, enum: [subscription, one_time], description: 'How it was billed — recurring charge or a one-time order' }
  *         date:
  *           type: string

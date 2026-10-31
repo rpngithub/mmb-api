@@ -29,6 +29,12 @@ function describe(payment) {
     const pack = payment.UserQuotaGrant?.QuotaPack?.name;
     return pack ? `${pack} – Top-up` : 'Quota Top-up';
   }
+  if (payment.purchase_type === 'variant') {
+    const variant = payment.UserVariant?.Variant;
+    if (!variant) return 'Brand Series Variant';
+    const series = variant.BrandSeries?.name;
+    return series ? `${series} – ${variant.name}` : `Variant – ${variant.name}`;
+  }
   // NULL purchase_type predates the discriminator and was always a frame.
   const frame = payment.UserFrame?.Frame?.name;
   return frame ? `Frame – ${frame}` : 'Frame';

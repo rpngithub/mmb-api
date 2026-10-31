@@ -2,11 +2,12 @@ const { Op } = require('sequelize');
 const {
   sequelize, BusinessCategory, TemplateCategory, AssetCategory, Tag, TemplateSize,
   BrandSeries, Variant, VariantBadge, StylePersonality, Color, Language,
-  Plan, FaqCategory, Faq, Testimonial, AppBanner,
+  FaqCategory, Faq, Testimonial, AppBanner,
 } = require('../models');
 const planRepo      = require('../repositories/plan.repository');
 const couponRepo    = require('../repositories/coupon.repository');
 const variantAccess = require('./variantAccess.service');
+const variantPurchase = require('./variantPurchase.service');
 const picker        = require('./templateFamilyPicker');
 const favourites    = require('./favourite.service');
 const pageContent   = require('./pageContent.service');
@@ -26,6 +27,21 @@ const seriesColorInclude = { model: Color,            attributes: ['id', 'uid', 
 const seriesIncludes     = [seriesStyleInclude, seriesTagInclude, seriesColorInclude];
 
 const DEFAULT_PREVIEW_VARIANTS = 4;
+
+// One variant card, the same in every list: tally, lock state, how the viewer reaches
+// it (`access_via`, null when locked), the Buy-button price fields and `cta` — the one
+// action the card should offer this viewer (see variantPurchase.cta).
+function variantCard(row, via, counts, ctx) {
+  const accessVia = via.get(row.id) || null;
+  return {
+    ...row.toJSON(),
+    ...variantPurchase.priceFields(row),
+    templates_count: counts.byVariant.get(row.id) || 0,
+    is_locked:       !accessVia,
+    access_via:      accessVia,
+    cta:             variantPurchase.cta(row, accessVia, ctx),
+  };
+}
 
 // Sort the two ordered M2Ms by their join-table display_order, then drop the join
 // payload — Sequelize can't ORDER BY a through column on a nested include.
@@ -314,7 +330,8 @@ async function listBrandSeries({ preview_variants } = {}, viewer = null) {
 
   const variantIds = variants.map((v) => v.id);
   const counts     = await templateCounts(seriesIds, variantIds);
-  const unlocked   = await variantAccess.unlockedVariantIds(variantIds, viewer);
+  const via        = await variantAccess.accessVia(variantIds, viewer);
+  const ctx        = await variantPurchase.ctaContext(viewer);
 
   const bySeries = new Map(seriesIds.map((id) => [id, []]));
   for (const v of variants) bySeries.get(v.series_id).push(v);
@@ -325,14 +342,10 @@ async function listBrandSeries({ preview_variants } = {}, viewer = null) {
 
     plain.variants_count          = own.length;
     plain.templates_count         = counts.bySeries.get(s.id) || 0;
-    plain.unlocked_variants_count = own.filter((v) => unlocked.has(v.id)).length;
+    plain.unlocked_variants_count = own.filter((v) => via.has(v.id)).length;
     // No variants at all reads as locked: there is nothing to open.
     plain.is_locked               = plain.unlocked_variants_count === 0;
-    plain.Variants                = own.slice(0, previewLimit).map((v) => ({
-      ...v.toJSON(),
-      templates_count: counts.byVariant.get(v.id) || 0,
-      is_locked:       !unlocked.has(v.id),
-    }));
+    plain.Variants                = own.slice(0, previewLimit).map((v) => variantCard(v, via, counts, ctx));
     return plain;
   });
 }
@@ -354,15 +367,12 @@ async function listVariants({ series, series_id, group, group_id } = {}, viewer 
     ],
   });
 
-  const ids      = rows.map((r) => r.id);
-  const counts   = await templateCounts([], ids);
-  const unlocked = await variantAccess.unlockedVariantIds(ids, viewer);
+  const ids    = rows.map((r) => r.id);
+  const counts = await templateCounts([], ids);
+  const via    = await variantAccess.accessVia(ids, viewer);
+  const ctx    = await variantPurchase.ctaContext(viewer);
 
-  return rows.map((r) => ({
-    ...r.toJSON(),
-    templates_count: counts.byVariant.get(r.id) || 0,
-    is_locked:       !unlocked.has(r.id),
-  }));
+  return rows.map((r) => variantCard(r, via, counts, ctx));
 }
 
 // Variant detail. The card is public AND — unlike the previous behaviour — so is the
@@ -373,27 +383,31 @@ async function listVariants({ series, series_id, group, group_id } = {}, viewer 
 // stripped, so the artwork itself stays behind the paywall. The hard gate is untouched —
 // opening a template or starting a project still fails in variantAccess.canAccessTemplate.
 //
-// A variant with no plan restrictions is locked to everyone. "Variant gate supersedes" —
-// an unlocked viewer gets every active template regardless of is_premium.
+// Unlocked = bought, or added to the viewer's business while they are subscribed (see
+// variantAccess.service). "Variant gate supersedes" — an unlocked viewer gets every
+// active template regardless of is_premium.
 async function getVariantDetail(uid, viewer = null, query = {}) {
+  // Inactive variants are looked up too, but only served to someone who can use one:
+  // retiring a variant takes it off the shelf, not out of the hands of people who
+  // already have it.
   const variant = await Variant.findOne({
-    where:   { uid, is_active: 1 },
+    where:   { uid },
     include: [
       { model: BrandSeries, attributes: ['id', 'uid', 'slug', 'name', 'icon_s3_key', 'caption', 'description'], include: seriesIncludes },
       variantBadgeInclude,
       variantIndustryInclude,
-      // Entitlement set — read to compute access, then stripped from the response.
-      { model: Plan, attributes: ['id'], through: { attributes: [] } },
     ],
   });
   if (!variant) throw new NotFoundError('Variant not found');
 
-  const allowedPlanIds = (variant.Plans || []).map((p) => p.id);
-  const unlocked       = await variantAccess.isVariantUnlocked({ id: variant.id, allowedPlanIds }, viewer);
+  const accessVia = (await variantAccess.accessVia([variant.id], viewer)).get(variant.id) || null;
+  if (Number(variant.is_active) !== 1 && !accessVia) throw new NotFoundError('Variant not found');
+  const unlocked  = accessVia !== null;
 
-  const data = variant.toJSON();
-  delete data.Plans;                 // internal entitlement set, never exposed
-  data.is_locked = !unlocked;
+  const data = { ...variant.toJSON(), ...variantPurchase.priceFields(variant) };
+  data.is_locked  = !unlocked;
+  data.access_via = accessVia;
+  data.cta        = variantPurchase.cta(variant, accessVia, await variantPurchase.ctaContext(viewer));
   if (data.BrandSeries) data.BrandSeries = sortSeriesCollections(data.BrandSeries);
 
   // One card per design, picked for the viewer by the feed's rules (a design with no

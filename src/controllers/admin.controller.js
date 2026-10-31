@@ -548,8 +548,9 @@ const getVariantRelations = async (req, res) => {
 };
 
 // Set a theme's relations. Any provided key is a FULL REPLACE of that relation; omitted
-// keys are left untouched. plan_ids drive the premium entitlement (empty array = locked
-// to everyone); business_category_ids are the display/filter tags.
+// keys are left untouched. business_category_ids are the display/filter tags. plan_ids
+// are still stored but no longer control access (option B, 2026-10-28 — see
+// variantAccess.service); kept so the admin panel does not break before it drops them.
 const setVariantRelations = async (req, res) => {
   const variant = await Variant.findOne({ where: { uid: req.params.uid } });
   if (!variant) throw new NotFoundError('variant not found');

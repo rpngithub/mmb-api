@@ -6,7 +6,7 @@ const razorpay  = require('../utils/razorpayHelper');
 const config    = require('./config.service');
 
 const {
-  User, Business, Project, ProjectExport, UserFrame, UserUpload, UserQuotaUsage, UserQuotaCounter, UserQuotaGrant,
+  User, Business, Project, ProjectExport, UserFrame, UserVariant, UserUpload, UserQuotaUsage, UserQuotaCounter, UserQuotaGrant,
   QuotaUsageEvent, UserBillingDetail, UserPreference, UserLanguage, UserNotification,
   UserNotificationSetting, Feedback, Font, UserSession, TokenBlacklist, OtpCode, UserSubscription,
   Payment, BusinessCategory, ActivityLog,
@@ -98,6 +98,7 @@ async function purgeUser(user) {
     await ProjectExport.destroy(byUser);
     await Project.destroy(byUser);
     await UserFrame.destroy(byUser);
+    await UserVariant.destroy(byUser);   // bought variants; the payments stay with the tombstone
     // Required here, not at the top: user.service loads this module, and favourites
     // reaches back to user.service through the version picker.
     await require('./favourite.service').purgeUser(user.id, transaction);   // also takes their hearts off likes_count

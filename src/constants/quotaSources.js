@@ -29,7 +29,7 @@ const SOURCES = {
   // source belongs to exactly one feature.
   business_post_project: { label: 'Projects from templates', feature: 'business_posts_templates' },
   video_project:         { label: 'Projects from templates', feature: 'video_templates' },
-  brand_series_add:      { label: 'Brand series added',      feature: 'brand_series' },
+  brand_series_add:      { label: 'Brand series variant added', feature: 'brand_series' },
   frame_add:             { label: 'Frames added',            feature: 'frames' },
 };
 

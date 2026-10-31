@@ -8,6 +8,8 @@ const quota             = require('./quota.service');
 const catalogService    = require('./catalog.service');
 const frameService      = require('./frame.service');
 const quotaPackService  = require('./quotaPack.service');
+const variantPurchaseService = require('./variantPurchase.service');
+const variantQuota      = require('./variantQuota.service');
 const notify            = require('./notification.service');
 const invoiceNumber     = require('./invoiceNumber.service');
 const dedupe            = require('../utils/dedupeKey');
@@ -440,6 +442,12 @@ async function _activate(subId) {
   // be redelivered) from double-counting the same subscription.
   if (!wasActive && sub.coupon_id) await couponRepo.incrementUsage(sub.coupon_id);
 
+  // A smaller plan (or a return after lapsing) may leave more variants added to the
+  // business than the new Brand Series quota allows: keep the newest, drop the rest.
+  // Best-effort — confirming that money was received must never fail on this.
+  try { await variantQuota.trimToQuota(sub.user_id); }
+  catch (err) { console.error('[Subscriptions] brand-series trim failed for user', sub.user_id, err.message); }
+
   // Tell the user. Rides the same `wasActive` guard, and the dedupe key is scoped
   // to the subscription row, so a redelivered webhook cannot produce a second
   // "your plan is active" a day later. Fire-and-forget on purpose — see notify().
@@ -474,6 +482,7 @@ async function _activate(subId) {
 async function _fulfil(payment) {
   if (payment.subscription_id) return _activate(payment.subscription_id);
   if (payment.purchase_type === 'quota_pack') return quotaPackService.fulfilPayment(payment);
+  if (payment.purchase_type === 'variant')    return variantPurchaseService.fulfilPayment(payment);
   return frameService.fulfilPayment(payment);
 }
 

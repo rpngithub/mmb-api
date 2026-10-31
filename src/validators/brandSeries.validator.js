@@ -1,6 +1,9 @@
 const Joi = require('joi');
 
 const s3Key = Joi.string().max(500).allow(null, '');
+// Pre-tax rupees for an outright variant purchase; null takes it off sale. ₹1 floor:
+// Razorpay refuses a smaller order.
+const price = Joi.number().min(1).precision(2).allow(null);
 const hex   = Joi.string().pattern(/^#[0-9a-fA-F]{6}$/).message('hex_code must be a #RRGGBB colour code');
 
 // ---- Brand series ----
@@ -32,6 +35,8 @@ const createVariantSchema = Joi.object({
   description:      Joi.string().allow(null, '').optional(),
   thumbnail_s3_key: s3Key.optional(),
   likes_count:      Joi.number().integer().min(0).optional(),  // display-only figure on the card
+  price:            price.optional(),
+  strike_price:     price.optional(),
   display_order:    Joi.number().integer().optional(),
   is_active:        Joi.number().valid(0, 1).optional(),
 }).or('series_id', 'group_id');
@@ -44,6 +49,8 @@ const updateVariantSchema = Joi.object({
   description:      Joi.string().allow(null, '').optional(),
   thumbnail_s3_key: s3Key.optional(),
   likes_count:      Joi.number().integer().min(0).optional(),
+  price:            price.optional(),
+  strike_price:     price.optional(),
   display_order:    Joi.number().integer().optional(),
   is_active:        Joi.number().valid(0, 1).optional(),
 }).min(1);

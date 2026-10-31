@@ -12,7 +12,7 @@ module.exports = (sequelize) => {
     // frame") — an inference that stops being true the moment there is a third
     // kind. Nullable because rows predating the discriminator still exist; the
     // router treats NULL as 'frame', which is what they all were.
-    purchase_type:         { type: DataTypes.ENUM('subscription', 'frame', 'quota_pack'), allowNull: true },
+    purchase_type:         { type: DataTypes.ENUM('subscription', 'frame', 'quota_pack', 'variant'), allowNull: true },
     amount:                { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     amount_before_tax:     { type: DataTypes.DECIMAL(10, 2), allowNull: false },
     gst_rate:              { type: DataTypes.DECIMAL(5, 2), defaultValue: 18 },
@@ -45,6 +45,7 @@ module.exports = (sequelize) => {
     // ownership row against its payment, so these are one-to-one from this side.
     Payment.hasOne(models.UserQuotaGrant, { foreignKey: 'payment_id' });
     Payment.hasOne(models.UserFrame,      { foreignKey: 'payment_id' });
+    Payment.hasOne(models.UserVariant,    { foreignKey: 'payment_id' });
   };
 
   return Payment;
