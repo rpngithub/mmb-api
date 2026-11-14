@@ -35,6 +35,18 @@ class QuotaUsageEventRepository extends BaseRepository {
     return rows.map((r) => ({ source: r.source, used: Number(r.used || 0) }));
   }
 
+  // Has anything ever been charged to this feature for this ref? Lets a project
+  // that flips image → video → image → video count once per bucket instead of on
+  // every flip. Bounded by the retention sweep below, so a ref charged before the
+  // retention window can be charged again — acceptable for an edge that rare.
+  async hasSpend(userId, featureTypeId, refType, refId) {
+    const row = await this.model.findOne({
+      where: { user_id: userId, feature_type_id: featureTypeId, ref_type: refType, ref_id: refId, amount: { [Op.gt]: 0 } },
+      attributes: ['id'],
+    });
+    return Boolean(row);
+  }
+
   // Retention sweep — see jobs/quotaEventCleanup.job.js.
   deleteOlderThan(cutoff) {
     return this.model.destroy({ where: { created_at: { [Op.lt]: cutoff } } });

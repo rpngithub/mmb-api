@@ -2440,10 +2440,10 @@
                   "projects"
                 ]
               },
-              "description": "All of `business_id`, `template_id` and `size_id` are optional, and all three are **numeric ids**, not uids — unlike the rest of the app API, which addresses things by uid. Nothing in this collection captures a numeric business id, so they are left out of the sample body; fill them from `GET /businesses`, `GET /templates` and `GET /template-sizes` when you need a project bound to a template.\n\n`thumbnail` is accepted here too, so the first save is one call. `thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
+              "description": "All of `business_id`, `template_id` and `size_id` are optional, and all three are **numeric ids**, not uids — unlike the rest of the app API, which addresses things by uid. Nothing in this collection captures a numeric business id, so they are left out of the sample body; fill them from `GET /businesses`, `GET /templates` and `GET /template-sizes` when you need a project bound to a template.\n\n`project_type` is `image` | `video` — `video` once the design has any animation. Omitted, it is the template's type (`video`/`animated` → `video`), or `image` for a blank project. A template project counts against Business Posts (image) or Video (video) quota and can 402.\n\n`thumbnail` is accepted here too, so the first save is one call. `thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
               "body": {
                 "mode": "raw",
-                "raw": "{\n  \"name\": \"Diwali Poster\",\n  \"content\": \"{}\"\n}",
+                "raw": "{\n  \"name\": \"Diwali Poster\",\n  \"project_type\": \"image\",\n  \"content\": \"{}\"\n}",
                 "options": {
                   "raw": {
                     "language": "json"
@@ -2483,7 +2483,63 @@
                 ],
                 "path": [
                   "projects"
+                ],
+                "query": [
+                  {
+                    "key": "type",
+                    "value": "video",
+                    "disabled": true
+                  }
                 ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Make Project a Video (animation added)",
+            "request": {
+              "method": "PATCH",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/projects/{{project_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "projects",
+                  "{{project_uid}}"
+                ]
+              },
+              "description": "Send when the first animation is added (and `image` when the last one is removed) — only when it changes; it can ride along with an autosave. On a template project this moves it to the Video quota, so it can **402 `QUOTA_EXCEEDED`** and nothing is saved. On a monthly quota each project is charged to each bucket at most once.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"project_type\": \"video\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
               }
             },
             "event": [
@@ -2608,7 +2664,7 @@
                   "{{project_uid}}"
                 ]
               },
-              "description": "Send whatever changed: `name`, `content`, `status` (`draft` | `published` | `archived`) and/or `thumbnail`. A content-only PATCH leaves the existing thumbnail alone. `thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
+              "description": "Send whatever changed: `name`, `content`, `status` (`draft` | `published` | `archived`), `project_type` (`image` | `video`) and/or `thumbnail`. A content-only PATCH leaves the existing thumbnail alone. `thumbnail` is the project preview, INLINE: a data URL (or bare base64) — `canvas.toDataURL('image/jpeg', 0.8)` is exactly right. JPEG/PNG/WebP by **bytes** (the declared MIME is ignored), max **500 KB** decoded. The server stores it and returns `thumbnail_s3_key` (render `{{cdn_base_url}}/{{thumbnail_s3_key}}`). This is the ONLY way to set a project thumbnail — do not use `/uploads` for it. It does not count against storage quota and never appears in My Uploads. Same image again is a no-op; a changed image gets a new key and the old object is deleted. A bad thumbnail is a 400 and NOTHING in that request is saved, content included.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"name\": \"Diwali Poster v2\",\n  \"content\": \"{\\\"version\\\":3,\\\"objects\\\":[]}\",\n  \"status\": \"published\"\n}",
@@ -6354,7 +6410,7 @@
       },
       {
         "name": "Quota",
-        "description": "The Plan Usage screen and AI-credit top-ups. Every integer plan feature is a metered limit: Business Posts / Video Templates count projects created from a template of that type, Brand Series counts variants currently added to the business (a ceiling, not monthly), Brand Frames counts frames added for free. A metered action over its limit returns **402 `QUOTA_EXCEEDED`**. Users without a subscription are held to the free plan.",
+        "description": "The Plan Usage screen and AI-credit top-ups. Every integer plan feature is a metered limit: Business Posts / Video Templates count projects created from a template, by the PROJECT's type (image / video — animating a design moves it to Video), Brand Series counts variants currently added to the business (a ceiling, not monthly), Brand Frames counts frames added for free. A metered action over its limit returns **402 `QUOTA_EXCEEDED`**. Users without a subscription are held to the free plan.",
         "item": [
           {
             "name": "My Usage",

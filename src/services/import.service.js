@@ -533,17 +533,43 @@ const parseTags = (cell) => [...new Set(
   String(cell || '').split('|').map((t) => t.trim()).filter(Boolean),
 )];
 
+// A tag is matched on its name, then on its slug: tags.slug is unique, so two
+// spellings that slugify alike ("Before/After", "Before & After") are the same
+// tag, and creating the second would violate uq_tags_slug and abort the row.
+// Returns the cells that resolved to a differently spelled existing tag, so the
+// row can say so.
 async function syncTags(row, tagNames, t) {
   const instances = [];
+  const merged = [];
   for (const name of tagNames) {
-    const [tag] = await models.Tag.findOrCreate({
-      where: { name },
-      defaults: { name, slug: slugify(name) || null },
-      transaction: t,
-    });
-    instances.push(tag);
+    const slug = slugify(name) || null;
+    let tag = await models.Tag.findOne({ where: { name }, transaction: t });
+    if (!tag && slug) {
+      tag = await models.Tag.findOne({ where: { slug }, transaction: t });
+      if (tag) merged.push({ cell: name, existing: tag.name });
+    }
+    if (!tag) tag = await models.Tag.create({ name, slug }, { transaction: t });
+    if (!instances.some((i) => i.id === tag.id)) instances.push(tag);
   }
   await row.setTags(instances, { transaction: t }); // full replace (blank cell => not called)
+  return merged;
+}
+
+// Sequelize reports every constraint violation as the bare "Validation error";
+// name the field and value so the row report says what actually clashed.
+function describeError(err) {
+  if (err && err.name === 'SequelizeUniqueConstraintError') {
+    const parts = (err.errors || []).map((e) => {
+      const field = String(e.path || '').replace(/^uq_[a-z_]+?_(?=[a-z]+$)/, '');
+      return `${field || 'value'} '${e.value}' already exists`;
+    });
+    const table = err.parent && err.parent.sql && (err.parent.sql.match(/(?:INTO|UPDATE)\s+`?(\w+)`?/i) || [])[1];
+    return `${table ? `${table}: ` : ''}${parts.join('; ') || 'duplicate value'}`;
+  }
+  if (err && err.name === 'SequelizeValidationError' && err.errors && err.errors.length) {
+    return err.errors.map((e) => e.message).join('; ');
+  }
+  return (err && err.message) || 'Unknown error';
 }
 
 /**
@@ -756,7 +782,10 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
             inst = await model.create(createPayload, { transaction: t });
           }
           if (cfg.tags && (values.tags || '').trim() !== '') {
-            await syncTags(inst, parseTags(values.tags), t);
+            const merged = await syncTags(inst, parseTags(values.tags), t);
+            for (const m of merged) {
+              warn(row.line, `tags: '${m.cell}' matched existing tag '${m.existing}' (same slug) — linked to that tag`);
+            }
           }
           id = inst.id;
           effectiveSlug = inst.slug || null;
@@ -769,7 +798,7 @@ async function runImport(key, rawText, { dryRun = false, req } = {}) {
       if (effectiveSlug) resolvedByName.set(String(effectiveSlug).toLowerCase(), id);
       record(row.line, name, isUpdate ? 'updated' : 'created', dryRun ? 'dry run — not written' : null);
     } catch (err) {
-      record(row.line, name, 'skipped', err.message);
+      record(row.line, name, 'skipped', describeError(err));
     }
   };
 

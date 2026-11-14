@@ -7,7 +7,7 @@ const create = async (req, res) => {
 };
 
 const list = async (req, res) => {
-  const items = await projectService.getMyProjects(req.user.userId);
+  const items = await projectService.getMyProjects(req.user.userId, { type: req.query.type });
   res.json({ success: true, data: items });
 };
 
