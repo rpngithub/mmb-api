@@ -1,5 +1,6 @@
 const { QueryTypes } = require('sequelize');
 const sequelize = require('../config/db');
+const { utcReplacements } = require('../utils/sqlDate');
 
 // The candidate queries behind the behavioural and date-anchored scans.
 //
@@ -33,7 +34,8 @@ const PAGE = `
       ORDER BY u.id
       LIMIT :limit`;
 
-const run = (sql, replacements) => sequelize.query(sql, { replacements, type: QueryTypes.SELECT });
+// Any Date parameter goes in as UTC — see utils/sqlDate.js.
+const run = (sql, replacements) => sequelize.query(sql, { replacements: utcReplacements(replacements), type: QueryTypes.SELECT });
 
 /**
  * Users whose last activity falls in [now-(days+window), now-days).

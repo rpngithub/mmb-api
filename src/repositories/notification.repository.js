@@ -1,5 +1,6 @@
 const { QueryTypes } = require('sequelize');
 const sequelize = require('../config/db');
+const { sqlUtc } = require('../utils/sqlDate');
 
 // Set-wise reads for the notification engine.
 //
@@ -80,7 +81,8 @@ async function fatigueFacts(userIds, dayStart, weekStart) {
         AND is_promotional = 1
         AND created_at >= :weekStart
       GROUP BY user_id`,
-    { replacements: { userIds, dayStart, weekStart }, type: QueryTypes.SELECT },
+    // UTC, like created_at — see utils/sqlDate.js.
+    { replacements: { userIds, dayStart: sqlUtc(dayStart), weekStart: sqlUtc(weekStart) }, type: QueryTypes.SELECT },
   );
 }
 

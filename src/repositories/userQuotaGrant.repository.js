@@ -94,6 +94,27 @@ class UserQuotaGrantRepository extends BaseRepository {
     );
     return changed;
   }
+
+  // Put `by` units back on one grant — the refund of a spend that debited it.
+  // Guarded so it can only return what was actually consumed, and only to an
+  // ACTIVE grant: a revoked grant has left the balance, and crediting it would
+  // change nothing a user can spend. Returns the number of rows changed, so the
+  // caller can record a refund that could not land.
+  async credit(grantId, by, transaction) {
+    const n = Math.trunc(by);
+    const [changed] = await this.model.update(
+      { consumed: literal(`consumed - ${n}`) },
+      {
+        where: {
+          id: grantId,
+          status: 'active',
+          [Op.and]: literal(`consumed >= ${n}`),
+        },
+        ...(transaction ? { transaction } : {}),
+      },
+    );
+    return changed;
+  }
 }
 
 module.exports = new UserQuotaGrantRepository();

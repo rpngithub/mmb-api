@@ -22,6 +22,8 @@ const feedbackRouter     = require('./routes/feedback.router');
 const fontRouter         = require('./routes/font.router');
 const notificationRouter = require('./routes/notification.router');
 const adminRouter        = require('./routes/admin.router');
+const aiRouter           = require('./routes/ai.router');
+const webhookRouter      = require('./routes/aiWebhook.router');
 
 const app = express();
 
@@ -51,9 +53,14 @@ app.use(morgan(process.env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 // bytes Razorpay signed (see razorpayHelper.verifyWebhookSignature).
 app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: true }));
-app.use(rateLimiter.global);
 
 const API_PREFIX = `/api/${process.env.API_VERSION || 'v1'}`;
+
+// Provider callbacks (/webhooks/ai/*) are exempt from the per-IP global limiter:
+// a provider finishing a burst of jobs calls from a handful of IPs, and a 429
+// there would just make it retry. They are authenticated by signature instead.
+const WEBHOOK_PREFIX = `${API_PREFIX}/webhooks/`;
+app.use((req, res, next) => (req.path.startsWith(WEBHOOK_PREFIX) ? next() : rateLimiter.global(req, res, next)));
 
 app.use(`${API_PREFIX}/auth`,          authRouter);
 app.use(`${API_PREFIX}/users`,         userRouter);
@@ -71,6 +78,8 @@ app.use(`${API_PREFIX}/feedback`,      feedbackRouter);
 app.use(`${API_PREFIX}/fonts`,         fontRouter);
 app.use(`${API_PREFIX}/notifications`, notificationRouter);
 app.use(`${API_PREFIX}/admin`,         adminRouter);
+app.use(`${API_PREFIX}/ai`,            aiRouter);
+app.use(`${API_PREFIX}/webhooks`,      webhookRouter);
 app.use(`${API_PREFIX}`,               catalogRouter);
 
 // Dev-only SMS diagnostics (POST /dev/test-sms). Unauthenticated and it spends real

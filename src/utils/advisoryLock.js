@@ -54,8 +54,21 @@ async function withAdvisoryLock(name, timeoutSeconds, fn) {
     // is too long). Only 1 means we hold it.
     if (!rows || !rows[0] || rows[0].locked !== 1) return NOT_ACQUIRED;
 
+    // For long-held leases (the AI worker holds its lock for minutes): checks, on
+    // the pinned connection itself, that the lock is still ours. A DB failover
+    // drops the connection and with it the lock, and the holder must find out
+    // and stand down instead of carrying on as if it were still the only one.
+    const stillHeld = async () => {
+      try {
+        const r = await query('SELECT IS_USED_LOCK(?) = CONNECTION_ID() AS held', [name]);
+        return Boolean(r && r[0] && Number(r[0].held) === 1);
+      } catch {
+        return false;
+      }
+    };
+
     try {
-      return await fn();
+      return await fn({ stillHeld });
     } finally {
       await query('SELECT RELEASE_LOCK(?)', [name]);
     }

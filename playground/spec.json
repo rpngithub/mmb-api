@@ -6526,6 +6526,289 @@
             ]
           }
         ]
+      },
+      {
+        "name": "AI",
+        "description": "AI features charged in AI credits (the same wallet as Quota → My Usage). Every request is a JOB: **Run Operation** returns `202` with a job, then **Get Job** is polled until `done` (files are in the media library, slot `ai_result`) or `failed` (`refunded: true`, credits back). No provider or model name ever appears in a response.\n\nErrors before charging: 400 `VALIDATION_ERROR` / `AI_IDEMPOTENCY_KEY_REQUIRED`, 402 `QUOTA_EXCEEDED`, 403 `AI_PLAN_REQUIRED` (details name the plans that include it) / `AI_NOT_IN_PLAN`, 404 `AI_OPERATION_NOT_FOUND` / `AI_INPUT_NOT_FOUND`, 409 `AI_IDEMPOTENCY_KEY_REUSED`, 429 `AI_TOO_MANY_JOBS` / `AI_MODERATION_COOLDOWN`, 503 `AI_UNAVAILABLE`. Job error codes: `MODERATION_BLOCKED`, `INVALID_INPUT`, `AI_UNAVAILABLE`, `AI_TIMEOUT`, `AI_FAILED`.\n\nOn dev the catalogue runs on the `fake` provider (no network, a 1-px PNG result). Put `[fake:moderation]` (or `down`, `timeout_after_send`, `fail_after_start`) in a prompt to simulate a failure.",
+        "item": [
+          {
+            "name": "List Operations",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/ai/operations",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations"
+                ]
+              },
+              "description": "The catalogue: key, label, credits, input_schema, price_rules, available. Never hardcode prices."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}",
+                    "const list = ((pm.response.json() || {}).data || []);",
+                    "if (list.length && !pm.environment.get('ai_operation_key')) pm.environment.set('ai_operation_key', list[0].key);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Estimate Price",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/{{ai_operation_key}}/estimate",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "{{ai_operation_key}}",
+                  "estimate"
+                ]
+              },
+              "description": "What this request would cost, in credits. Charges nothing.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"prompt\": \"A Diwali sale banner for a sweet shop\",\n  \"num_images\": 1\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Run Operation",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/{{ai_operation_key}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "{{ai_operation_key}}"
+                ]
+              },
+              "description": "Charges the credits and queues the job: `202` with the job. The same Idempotency-Key with the same body returns the same job with `200` and charges nothing. Image inputs are upload uids from the media library (upload first via Uploads), never URLs.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"prompt\": \"A Diwali sale banner for a sweet shop\",\n  \"aspect_ratio\": \"1:1\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Write Captions (Instagram)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/text.post.instagram",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "text.post.instagram"
+                ]
+              },
+              "description": "One operation per platform: `text.post.instagram` · `facebook` · `linkedin` · `whatsapp` · `youtube`. The server adds the business profile and the project's design (thumbnail included) itself — send only the project uid, optional notes (`context`), `language` (a code from GET /languages; default: the user's first Preferred Language) and `include_contact`. The finished job has `result.text.options` — 3 options of `{ caption, hashtags[], alt_text }` (YouTube: `{ title, caption, hashtags[] }`; WhatsApp: no hashtags). Save the final design (with its thumbnail) first. The operations ship inactive until an admin prices and activates them (404 AI_OPERATION_NOT_FOUND until then).",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"project\": \"{{project_uid}}\",\n  \"context\": \"Diwali 20% off on all sweets till Sunday\",\n  \"language\": \"en\",\n  \"include_contact\": false\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 400, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Get Job",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/ai/jobs/{{ai_job_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "jobs",
+                  "{{ai_job_uid}}"
+                ]
+              },
+              "description": "Poll with backoff (1 s, 2 s, then 5 s) until `status` is `done` or `failed`. Image operations answer in `result.files`; text operations (`unit: text` — captions, hashtags) in `result.text`, with `files: []`."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "List My Jobs",
+            "request": {
+              "method": "GET",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/ai/jobs",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "jobs"
+                ],
+                "query": [
+                  {
+                    "key": "status",
+                    "value": "done,failed",
+                    "disabled": true
+                  },
+                  {
+                    "key": "limit",
+                    "value": "30",
+                    "disabled": true
+                  },
+                  {
+                    "key": "offset",
+                    "value": "0",
+                    "disabled": true
+                  }
+                ]
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       }
     ]
   },
@@ -6697,6 +6980,60 @@
       },
       {
         "key": "quota_pack_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_operation_key",
+        "value": "image.standard",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_job_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_provider_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_provider_id",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_credential_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_operation_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_operation_id",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_route_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "ai_admin_job_uid",
         "value": "",
         "type": "default",
         "enabled": true

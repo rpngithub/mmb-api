@@ -302,9 +302,11 @@ function assertSourceMatches(source, featureKey) {
 // Debit `amount` (FEATURE units) against the user's active grants, oldest first.
 // Returns what was actually taken, which can fall short of `amount` if a
 // concurrent spend got there first — the guarded UPDATE in the repository is what
-// makes that a short debit rather than an overdraw.
+// makes that a short debit rather than an overdraw — and WHICH grants it came
+// off, so a refund (failed AI job) can put each unit back on the grant it left.
 async function debitGrants(userId, featureTypeId, amount, transaction) {
   let left = amount;
+  const debits = [];
 
   const grants = await grantRepo.findSpendable(userId, featureTypeId, transaction);
   for (const grant of grants) {
@@ -312,10 +314,13 @@ async function debitGrants(userId, featureTypeId, amount, transaction) {
     const room = Number(grant.quantity) - Number(grant.consumed);
     const take = Math.min(room, left);
     if (take <= 0) continue;
-    if (await grantRepo.debit(grant.id, take, transaction)) left -= take;
+    if (await grantRepo.debit(grant.id, take, transaction)) {
+      left -= take;
+      debits.push({ grantId: grant.id, amount: take });
+    }
   }
 
-  return amount - left;
+  return { taken: amount - left, debits };
 }
 
 // Increments usage, creating the user's window row on first use. Always recorded,
@@ -332,26 +337,64 @@ async function debitGrants(userId, featureTypeId, amount, transaction) {
 //
 // `opts.source` attributes the spend for the usage breakdown; see
 // constants/quotaSources.js.
+//
+// Two options exist for spends that cost real money (AI jobs):
+//
+//   transaction — join the caller's transaction instead of opening one, so the
+//     charge commits or rolls back with the caller's own row (the ai_jobs insert).
+//   strict      — check the balance INSIDE the transaction, under a row lock on the
+//     user's counter, and throw QuotaError there. assertWithinQuota is a read
+//     outside any lock, so on its own five parallel requests on a 3-credit balance
+//     all pass it and the plan counter overshoots its limit. Counter-backed meters
+//     only; a live-counted gauge has no counter row to lock.
+//
+// Returns what was charged and where it came from — `{ fromPlan, fromTopup,
+// grantDebits, periodStart, eventUid }` — which is exactly what `refund` needs to
+// put it back. Null when nothing was recorded. Existing callers ignore it.
 async function consume(userId, featureKey, by = 1, opts = {}) {
-  if (by <= 0) return;
+  if (by <= 0) return null;
 
-  const { source = FALLBACK, ref_type = null, ref_id = null } = opts;
+  const {
+    source = FALLBACK, ref_type = null, ref_id = null,
+    transaction: outer = null, strict = false,
+  } = opts;
   assertSourceMatches(source, featureKey);
 
+  // The window row first, THEN the period: ensureCurrentPeriod does nothing for an
+  // account with no row yet, so on a first-ever spend the window would otherwise
+  // be stamped only on the NEXT call — and the split returned below would record
+  // no period, which a later refund reads as "the period has rolled".
+  await quotaRepo.ensureRow(userId);
   await ensureCurrentPeriod(userId);
 
   const ft = await featureTypeRepo.findByKey(featureKey);
   // No feature type means nothing to count against and no plan that could limit
   // it — there is nowhere to record the spend.
-  if (!ft) return;
+  if (!ft) return null;
 
   const limit = await limitFor(userId, featureKey);
   const scale = scaleFor(featureKey);
 
-  await sequelize.transaction(async (transaction) => {
-    if (!(await quotaRepo.findOne({ user_id: userId }, { transaction }))) {
-      await quotaRepo.create({ user_id: userId }, transaction);
+  const work = async (transaction) => {
+    await quotaRepo.ensureRow(userId, transaction);
+
+    // Strict: make sure the counter row exists (a +0 upsert), then lock it. Every
+    // other strict spend for this user and feature now waits here until we commit.
+    // Both reads below are LOCKING reads on purpose: under REPEATABLE READ a plain
+    // SELECT sees the transaction's snapshot, which can predate the spend we just
+    // waited for — and would hand this one headroom that is already gone.
+    let lockedUsed = null;
+    if (strict && limit !== null && !isLive(ft)) {
+      await counterRepo.increment(userId, ft.id, 0, transaction);
+      lockedUsed = await counterRepo.used(userId, ft.id, transaction, { lock: true });
+      const spendable = await grantRepo.findSpendable(userId, ft.id, transaction);
+      const topupUnits = spendable.reduce((s, g) => s + Number(g.quantity) - Number(g.consumed), 0);
+      if (lockedUsed + by > limit + topupUnits * scale) {
+        throw new QuotaError(`${ft.label || featureKey} limit reached. Upgrade your plan or buy a top-up.`);
+      }
     }
+
+    const usage = await quotaRepo.findOne({ user_id: userId }, { transaction });
 
     // Everything lands on the counter unless this is a metered flow that has
     // already used up its plan allowance. An unmetered account (limit null) never
@@ -359,9 +402,10 @@ async function consume(userId, featureKey, by = 1, opts = {}) {
     // nothing for the top-up to be spent on.
     let fromPlan  = by;
     let fromTopup = 0;
+    let grantDebits = [];
 
     if (modeOf(ft) === 'flow' && limit !== null) {
-      const used         = await counterRepo.used(userId, ft.id, transaction);
+      const used         = lockedUsed !== null ? lockedUsed : await counterRepo.used(userId, ft.id, transaction);
       const planHeadroom = Math.max(limit - used, 0);
       fromPlan  = Math.min(by, planHeadroom);
       fromTopup = by - fromPlan;
@@ -377,23 +421,105 @@ async function consume(userId, featureKey, by = 1, opts = {}) {
       // written out so marking a scaled feature as a flow later cannot silently
       // debit bytes against a balance counted in megabytes.
       const debited = await debitGrants(userId, ft.id, fromTopup / scale, transaction);
+      grantDebits = debited.debits;
       // A short debit means a concurrent spend took the balance between the check
       // and here. Charge only what was actually covered rather than inventing
-      // headroom; the next call will fail the check cleanly.
-      fromTopup = debited * scale;
+      // headroom; the next call will fail the check cleanly. A strict spend holds
+      // the counter lock, so it cannot be short.
+      fromTopup = debited.taken * scale;
     }
 
+    const eventUid = uuid();
     await eventRepo.create({
-      uid: uuid(), user_id: userId, feature_type_id: ft.id,
+      uid: eventUid, user_id: userId, feature_type_id: ft.id,
       source, amount: fromPlan + fromTopup, from_plan: fromPlan, from_topup: fromTopup,
       ref_type, ref_id,
     }, transaction);
-  });
 
-  // "Only N AI credits remaining." Deliberately AFTER the transaction: a
+    return { fromPlan, fromTopup, grantDebits, periodStart: usage?.period_start || null, eventUid };
+  };
+
+  // "Only N AI credits remaining." Deliberately AFTER the transaction commits: a
   // notification must never be able to roll back a spend, or hold locks while it
   // runs its own queries.
+  if (outer) {
+    const split = await work(outer);
+    outer.afterCommit(() => _maybeWarnLowBalance(userId, featureKey));
+    return split;
+  }
+
+  const split = await sequelize.transaction(work);
   await _maybeWarnLowBalance(userId, featureKey);
+  return split;
+}
+
+// Puts a FLOW spend back where it came from — a failed or moderated AI job. The
+// counterpart of `consume`, taking the split it returned:
+//
+//   plan share  — back onto the monthly counter, but only while the account is
+//                 still in the period it was charged in. Once the window has
+//                 rolled, the counter has been zeroed and the old allowance has
+//                 already lapsed; crediting the new period would hand out
+//                 allowance the plan never gave. That share is lost, deliberately
+//                 (see the AI design doc), and reported in `skipped`.
+//   top-up share — back onto the exact grant rows it was debited from. A grant
+//                 that has since been revoked is skipped and reported.
+//
+// Writes one NEGATIVE ledger row for what was actually restored, so the
+// breakdown and the counters still reconcile. Idempotency is the CALLER's job
+// (aiJob.service guards it with ai_jobs.refunded_at): this function will happily
+// refund the same split twice if asked.
+//
+// Gauges are never refunded here — that is `release`, which is a different thing
+// (freeing occupancy, not reversing a charge).
+async function refund(userId, featureKey, split, opts = {}) {
+  if (!split) return null;
+
+  const { source = FALLBACK, ref_type = null, ref_id = null, transaction: outer = null } = opts;
+  assertSourceMatches(source, featureKey);
+
+  const ft = await featureTypeRepo.findByKey(featureKey);
+  if (!ft || modeOf(ft) !== 'flow') return null;
+  const scale = scaleFor(featureKey);
+
+  const work = async (transaction) => {
+    let restoredPlan  = 0;
+    let restoredTopup = 0;
+    const skipped = [];
+
+    const fromPlan = Number(split.fromPlan || 0);
+    if (fromPlan > 0) {
+      const usage = await quotaRepo.findOne({ user_id: userId }, { transaction });
+      const samePeriod = String(usage?.period_start || '') === String(split.periodStart || '');
+      if (samePeriod) {
+        await counterRepo.decrement(userId, ft.id, fromPlan, transaction);
+        restoredPlan = fromPlan;
+      } else {
+        skipped.push({ bucket: 'plan', amount: fromPlan, reason: 'period_rolled' });
+      }
+    }
+
+    for (const d of split.grantDebits || []) {
+      if (await grantRepo.credit(d.grantId, d.amount, transaction)) {
+        restoredTopup += Number(d.amount) * scale;
+      } else {
+        skipped.push({ bucket: 'grant', grant_id: d.grantId, amount: Number(d.amount), reason: 'grant_inactive' });
+      }
+    }
+
+    const total = restoredPlan + restoredTopup;
+    if (total > 0) {
+      await eventRepo.create({
+        uid: uuid(), user_id: userId, feature_type_id: ft.id,
+        source, amount: -total, from_plan: -restoredPlan, from_topup: -restoredTopup,
+        ref_type, ref_id,
+      }, transaction);
+    }
+
+    return { restoredPlan, restoredTopup, skipped };
+  };
+
+  return outer ? work(outer) : sequelize.transaction(work);
 }
 
 // Fires `credits_running_low` once per billing period, not once per spend — the
@@ -576,7 +702,11 @@ async function usageSummary(userId, { withBreakdown = false, sub = undefined } =
 
     if (withBreakdown && ft.data_type !== 'boolean') {
       const scale = scaleFor(ft.key);
-      const rows  = await eventRepo.breakdown(userId, ft.id, period?.start || null);
+      // Flows net off refunds (a failed AI job gave its credits back); a source
+      // whose spends were all refunded drops out rather than showing 0.
+      const net   = modeOf(ft) === 'flow';
+      const rows  = (await eventRepo.breakdown(userId, ft.id, period?.start || null, { net }))
+        .filter((r) => !net || r.used > 0);
       feature.breakdown = rows.map((r) => ({
         source: r.source,
         label:  labelFor(r.source),
@@ -601,7 +731,7 @@ async function hasFeature(userId, featureKey) {
 }
 
 module.exports = {
-  assertWithinQuota, assertRoomToRestore, consume, release, remaining, snapshot, hasFeature,
+  assertWithinQuota, assertRoomToRestore, consume, refund, release, remaining, snapshot, hasFeature,
   limitFor, balanceFor, usageSummary, buildFeature, effectivePlan,
   ensureCurrentPeriod, currentWindow, addMonthsClamped, scaleFor,
 };

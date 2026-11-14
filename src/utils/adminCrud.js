@@ -76,7 +76,10 @@ const clean = (body) => {
  *                                     transaction. For tree models (a `parent_id`
  *                                     column) every id in the batch must share the same
  *                                     parent — reorder is sibling-scoped. Requires the
- *                                     model to have a `display_order` column.
+ *                                     model to have a `display_order` column, or the
+ *                                     column named by `orderColumn`.
+ * @param {string} [opts.orderColumn]  the column `reorderable` writes (default
+ *                                     'display_order'; e.g. 'sort_order').
  */
 function adminCrud(opts) {
   const {
@@ -84,6 +87,7 @@ function adminCrud(opts) {
     softDelete = null, createSchema = null, updateSchema = null, listOptions = {},
     protect = null, filterable = [], include = null, injectOnCreate = null, unique = [],
     autoSlug = false, filterAlias = {}, reorderable = false, beforeWrite = null, afterWrite = null,
+    orderColumn = 'display_order',
   } = opts;
 
   const router = express.Router();
@@ -126,7 +130,7 @@ function adminCrud(opts) {
 
       const position = new Map(ids.map((id, i) => [String(id), i]));
       await model.sequelize.transaction((t) =>
-        Promise.all(rows.map((r) => r.update({ display_order: position.get(String(r[idField])) }, { transaction: t }))),
+        Promise.all(rows.map((r) => r.update({ [orderColumn]: position.get(String(r[idField])) }, { transaction: t }))),
       );
       await activity.log(req, { action: `${resource}.reordered`, entityType: resource, metadata: { ids } });
       res.json({ success: true, data: null });

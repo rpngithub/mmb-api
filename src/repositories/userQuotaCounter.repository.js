@@ -7,10 +7,14 @@ const tx = (transaction) => (transaction ? { transaction } : {});
 class UserQuotaCounterRepository extends BaseRepository {
   constructor() { super(UserQuotaCounter); }
 
-  async used(userId, featureTypeId, transaction) {
+  // `lock` takes a row lock for the rest of the transaction (SELECT … FOR UPDATE),
+  // so a check-then-spend cannot interleave with another spend for the same user
+  // and feature. Only meaningful inside a transaction.
+  async used(userId, featureTypeId, transaction, { lock = false } = {}) {
     const row = await this.model.findOne({
       where: { user_id: userId, feature_type_id: featureTypeId },
       attributes: ['used'], ...tx(transaction),
+      ...(lock && transaction ? { lock: transaction.LOCK.UPDATE } : {}),
     });
     return row ? Number(row.used) : 0;
   }

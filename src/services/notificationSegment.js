@@ -1,6 +1,7 @@
 const { QueryTypes } = require('sequelize');
 const sequelize = require('../config/db');
 const { ValidationError } = require('../errors');
+const { utcReplacements } = require('../utils/sqlDate');
 
 // Turns a campaign's `audience` JSON into SQL.
 //
@@ -108,7 +109,8 @@ function buildWhere(audience = {}, { requireMarketingConsent = true } = {}) {
     Object.assign(params, built.params);
   }
 
-  return { where: clauses.join('\n        AND '), params };
+  // signed_up_after/before may arrive as Dates: written as UTC, like created_at.
+  return { where: clauses.join('\n        AND '), params: utcReplacements(params) };
 }
 
 const SKELETON = `

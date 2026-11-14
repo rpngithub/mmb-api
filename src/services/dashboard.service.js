@@ -3,6 +3,7 @@ const path = require('path');
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../models');
 const ist = require('../utils/istTime');
+const { utcReplacements } = require('../utils/sqlDate');
 const tzCfg = require('../config/notifications');
 const { hasPermission } = require('../middlewares/authorizeAdmin');
 const { ValidationError, NotFoundError } = require('../errors');
@@ -24,7 +25,9 @@ const { ValidationError, NotFoundError } = require('../errors');
 const MAX_RANGE_DAYS = 366;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-const select = (sql, replacements = {}) => sequelize.query(sql, { replacements, type: QueryTypes.SELECT });
+// Date replacements go in as UTC (utils/sqlDate.js): raw replacements are otherwise
+// written in the host's local time, which on an IST host shifts every range 5h30.
+const select = (sql, replacements = {}) => sequelize.query(sql, { replacements: utcReplacements(replacements), type: QueryTypes.SELECT });
 
 // The IST calendar date of a UTC DATETIME column, in SQL. The offset is an integer
 // from config, never request input, so inlining it is safe.

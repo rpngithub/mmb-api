@@ -39,7 +39,30 @@ const uploadRules = Object.fromEntries(SCOPES.flatMap((scope) => [
   ]),
 ]));
 
+const nonNegativeInteger = (value) =>
+  (/^\d+$/.test(String(value)) ? null : 'must be a whole number of at least 0');
+
+const percent = (value) =>
+  nonNegativeInteger(value) || (Number(value) > 100 ? 'must be at most 100' : null);
+
+// Rupees with up to 4 decimals, e.g. "1.1355". Blank is allowed (= not set yet).
+const rupees = (value) =>
+  (String(value) === '' || /^\d+(\.\d{1,4})?$/.test(String(value)) ? null : 'must be a decimal amount in rupees, e.g. 1.25');
+
+// AI jobs (group `ai`, migration 20260101000061).
+const aiRules = {
+  ai_max_concurrent_jobs_per_user: positiveInteger,
+  ai_job_timeout_minutes:          positiveInteger,
+  ai_unknown_resolve_minutes:      positiveInteger,
+  ai_moderation_strikes_per_hour:  positiveInteger,
+  ai_spillover_wait_seconds:       positiveInteger,
+  ai_target_margin_pct:            percent,
+  ai_fx_buffer_pct:                percent,
+  ai_credit_value_inr:             rupees,
+};
+
 const RULES = {
+  ...aiRules,
   // Minutes. 0 or less would purge on the next run with no window for an admin
   // to reactivate; a fraction is meaningless for a 5-minute job.
   account_deletion_grace_minutes: positiveInteger,
