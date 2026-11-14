@@ -10,6 +10,7 @@ const dedupe          = require('../utils/dedupeKey');
 const mailer          = require('../utils/mailer');
 const { hashToken }   = require('../utils/tokenHash');
 const { normalizePhone, maskPhone } = require('../utils/phone');
+const { assertNotReviewAccount } = require('../utils/reviewLogin');
 const { PhoneChangeRequest, OtpCode, sequelize } = require('../models');
 const { AppError, NotFoundError, ConflictError, ValidationError } = require('../errors');
 
@@ -95,6 +96,8 @@ const _isLive = (req) => req && req.status === 'open' && new Date(req.expires_at
 async function start(req) {
   const user = await _activeUser(req.user.userId);
   if (!user.phone) throw new AppError('This account has no mobile number', 409, 'PHONE_NOT_SET');
+  // The review account must stay on the number Play Console was given.
+  assertNotReviewAccount(user.phone);
 
   await _cancelOpen(user.id);
   const request = await PhoneChangeRequest.create({
@@ -161,6 +164,7 @@ async function verifyNew(req, uid, { otp }) {
 async function lostPhone(req) {
   const user = await _activeUser(req.user.userId);
   if (!user.phone) throw new AppError('This account has no mobile number', 409, 'PHONE_NOT_SET');
+  assertNotReviewAccount(user.phone);
 
   const eligibility = lostPhoneEligibility(user);
   if (!eligibility.available) {
@@ -255,6 +259,9 @@ async function linkVerify(req, { token, otp }) {
 async function _sendNewPhoneOtp(request, rawPhone) {
   const phone = normalizePhone(rawPhone);
   if (phone === request.old_phone) throw new ValidationError('That is already your mobile number');
+  // Nor may another account move ONTO the review number: its login takes the fixed
+  // code, so whoever holds that code would then be signing into that account.
+  assertNotReviewAccount(phone);
 
   const taken = await userRepo.findByPhone(phone);
   if (taken && taken.id !== request.user_id) {

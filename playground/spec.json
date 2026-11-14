@@ -68,7 +68,7 @@
                   "send-otp"
                 ]
               },
-              "description": "purpose: `login` | `reset`. In development the response `data.otp` is returned and auto-saved to the `otp` env var.\n\n**Phone is India-only** and every spelling lands on the same account — `+919876543210`, `919876543210`, `09876543210` and bare `9876543210` are one user, stored as `+91XXXXXXXXXX`. Anything that is not an Indian mobile is a 400 here, before any OTP is written.",
+              "description": "purpose: `login` | `reset`. In development the response `data.otp` is returned and auto-saved to the `otp` env var.\n\n**Phone is India-only** and every spelling lands on the same account — `+919876543210`, `919876543210`, `09876543210` and bare `9876543210` are one user, stored as `+91XXXXXXXXXX`. Anything that is not an Indian mobile is a 400 here, before any OTP is written.\n\n**Store-review number:** when the server sets `REVIEW_LOGIN_PHONE` + `REVIEW_LOGIN_OTP_HASH`, that one number gets no SMS and no `otp` in the response (not even in development). Its code is the fixed one given to Play Console — type it into `otp` yourself.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"purpose\": \"{{purpose}}\"\n}",
@@ -122,7 +122,7 @@
                   "verify-otp"
                 ]
               },
-              "description": "Authenticates the user and auto-saves `access_token` + `refresh_token`. The collection default auth is `Bearer {{access_token}}`, so every user request inherits it.\n\n`phone` follows the same rules as Send OTP and need not be the same spelling that requested the OTP. A deactivated account gets 401 here for the whole deletion grace period — only an admin reactivation lets it back in.",
+              "description": "Authenticates the user and auto-saves `access_token` + `refresh_token`. The collection default auth is `Bearer {{access_token}}`, so every user request inherits it.\n\n`phone` follows the same rules as Send OTP and need not be the same spelling that requested the OTP. A deactivated account gets 401 here for the whole deletion grace period — only an admin reactivation lets it back in. Exception: the store-review number, self-deleted, is reactivated by its next correct code (it is never purged); an admin deactivation still blocks it. Review logins and wrong review codes are audited (`review_account_login` / `review_login_failed`).",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"otp\": \"{{otp}}\",\n  \"purpose\": \"{{purpose}}\",\n  \"client_mnemonic\": \"{{client_mnemonic}}\"\n}",
@@ -904,7 +904,7 @@
                   "start"
                 ]
               },
-              "description": "Opens a 15-minute request. Calling again restarts it (that is the resend). Saves `phone_change_uid`; dev also saves the OTP to `phone_change_otp`.",
+              "description": "Opens a 15-minute request. Calling again restarts it (that is the resend). Saves `phone_change_uid`; dev also saves the OTP to `phone_change_otp`. 403 `REVIEW_ACCOUNT_RESTRICTED` on the store-review account.",
               "body": {
                 "mode": "raw",
                 "raw": "{}",
@@ -1011,7 +1011,7 @@
                   "new-phone"
                 ]
               },
-              "description": "409 `PHONE_TAKEN` when another account has it, `STEP_OUT_OF_ORDER` before step 2. Call again to resend or correct the number. Dev saves the OTP to `phone_change_otp`.",
+              "description": "409 `PHONE_TAKEN` when another account has it, `STEP_OUT_OF_ORDER` before step 2. 403 `REVIEW_ACCOUNT_RESTRICTED` when the new number is the store-review number. Call again to resend or correct the number. Dev saves the OTP to `phone_change_otp`.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"phone\": \"{{new_phone}}\"\n}",
@@ -1119,7 +1119,7 @@
                   "lost-phone"
                 ]
               },
-              "description": "Needs an email verified ≥ 30 days ago, else 403 `EMAIL_NOT_SET` / `EMAIL_NOT_VERIFIED` / `EMAIL_VERIFICATION_TOO_RECENT` (`details[0].eligible_from`). Mails `{APP_WEB_URL}/change-phone?token=…` (30 min, single use). Dev saves `dev_token` to `phone_reset_token`.",
+              "description": "Needs an email verified ≥ 30 days ago, else 403 `EMAIL_NOT_SET` / `EMAIL_NOT_VERIFIED` / `EMAIL_VERIFICATION_TOO_RECENT` (`details[0].eligible_from`). 403 `REVIEW_ACCOUNT_RESTRICTED` on the store-review account. Mails `{APP_WEB_URL}/change-phone?token=…` (30 min, single use). Dev saves `dev_token` to `phone_reset_token`.",
               "body": {
                 "mode": "raw",
                 "raw": "{}",
@@ -1210,7 +1210,7 @@
                   "send-otp"
                 ]
               },
-              "description": "Public. 409 `PHONE_TAKEN`. Dev saves the OTP to `phone_change_otp`.",
+              "description": "Public. 409 `PHONE_TAKEN`; 403 `REVIEW_ACCOUNT_RESTRICTED` when the new number is the store-review number. Dev saves the OTP to `phone_change_otp`.",
               "body": {
                 "mode": "raw",
                 "raw": "{\n  \"token\": \"{{phone_reset_token}}\",\n  \"phone\": \"{{new_phone}}\"\n}",

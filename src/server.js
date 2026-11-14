@@ -87,6 +87,11 @@ async function start() {
 
   console.log('[Jobs] All cron jobs started');
 
+  // Store-review login (utils/reviewLogin.js): says so when it is on, and when it
+  // is half-configured and therefore silently off.
+  const reviewStatus = require('./utils/reviewLogin').bootStatus();
+  if (reviewStatus) console.log(reviewStatus);
+
   server.listen(PORT, () => {
     console.log(`[Server] Running on port ${PORT} (${process.env.NODE_ENV})`);
   });
