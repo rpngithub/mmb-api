@@ -6,7 +6,7 @@ const sendOtp = async (req, res) => {
 };
 
 const verifyOtp = async (req, res) => {
-  const result = await authService.verifyOtpService(req.body);
+  const result = await authService.verifyOtpService(req.body, { ip: req.ip });
   res.json({ success: true, data: result });
 };
 

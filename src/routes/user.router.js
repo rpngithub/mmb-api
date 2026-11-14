@@ -286,6 +286,7 @@ router.get('/me/phone-change/options', authenticate, phoneChange.options);
  *     security: [{ bearerAuth: [] }]
  *     responses:
  *       200: { description: "`{ request_uid, phone (masked), expires_at, next_step: verify_old }` — plus `otp` in development/test" }
+ *       403: { description: "`REVIEW_ACCOUNT_RESTRICTED` — the store-review account cannot change its number" }
  *       429: { $ref: '#/components/responses/RateLimitError' }
  */
 router.post('/me/phone-change/start', authenticate, rateLimiter.accountOtpSend, phoneChange.start);
@@ -324,6 +325,7 @@ router.post('/me/phone-change/:uid/verify-old', authenticate, validate(otpSchema
  *     responses:
  *       200: { description: "`{ phone (masked), next_step: verify_new }` — plus `otp` in development/test" }
  *       400: { description: Not an Indian mobile, or it is already your number }
+ *       403: { description: "`REVIEW_ACCOUNT_RESTRICTED` — the new number is the store-review number" }
  *       409: { description: "`PHONE_TAKEN` (another account has it) or `STEP_OUT_OF_ORDER` (current number not confirmed yet)" }
  */
 router.post('/me/phone-change/:uid/new-phone', authenticate, validate(newPhoneSchema), rateLimiter.otpSend, rateLimiter.accountOtpSend, phoneChange.submitNewPhone);
@@ -366,7 +368,7 @@ router.post('/me/phone-change/:uid/verify-new', authenticate, validate(otpSchema
  *     security: [{ bearerAuth: [] }]
  *     responses:
  *       200: { description: "`{ message, email (masked), expires_at }`" }
- *       403: { description: Email not eligible — see the codes above }
+ *       403: { description: "Email not eligible — see the codes above — or `REVIEW_ACCOUNT_RESTRICTED` on the store-review account" }
  *       429: { $ref: '#/components/responses/RateLimitError' }
  */
 router.post('/me/phone-change/lost-phone', authenticate, rateLimiter.mailLink, phoneChange.lostPhone);

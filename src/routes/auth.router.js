@@ -21,6 +21,12 @@ const { linkSendOtpSchema, linkVerifySchema, verifyEmailSchema } = require('../v
  * /auth/send-otp:
  *   post:
  *     summary: Send OTP to phone number (login & signup combined — creates account on first use)
+ *     description: >-
+ *       **Store-review number.** When the server sets both `REVIEW_LOGIN_PHONE` and
+ *       `REVIEW_LOGIN_OTP_HASH`, that one number gets no SMS: its OTP is a fixed code
+ *       held only in Play Console → App access. The response is the same
+ *       `{ message }` and never carries the code, not even in development. Expiry, the
+ *       5-attempt cap and the rate limits apply as usual. Unset = every number is texted.
  *     tags: [Auth]
  *     requestBody:
  *       required: true
@@ -47,6 +53,13 @@ router.post('/send-otp', validate(sendOtpSchema), rateLimiter.otpSend, controlle
  * /auth/verify-otp:
  *   post:
  *     summary: Verify OTP — authenticates user and issues tokens (auto-creates account on first login)
+ *     description: >-
+ *       A deactivated account gets 401 for the whole deletion grace period. One exception:
+ *       the store-review number (see send-otp). If the reviewer deleted that account
+ *       themselves, the next correct code reactivates it — it is never purged, so later
+ *       reviews still get in. An admin deactivation is not undone this way. Every review
+ *       login is audited as `review_account_login`, and every wrong code as
+ *       `review_login_failed`, with the caller's IP.
  *     tags: [Auth]
  *     requestBody:
  *       required: true
@@ -183,6 +196,7 @@ router.get('/phone-reset/:token', rateLimiter.guest, phoneChange.inspectLink);
  *     responses:
  *       200: { description: "`{ phone (masked), next_step: verify_new }` — plus `otp` in development/test" }
  *       400: { description: "`LINK_INVALID`, not an Indian mobile, or already the account's number" }
+ *       403: { description: "`REVIEW_ACCOUNT_RESTRICTED` — the new number is the store-review number" }
  *       409: { description: "`PHONE_TAKEN`" }
  */
 router.post('/phone-reset/send-otp', validate(linkSendOtpSchema), rateLimiter.otpSend, rateLimiter.accountOtpSend, phoneChange.linkSendOtp);

@@ -4,6 +4,7 @@ const models    = require('../models');
 const s3        = require('../utils/s3Helper');
 const razorpay  = require('../utils/razorpayHelper');
 const config    = require('./config.service');
+const reviewLogin = require('../utils/reviewLogin');
 
 const {
   User, Business, Project, ProjectExport, UserFrame, UserVariant, UserUpload, UserQuotaUsage, UserQuotaCounter, UserQuotaGrant,
@@ -38,8 +39,14 @@ async function deletionScheduledAt(deactivatedAt) {
 async function findDue(limit = MAX_PER_RUN) {
   const minutes = await graceMinutes();
   const cutoff  = new Date(Date.now() - minutes * 60 * 1000);
+  const where = { deactivated_at: { [Op.lte]: cutoff }, purged_at: null, is_active: 0 };
+  // Never the store-review account: a reviewer testing deletion must not destroy
+  // the account every later review signs into. Its next login reactivates it (see
+  // auth.service). NULL phones are kept in by the OR — `phone <> x` alone drops them.
+  const review = reviewLogin.isEnabled() ? reviewLogin.reviewPhone() : null;
+  if (review) where[Op.or] = [{ phone: null }, { phone: { [Op.ne]: review } }];
   return User.findAll({
-    where: { deactivated_at: { [Op.lte]: cutoff }, purged_at: null, is_active: 0 },
+    where,
     order: [['deactivated_at', 'ASC']],
     limit,
   });

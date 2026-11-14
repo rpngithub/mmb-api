@@ -16,6 +16,7 @@ const { generateOtp, hashOtp, verifyOtp, sendOtp }       = require('../utils/otp
 const { hashToken, verifyTokenHash }                     = require('../utils/tokenHash');
 const { ADMIN_CLIENT_TYPE }                              = require('../utils/clientTypes');
 const { normalizePhone }                                 = require('../utils/phone');
+const reviewLogin                                        = require('../utils/reviewLogin');
 const {
   AuthError, NotFoundError, RateLimitError, TokenReuseError, RefreshInProgressError,
 } = require('../errors');
@@ -41,11 +42,21 @@ const REFRESH_GRACE_MS = 15 * 1000;
 // pre-date this.
 async function sendOtpService({ phone: rawPhone, purpose }) {
   const phone   = normalizePhone(rawPhone);
-  const otp     = generateOtp();
-  const hash    = await hashOtp(otp);
   const expires = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
   await otpRepo.model.update({ is_used: 1 }, { where: { phone, purpose, is_used: 0 } });
+
+  // The store-review number (utils/reviewLogin.js): its "OTP" is the fixed code
+  // whose hash is in the env, stored like any other so verify needs no special case.
+  // No SMS, and the code is never echoed — not even in development, where the
+  // response would otherwise carry it.
+  if (reviewLogin.isReviewPhone(phone)) {
+    await otpRepo.create({ phone, otp_hash: reviewLogin.reviewOtpHash(), purpose, expires_at: expires });
+    return { message: 'OTP sent successfully' };
+  }
+
+  const otp  = generateOtp();
+  const hash = await hashOtp(otp);
   await otpRepo.create({ phone, otp_hash: hash, purpose, expires_at: expires });
   await sendOtp(phone, otp);
 
@@ -54,9 +65,11 @@ async function sendOtpService({ phone: rawPhone, purpose }) {
   return result;
 }
 
-async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic }) {
-  const phone  = normalizePhone(rawPhone);
-  const record = await otpRepo.findActive(phone, purpose);
+// `context.ip` only attributes the audit rows written for the store-review number.
+async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic }, context = {}) {
+  const phone    = normalizePhone(rawPhone);
+  const isReview = reviewLogin.isReviewPhone(phone);
+  const record   = await otpRepo.findActive(phone, purpose);
   if (!record) throw new AuthError('OTP expired or not found');
 
   if (record.attempts >= 5) {
@@ -67,6 +80,15 @@ async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic
   const valid = await verifyOtp(otp, record.otp_hash);
   if (!valid) {
     await otpRepo.update(record.id, { attempts: record.attempts + 1 });
+    // The review code is fixed, so guessing at it is the one attack it invites.
+    // Leave a trail to alert on; a burst of these means rotate the code.
+    if (isReview) {
+      console.warn(`[review-login] wrong code for the review number (attempt ${record.attempts + 1}) from ${context.ip || 'unknown ip'}`);
+      await activityService.log({ ip: context.ip }, {
+        action: 'review_login_failed', entityType: 'otp_code', entityId: record.id,
+        metadata: { attempt: record.attempts + 1 },
+      });
+    }
     throw new AuthError('Invalid OTP');
   }
 
@@ -78,6 +100,15 @@ async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic
     // No name yet — the user enters one in the app. (It used to be the phone
     // number, which then showed up as their name everywhere.)
     user = await userRepo.create({ phone, uid: uuid() });
+  }
+
+  // A reviewer testing "Delete my account" (which Play requires to work) would
+  // otherwise lock every later review out. Self-deactivation only — deactivated_at
+  // is stamped by nothing else — so an ADMIN switching the account off stays the
+  // kill switch. accountPurge also skips this number, so nothing was deleted.
+  if (isReview && !user.is_active && user.deactivated_at) {
+    await userRepo.update(user.id, { is_active: 1, deactivated_at: null });
+    user = await userRepo.findById(user.id);
   }
 
   // A deactivated account must not be able to sign straight back in — otherwise
@@ -100,6 +131,13 @@ async function verifyOtpService({ phone: rawPhone, otp, purpose, client_mnemonic
   // `last_login_at` check would be the obvious guard but it has already been
   // stamped by _issueTokens by this point.
   notify.notify({ code: 'welcome_to_mmb', userId: user.id, dedupeKey: dedupe.once('welcome_to_mmb') });
+
+  if (isReview) {
+    await activityService.log({ user: { actor_type: 'user', userId: user.id }, ip: context.ip }, {
+      action: 'review_account_login', entityType: 'user', entityId: user.id,
+      metadata: { client_mnemonic: client_mnemonic || null },
+    });
+  }
 
   return { ...tokens, is_new_user: !onboarding.completed, onboarding };
 }

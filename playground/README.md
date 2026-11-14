@@ -29,7 +29,9 @@ CORS is enforced by browsers, not by the server.
 
 1. **Auth → Send OTP.** In development the OTP comes back in the response body and is captured
    automatically — no SMS involved (see `src/utils/otpHelper.js`). On staging it is texted for
-   real, so read it off the handset and type it into **Verify OTP** yourself.
+   real, so read it off the handset and type it into **Verify OTP** yourself. The store-review
+   number (`REVIEW_LOGIN_PHONE`, when set) is never texted or echoed: its code is the fixed one in
+   Play Console, typed in by hand (see `docs/review-login-runbook.md`).
 2. **Auth → Verify OTP.** Captures `access_token`; every other request inherits it as a bearer
    token, so you're signed in for the rest of the session.
 3. Anything else, in any order. Ids created along the way (`business_uid`, `project_uid`, …) are
