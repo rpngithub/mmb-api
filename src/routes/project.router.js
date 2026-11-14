@@ -22,6 +22,12 @@ const { createProjectSchema, updateProjectSchema, createExportSchema } = require
  *       card or version being opened. Both the version and its design must be active (400
  *       otherwise), and a design in a premium variant needs that variant bought, or added to
  *       the caller's business while they hold an active subscription (403).
+ *
+ *       `project_type` is `image` or `video`. Send `video` when the design has any animation.
+ *       Omitted, it is the template's type (`video`/`animated` → `video`); a blank project is
+ *       `image`. A project made from a template counts against the plan's **Business Posts
+ *       Templates** quota when it is an image and **Video Templates** when it is a video (402
+ *       `QUOTA_EXCEEDED` when full). Blank projects count against neither.
  *     tags: [Projects]
  *     security: [{ bearerAuth: [] }]
  *     requestBody:
@@ -32,21 +38,31 @@ const { createProjectSchema, updateProjectSchema, createExportSchema } = require
  *             type: object
  *             required: [name]
  *             properties:
- *               name:        { type: string }
- *               business_id: { type: integer }
- *               template_id: { type: integer }
- *               size_id:     { type: integer }
- *               content:     { type: string }
+ *               name:         { type: string }
+ *               business_id:  { type: integer }
+ *               template_id:  { type: integer }
+ *               size_id:      { type: integer }
+ *               project_type: { type: string, enum: [image, video] }
+ *               content:      { type: string }
  *               thumbnail:
  *                 $ref: '#/components/schemas/ProjectThumbnailInput'
  *     responses:
  *       201:
  *         description: Created project
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ProjectResponse' } } }
+ *       402:
+ *         description: The quota for this project's type is full
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   get:
  *     summary: List my projects
  *     tags: [Projects]
  *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: type
+ *         required: false
+ *         schema: { type: string, enum: [image, video] }
+ *         description: Only images ("My Posts") or only videos ("My Videos"). Omit for all.
  *     responses:
  *       200:
  *         description: Array of projects
@@ -81,6 +97,13 @@ router.get('/', authenticate, controller.list);
  *       Autosave guidance: send `content` on your short tick (a couple of seconds is fine);
  *       send `thumbnail` on a slower one — every 15–30 s, on blur, and on close. It is base64
  *       and needs a canvas render, so shipping it on every keystroke is wasted work.
+ *
+ *       `project_type`: send `video` when the first animation is added and `image` when the
+ *       last one is removed — only when it changes. On a project made from a template this
+ *       moves it to the other plan quota (Business Posts ↔ Video), so it can fail with 402
+ *       `QUOTA_EXCEEDED` when that quota is full; nothing is saved then. On a monthly quota
+ *       a project is charged to each bucket at most once, so toggling animation back and
+ *       forth does not keep spending.
  *     tags: [Projects]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -90,9 +113,10 @@ router.get('/', authenticate, controller.list);
  *           schema:
  *             type: object
  *             properties:
- *               name:      { type: string }
- *               content:   { type: string }
- *               status:    { type: string, enum: [draft, published, archived] }
+ *               name:         { type: string }
+ *               content:      { type: string }
+ *               status:       { type: string, enum: [draft, published, archived] }
+ *               project_type: { type: string, enum: [image, video] }
  *               thumbnail:
  *                 $ref: '#/components/schemas/ProjectThumbnailInput'
  *     responses:
@@ -101,6 +125,9 @@ router.get('/', authenticate, controller.list);
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ProjectResponse' } } }
  *       400:
  *         description: Invalid thumbnail (not JPEG/PNG/WebP, or over 500 KB) — nothing was saved
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       402:
+ *         description: Changing `project_type` (or restoring an archived project) needs a slot in a full quota — nothing was saved
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  *   delete:
  *     summary: Delete a project (owner only, archived)

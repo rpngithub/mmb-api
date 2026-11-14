@@ -28,26 +28,34 @@ const { ValidationError } = require('../errors');
 // still being assembled in some entry points.
 const ALL_RESETS = ['monthly', 'annual', 'never'];
 
-// Template families are image, video or animated; the plan sells two buckets.
-const TEMPLATE_METER = {
-  image:    'business_posts_templates',
-  video:    'video_templates',
-  animated: 'video_templates',
+// The plan sells two template buckets, Business Posts and Video.
+//
+// Projects are image or video (projects.project_type) — the editor sets it, and
+// animating a design turns it into a video. A TEMPLATE project counts against the
+// bucket of its OWN type, not its template's: an image template the user animated
+// is a video. Blank projects (no template) are never metered.
+const PROJECT_METER = {
+  image: 'business_posts_templates',
+  video: 'video_templates',
 };
 
-const typesFor = (meterKey) => Object.keys(TEMPLATE_METER).filter((t) => TEMPLATE_METER[t] === meterKey);
+// What a new project is when the editor does not say: its template's type, with
+// `animated` folded into `video`; a blank project is an image.
+const projectTypeForTemplate = (templateType) =>
+  (templateType === 'video' || templateType === 'animated' ? 'video' : 'image');
 
-// Projects created from a template of the given types that the user still keeps
-// (archived = deleted from the user's point of view).
+const projectTypesFor = (meterKey) => Object.keys(PROJECT_METER).filter((t) => PROJECT_METER[t] === meterKey);
+
+// Template projects of the meter's type that the user still keeps (archived =
+// deleted from the user's point of view).
 async function liveTemplateProjects(userId, meterKey) {
   const { Op } = require('sequelize');
-  const { Project, Template, TemplateFamily } = require('../models');
+  const { Project } = require('../models');
   return Project.count({
-    where: { user_id: userId, template_id: { [Op.ne]: null }, status: { [Op.ne]: 'archived' } },
-    include: [{
-      model: Template, attributes: [], required: true,
-      include: [{ model: TemplateFamily, as: 'family', attributes: [], required: true, where: { template_type: typesFor(meterKey) } }],
-    }],
+    where: {
+      user_id: userId, template_id: { [Op.ne]: null }, status: { [Op.ne]: 'archived' },
+      project_type: projectTypesFor(meterKey),
+    },
   });
 }
 
@@ -104,7 +112,10 @@ const METERS = {
 const isMeter    = (key) => Object.prototype.hasOwnProperty.call(METERS, key);
 const scaleFor   = (key) => METERS[key]?.scale || 1;
 const unitFor    = (key) => METERS[key]?.unit || 'count';
-const templateMeterFor = (templateType) => TEMPLATE_METER[templateType] || null;
+// The meter a project counts against: by its own type, and only when it was made
+// from a template.
+const projectMeterFor = (project) =>
+  (project.template_id ? PROJECT_METER[project.project_type] || null : null);
 
 // The shape a feature type gives a meter. Derived from the row rather than held
 // in a map, so changing a feature's reset period in the admin panel is enough to
@@ -140,6 +151,7 @@ const listMeters = () => Object.entries(METERS).map(([key, m]) => ({
 }));
 
 module.exports = {
-  METERS, TEMPLATE_METER, isMeter, scaleFor, unitFor, templateMeterFor, modeOf,
+  METERS, PROJECT_METER, isMeter, scaleFor, unitFor, modeOf,
+  projectMeterFor, projectTypeForTemplate,
   assertMeterable, listMeters, heldVariantCount,
 };

@@ -9,6 +9,10 @@ module.exports = (sequelize) => {
     template_id:       { type: DataTypes.INTEGER, allowNull: true },
     parent_project_id: { type: DataTypes.INTEGER, allowNull: true },
     size_id:           { type: DataTypes.INTEGER, allowNull: true },
+    // image | video — set by the editor (animating a design makes it a video).
+    // Decides the plan meter a template project counts against; see
+    // constants/quotaMeters.js and migration 20260101000065.
+    project_type:      { type: DataTypes.ENUM('image', 'video'), allowNull: false, defaultValue: 'image' },
     name:              { type: DataTypes.STRING(200), allowNull: false },
     content:           { type: DataTypes.TEXT('long'), allowNull: true },
     thumbnail_s3_key:  { type: DataTypes.STRING(500), allowNull: true },

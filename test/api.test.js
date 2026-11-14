@@ -965,6 +965,57 @@ test('import industries: upserts, resolves in-file parent, links tags, idempoten
   assert.equal(again.body.data.summary.created, 0);
 });
 
+test('import industries: tags that slugify alike resolve to one tag instead of skipping the row', async () => {
+  const token = h.adminToken(['categories.*']);
+  const stamp = Date.now();
+  const slashTag = `Before/After ${stamp}`;   // slug before-after-<stamp>
+  const ampTag   = `Before & After ${stamp}`; // same slug, different name
+  const first  = `IMP SlugTag A ${stamp}`;
+  const second = `IMP SlugTag B ${stamp}`;
+  const child  = `IMP SlugTag Child ${stamp}`;
+  const csv = [
+    'name,parent,slug,display_order,is_active,tags',
+    `${first},,,1,1,${slashTag}`,
+    `${second},,,2,1,${ampTag} | other-${stamp}`,
+    `${child},${second},,3,1,`,
+  ].join('\n');
+
+  const res = await importCsv('industries', csv, { token });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.data.summary.skipped, 0, JSON.stringify(res.body.data.rows));
+  assert.equal(res.body.data.summary.created, 3);
+  const row = res.body.data.rows.find((r) => r.name === second);
+  assert.ok(row.warnings.some((w) => w.includes(`'${ampTag}' matched existing tag '${slashTag}'`)), JSON.stringify(row.warnings));
+
+  const a = await models.BusinessCategory.findOne({ where: { name: first }, include: [models.Tag] });
+  const b = await models.BusinessCategory.findOne({ where: { name: second }, include: [models.Tag] });
+  const c = await models.BusinessCategory.findOne({ where: { name: child } });
+  track.businessCategories.push(c.id, b.id, a.id);
+  const tags = await models.Tag.findAll({ where: { name: [slashTag, ampTag, `other-${stamp}`] } });
+  track.tags.push(...tags.map((t) => t.id));
+  assert.equal(tags.length, 2, 'no second before-after tag created');
+  assert.ok(b.Tags.some((t) => t.name === slashTag), 'second row linked to the existing tag');
+  assert.equal(c.parent_id, b.id, 'child of the formerly-failing row imports');
+});
+
+test('import industries: a unique-constraint clash names the field instead of "Validation error"', async () => {
+  const token = h.adminToken(['categories.*']);
+  const stamp = Date.now();
+  const slug = `imp-slugclash-${stamp}`;
+  const csv = [
+    'name,parent,slug,display_order,is_active,tags',
+    `IMP Clash A ${stamp},,${slug},1,1,`,
+    `IMP Clash B ${stamp},,${slug},2,1,`,
+  ].join('\n');
+  const res = await importCsv('industries', csv, { token });
+  assert.equal(res.status, 200);
+  const created = await models.BusinessCategory.findOne({ where: { name: `IMP Clash A ${stamp}` } });
+  if (created) track.businessCategories.push(created.id);
+  const bad = res.body.data.rows.find((r) => r.name === `IMP Clash B ${stamp}`);
+  assert.equal(bad.status, 'skipped');
+  assert.match(bad.message, new RegExp(`slug '${slug}' already exists`));
+});
+
 test('import industries: skips bad rows and cascades to children of a skipped parent', async () => {
   const stamp = Date.now();
   const badParent = `IMP BadParent ${stamp}`;
@@ -9097,6 +9148,89 @@ test('projects from templates count against Business Posts or Video by template 
       assert.equal(restore.status, 402, 'restoring a project re-occupies a slot');
     });
   }));
+});
+
+test('project_type: defaults from the template, the editor can change it, and the quota follows it', async () => {
+  const userId = await userWithActivePlan(2, 9506);
+  const token  = h.userTokenFor(userId, 'paid');
+  const tplOf  = async (template_type) => {
+    const t = await createTemplate({ uid: uuid(), name: `TST PType ${template_type}`, content: '{}', status: 'active', template_type });
+    track.templates.push(t.id);
+    return t;
+  };
+  const image = await tplOf('image');
+  const anim  = await tplOf('animated');
+  const make  = (body) => h.request('POST', `${P}/projects`, { token, body: { name: 'TST PType', content: '{}', ...body } });
+  const setType = (uid, project_type) => h.request('PATCH', `${P}/projects/${uid}`, { token, body: { project_type } });
+  const typeOf  = async (uid) => (await h.request('GET', `${P}/projects/${uid}`, { token })).body.data.project_type;
+
+  await withPlanFeature(2, 'business_posts_templates', 2, () => withPlanFeature(2, 'video_templates', 1, async () => {
+    // Defaults.
+    const blank = await make({});
+    assert.equal(blank.status, 201);
+    assert.equal(blank.body.data.project_type, 'image', 'a blank project is an image');
+    assert.equal((await make({ project_type: 'nope' })).status, 400);
+
+    const a = (await make({ template_id: image.id })).body.data;
+    assert.equal(a.project_type, 'image', 'an image template makes an image');
+    assert.equal((await usageOf(token, 'business_posts_templates')).used, 1);
+
+    // Monthly tally: animating moves it to Video — one add there, and only once.
+    const toVideo = await setType(a.uid, 'video');
+    assert.equal(toVideo.status, 200, JSON.stringify(toVideo.body));
+    assert.equal(toVideo.body.data.project_type, 'video');
+    assert.equal((await usageOf(token, 'video_templates')).used, 1);
+    assert.equal((await setType(a.uid, 'image')).status, 200, 'back to its first bucket is not a new add');
+    assert.equal((await setType(a.uid, 'video')).status, 200, 'nor is a second trip to Video');
+    assert.equal((await usageOf(token, 'video_templates')).used, 1, 'toggling animation does not keep spending');
+    assert.equal((await usageOf(token, 'business_posts_templates')).used, 1);
+
+    // Video is full now.
+    const b = (await make({ template_id: image.id })).body.data;
+    const refused = await setType(b.uid, 'video');
+    assert.equal(refused.status, 402, 'animating needs room in the Video quota');
+    assert.equal(refused.body.error.code, 'QUOTA_EXCEEDED');
+    assert.equal(await typeOf(b.uid), 'image', 'nothing was saved');
+    assert.equal((await make({ template_id: image.id, project_type: 'video' })).status, 402,
+      'an explicit video type on create counts against Video, whatever the template');
+    assert.equal((await make({ template_id: anim.id, project_type: 'image' })).status, 402,
+      'and an explicit image type counts against Business Posts (full at 2)');
+
+    // Listing by type.
+    const videos = await h.request('GET', `${P}/projects?type=video`, { token });
+    assert.equal(videos.status, 200);
+    assert.deepEqual(videos.body.data.map((p) => p.uid), [a.uid]);
+    assert.ok((await h.request('GET', `${P}/projects?type=image`, { token })).body.data.every((p) => p.project_type === 'image'));
+    assert.equal((await h.request('GET', `${P}/projects?type=gif`, { token })).status, 400);
+
+    // A ceiling ('never'): counted from the projects' current types, so moving one
+    // out of Video frees the slot for another.
+    await withResetPeriod('video_templates', 'never', async () => {
+      assert.equal((await usageOf(token, 'video_templates')).used, 1);
+      assert.equal((await setType(b.uid, 'video')).status, 402);
+      assert.equal((await setType(a.uid, 'image')).status, 200);
+      assert.equal((await usageOf(token, 'video_templates')).used, 0, 'the slot freed itself');
+      assert.equal((await setType(b.uid, 'video')).status, 200);
+      assert.equal((await usageOf(token, 'video_templates')).used, 1);
+    });
+
+    // A blank project can be a video and is still never metered.
+    assert.equal((await setType(blank.body.data.uid, 'video')).status, 200);
+    assert.equal((await make({ project_type: 'video' })).status, 201);
+  }));
+});
+
+test('migration 065 fills project_type from the template', async () => {
+  const userId = await userWithActivePlan(2, 9507);
+  const tpl = await createTemplate({ uid: uuid(), name: 'TST PType Backfill', content: '{}', status: 'active', template_type: 'animated' });
+  track.templates.push(tpl.id);
+  const p = await models.Project.create({ uid: uuid(), user_id: userId, template_id: tpl.id, name: 'TST Backfill' });
+  assert.equal(p.project_type, 'image', 'the column default, as an old row would have');
+
+  const migration = require('../src/db/migrations/20260101000065-project-type');
+  await migration.up(models.sequelize.getQueryInterface(), require('sequelize'));   // idempotent re-run
+  await p.reload();
+  assert.equal(p.project_type, 'video', 'an animated template\'s project is a video');
 });
 
 test('the Brand Series quota counts variants added at a time, across businesses', async () => {
