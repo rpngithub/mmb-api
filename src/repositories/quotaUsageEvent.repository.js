@@ -11,12 +11,16 @@ class QuotaUsageEventRepository extends BaseRepository {
   // make the breakdown disagree with the "used this cycle" figure above it, which
   // the counter reports gross. `since` is the period start; NULL means the account
   // has no cycle (no subscription), so report everything on record.
-  async breakdown(userId, featureTypeId, since) {
+  //
+  // `net` is for FLOW features (ai_credits), where a negative row is a refund of
+  // a failed AI job and the counter was lowered with it: there the breakdown has
+  // to net refunds off too, or a refunded image would still show as spent.
+  async breakdown(userId, featureTypeId, since, { net = false } = {}) {
     const rows = await this.model.findAll({
       where: {
         user_id: userId,
         feature_type_id: featureTypeId,
-        amount: { [Op.gt]: 0 },
+        ...(net ? {} : { amount: { [Op.gt]: 0 } }),
         ...(since ? { created_at: { [Op.gte]: since } } : {}),
       },
       attributes: [

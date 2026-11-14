@@ -2163,4 +2163,9 @@ router.get('/user-notifications', authenticate, authorizeAdmin('notifications.re
   res.json({ success: true, data: rows, meta: { total: count } });
 });
 
+// ---- AI (providers, keys, operations, routes, purchases, jobs, reports) ----
+// Its own router: super_admin-only domains, step-up auth for credentials. See
+// routes/adminAi.router.js.
+router.use('/ai', require('./adminAi.router'));
+
 module.exports = router;

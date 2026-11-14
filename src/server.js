@@ -15,6 +15,7 @@ const notifyDispatchJob    = require('./jobs/notificationDispatch.job');
 const notifyScheduledJob   = require('./jobs/notificationScheduled.job');
 const notifyBehavioralJob  = require('./jobs/notificationBehavioral.job');
 const notifyCleanupJob     = require('./jobs/notificationCleanup.job');
+const aiWorkerJob          = require('./jobs/aiWorker.job');
 
 const PORT = process.env.PORT || 3000;
 
@@ -79,11 +80,38 @@ async function start() {
     console.warn('[Notify] NOTIFY_JOBS_ENABLED=false — scheduled and behavioural notifications are SUSPENDED. Event-triggered notifications still send.');
   }
 
+  // The AI dispatcher: one leader across instances (advisory-lock lease), the
+  // rest stand by. AI_WORKER_ENABLED=false is its kill switch.
+  aiWorkerJob.job.start();
+  await reportAiProviders();
+
   console.log('[Jobs] All cron jobs started');
 
   server.listen(PORT, () => {
     console.log(`[Server] Running on port ${PORT} (${process.env.NODE_ENV})`);
   });
+}
+
+// Says, on every boot, which AI providers can actually be used and why not. An
+// active provider without a usable key is not an error that should stop the API —
+// its operations answer AI_UNAVAILABLE (nothing charged) until an admin fixes it.
+async function reportAiProviders() {
+  try {
+    const { AiProvider } = require('./models');
+    const routing   = require('./ai/routing');
+    const secretBox = require('./utils/secretBox');
+    if (!secretBox.isConfigured()) {
+      console.warn('[AI] AI_SECRETS_MASTER_KEY is not set (or not 32 bytes base64) — providers with credential_source=db cannot be used');
+    }
+    for (const p of await AiProvider.findAll({ where: { status: 'active' } })) {
+      const reason = await routing.unavailableReason(p);
+      if (reason) console.warn(`[AI] provider ${p.key} is active but UNAVAILABLE: ${reason}`);
+      else console.log(`[AI] provider ${p.key} ready`);
+    }
+  } catch (err) {
+    // Before migration 059 has run there is no ai_providers table.
+    console.warn(`[AI] provider check skipped: ${err.message}`);
+  }
 }
 
 start().catch((err) => {
@@ -104,6 +132,7 @@ process.on('uncaughtException', (err) => {
 
 process.on('SIGTERM', () => {
   console.log('[Server] SIGTERM received. Shutting down gracefully...');
+  aiWorkerJob.job.stop();
   const done = () => {
     sequelize.close();
     if (redis.isAvailable()) redis.disconnect();

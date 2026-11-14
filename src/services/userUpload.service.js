@@ -387,8 +387,14 @@ const LIBRARY_ATTRS = [
   'duration_ms', 'poster_s3_key', 'created_at',
 ];
 
+// Slots the SERVER writes into the library and users never presign: AI results
+// (src/ai/resultStore.js, users/<uid>/ai/). Listable and deletable like any
+// upload, but deliberately not in SLOTS, so nobody can upload a file and pass it
+// off as an AI result.
+const SERVER_SLOTS = { ai_result: 'ai' };
+
 async function listMine(userId, { slot, limit, offset } = {}) {
-  const wanted = slot && SLOTS[slot] ? slot : DEFAULT_LIST_SLOT;
+  const wanted = slot && (SLOTS[slot] || SERVER_SLOTS[slot]) ? slot : DEFAULT_LIST_SLOT;
   return UserUpload.findAndCountAll({
     where:      { user_id: userId, slot: wanted },
     attributes: LIBRARY_ATTRS,
@@ -471,5 +477,5 @@ async function assertOwnedKey(key, slotName, userId) {
 
 module.exports = {
   presign, confirm, assertOwnedKey, release, releaseReplaced, listMine, deleteMine, storageQuota,
-  SLOTS, VIDEO_SLOTS, FONT_MAX_BYTES, DEFAULT_LIST_SLOT,
+  SLOTS, SERVER_SLOTS, VIDEO_SLOTS, FONT_MAX_BYTES, DEFAULT_LIST_SLOT,
 };
