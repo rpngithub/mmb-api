@@ -60,3 +60,6 @@ class PaymentRepository extends BaseRepository {
 }
 
 module.exports = new PaymentRepository();
+// Shared with the admin User 360 payments list so its descriptions match the
+// user's own history row for row.
+module.exports.DESCRIBE = DESCRIBE;

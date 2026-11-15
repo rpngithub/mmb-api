@@ -3,7 +3,8 @@ const { v4: uuid } = require('uuid');
 const { Op }       = require('sequelize');
 const { AdminUser, Role, User, ActivityLog } = require('../models');
 const sessionService = require('./session.service');
-const { NotFoundError, ConflictError } = require('../errors');
+const user360        = require('./adminUser360.service');
+const { NotFoundError, ConflictError, ValidationError } = require('../errors');
 
 // ---- Admin users ----
 async function listAdmins({ search, limit = 20, offset = 0 } = {}) {
@@ -65,7 +66,10 @@ async function setAdminActive(adminUid, isActive) {
 }
 
 // ---- End-user administration ----
-async function listUsers({ search, limit = 20, offset = 0 } = {}) {
+// Filters: search (name/phone/email), account_type, is_active, plan_state
+// (free|paid|trial|access_pass|expired — see adminUser360.planStateCondition).
+// Each row carries `current_plan`, loaded for the whole page in one query.
+async function listUsers({ search, account_type, plan_state, is_active, limit = 20, offset = 0 } = {}) {
   const where = {};
   if (search) {
     where[Op.or] = [
@@ -74,13 +78,17 @@ async function listUsers({ search, limit = 20, offset = 0 } = {}) {
       { email: { [Op.like]: `%${search}%` } },
     ];
   }
-  return User.findAndCountAll({
+  const extra = user360.userListConditions({ account_type, plan_state, is_active });
+  if (extra.length) where[Op.and] = extra;
+
+  const { rows, count } = await User.findAndCountAll({
     where,
     attributes: { exclude: ['password_hash'] },
     limit:  Math.min(parseInt(limit, 10) || 20, 100),
     offset: Math.max(parseInt(offset, 10) || 0, 0),
     order:  [['id', 'DESC']],
   });
+  return { rows: await user360.attachCurrentPlans(rows), count };
 }
 
 async function getUser(userUid) {
@@ -114,11 +122,35 @@ async function setUserActive(userUid, isActive) {
 }
 
 // ---- Audit trail ----
-async function listActivity({ entity_type, action, actor_type, limit = 50, offset = 0 } = {}) {
+// `user_uid` pages one user's trail. `user_scope` picks which side of it:
+//   actor   — what the user did themselves  (actor_type=user, actor_id=<id>)
+//   subject — what was done TO the user      (entity_type=user, entity_id=<id>), e.g. an admin suspension
+//   both    — either (default)
+// `actor_id` / `entity_id` are the raw filters for anything else.
+const USER_SCOPES = ['actor', 'subject', 'both'];
+
+async function listActivity({
+  entity_type, entity_id, action, actor_type, actor_id, user_uid, user_scope = 'both', limit = 50, offset = 0,
+} = {}) {
   const where = {};
   if (entity_type) where.entity_type = entity_type;
+  if (entity_id)   where.entity_id = parseInt(entity_id, 10) || -1;
   if (action)      where.action = action;
   if (actor_type)  where.actor_type = actor_type;
+  if (actor_id)    where.actor_id = parseInt(actor_id, 10) || -1;
+
+  if (user_uid) {
+    if (!USER_SCOPES.includes(user_scope)) {
+      throw new ValidationError('Validation failed', [{ field: 'user_scope', message: `user_scope must be one of: ${USER_SCOPES.join(', ')}` }]);
+    }
+    const user = await User.findOne({ where: { uid: user_uid }, attributes: ['id'] });
+    if (!user) throw new NotFoundError('User not found');
+    const asActor   = { actor_type: 'user', actor_id: user.id };
+    const asSubject = { entity_type: 'user', entity_id: user.id };
+    const scoped = user_scope === 'actor' ? asActor : user_scope === 'subject' ? asSubject : { [Op.or]: [asActor, asSubject] };
+    where[Op.and] = [...(where[Op.and] || []), scoped];
+  }
+
   return ActivityLog.findAndCountAll({
     where,
     limit:  Math.min(parseInt(limit, 10) || 50, 200),

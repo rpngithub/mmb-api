@@ -159,14 +159,19 @@ function taxFor(payment, buyer, sellerInfo) {
   };
 }
 
-async function renderDocument(userId, uid, type) {
+// `userId` is the caller who must own the payment. The admin download
+// (GET /admin/payments/:uid/document) passes `{ asAdmin: true }` instead, which
+// skips only the ownership check — the document itself is identical, built for
+// the payment's own user. Like the user path, the first request for a legacy
+// successful payment issues its invoice number.
+async function renderDocument(userId, uid, type, { asAdmin = false } = {}) {
   if (type !== 'invoice' && type !== 'receipt') {
     throw new ValidationError('Validation failed', [{ field: 'type', message: 'type must be invoice or receipt' }]);
   }
 
   const payment = await paymentRepo.findDescribedByUid(uid);
   if (!payment) throw new NotFoundError('Payment not found');
-  if (payment.user_id !== userId) throw new ForbiddenError('Access denied');
+  if (!asAdmin && payment.user_id !== userId) throw new ForbiddenError('Access denied');
   if (payment.status !== 'success') throw new ConflictError('Documents are available only for successful payments');
 
   // Rows that succeeded before invoice numbering existed get theirs now, dated
@@ -174,7 +179,7 @@ async function renderDocument(userId, uid, type) {
   const number = payment.invoice_number || await invoiceNumber.assign(payment.id, payment.paid_at || payment.created_at);
 
   const sellerInfo = seller();
-  const buyer      = await buyerFor(userId);
+  const buyer      = await buyerFor(payment.user_id);
   const data = {
     number,
     issued_at: payment.paid_at || payment.created_at,
