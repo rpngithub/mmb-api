@@ -250,6 +250,34 @@ async function ensureCurrentPeriod(userId) {
   return { start: window.start, end: window.end };
 }
 
+// What ensureCurrentPeriod WOULD report, without doing it: no counter reset, no
+// period stamped, no "credits refreshed" notification. For observers who are not
+// the user (the admin User 360 view) — looking at an account must not change it
+// or message its owner. The rollover still happens on the user's own next request.
+//
+// `resetIds` lists the feature types whose stored tallies belong to a period that
+// has already ended; a reader treats them as 0, which is what the user will see
+// once the real rollover runs.
+async function peekCurrentPeriod(userId) {
+  const none  = new Set();
+  const usage = await quotaRepo.findByUserId(userId);
+  if (!usage) return { period: null, resetIds: none };
+
+  if (usage.period_end && new Date(usage.period_end) > new Date()) {
+    return { period: { start: usage.period_start, end: usage.period_end }, resetIds: none };
+  }
+
+  const plan   = await effectivePlan(userId);
+  const window = await currentWindow(userId, new Date(), plan);
+  if (!window) return { period: null, resetIds: none };
+
+  // First window ever: ensureCurrentPeriod adopts the existing counters, so nothing reads as reset.
+  const resetIds = usage.period_end
+    ? new Set((await recurringFeatureIds(plan, window, usage.period_start)).map(Number))
+    : none;
+  return { period: { start: window.start, end: window.end }, resetIds };
+}
+
 // ---------------------------------------------------------------------------
 // Enforcement
 // ---------------------------------------------------------------------------
@@ -680,12 +708,20 @@ async function _summaryPlan(userId, sub) {
 // opened deliberately.
 // `sub` may be passed in by a caller that has already loaded it — the detailed
 // row is a three-level include, and `/subscriptions/me` is polled after checkout.
-async function usageSummary(userId, { withBreakdown = false, sub = undefined } = {}) {
-  const period = await ensureCurrentPeriod(userId);
+//
+// `readOnly` (admin views): never rolls the period over — see peekCurrentPeriod.
+// Tallies from an already-ended period read as 0, matching what the user will see.
+async function usageSummary(userId, { withBreakdown = false, sub = undefined, readOnly = false } = {}) {
+  let period;
+  let staleIds = new Set();
+  if (readOnly) ({ period, resetIds: staleIds } = await peekCurrentPeriod(userId));
+  else period = await ensureCurrentPeriod(userId);
+
   const plan   = await _summaryPlan(userId, sub);
   if (!plan) return { period, features: [] };
 
   const counters = await counterRepo.usedMap(userId);
+  for (const id of staleIds) counters.set(id, 0);
   const balances = await grantRepo.balancesFor(userId);
 
   const planFeatures = (plan.PlanFeatures || [])
@@ -733,5 +769,5 @@ async function hasFeature(userId, featureKey) {
 module.exports = {
   assertWithinQuota, assertRoomToRestore, consume, refund, release, remaining, snapshot, hasFeature,
   limitFor, balanceFor, usageSummary, buildFeature, effectivePlan,
-  ensureCurrentPeriod, currentWindow, addMonthsClamped, scaleFor,
+  ensureCurrentPeriod, peekCurrentPeriod, currentWindow, addMonthsClamped, scaleFor,
 };

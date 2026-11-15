@@ -100,13 +100,17 @@ async function verifyCoupon(code, planId, userId) {
 // backs `GET /quota/usage`. Building them here as well is how the gate the app
 // enforces and the numbers the Usage screen shows would come to disagree, and a
 // user shown headroom they do not have is the worst version of that bug.
-async function getMySubscription(userId) {
+//
+// `readOnly` is for observers other than the user (GET /admin/users/:uid/subscription):
+// the same answer, but an ended usage period is NOT rolled over — no counter
+// reset and no "credits refreshed" notification sent because an admin looked.
+async function getMySubscription(userId, { readOnly = false } = {}) {
   const sub = await subRepo.findActiveDetailed(userId);
   if (!sub) {
     // No subscription: the account is held to the free plan, when one is active,
     // so the app can gate on its limits exactly as it would on a paid plan's.
     const free = await planRepo.findFree();
-    const { features, period } = await quota.usageSummary(userId, { sub: null });
+    const { features, period } = await quota.usageSummary(userId, { sub: null, readOnly });
     return {
       has_active_subscription: false, is_on_trial: false, period, subscription: null,
       plan: free ? { uid: free.uid, name: free.name, description: free.description, plan_type: free.plan_type } : null,
@@ -116,7 +120,7 @@ async function getMySubscription(userId) {
 
   const plan     = sub.Plan;
   const option   = sub.PlanBillingOption;
-  const { features, period } = await quota.usageSummary(userId, { sub });
+  const { features, period } = await quota.usageSummary(userId, { sub, readOnly });
 
   // The subscription's payment method is that of its latest successful charge —
   // there is no separate "instrument on file" to read; the mandate lives at

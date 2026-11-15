@@ -7191,6 +7191,12 @@
         "enabled": true
       },
       {
+        "key": "admin_payment_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
         "key": "upload_key_2",
         "value": "",
         "type": "default",

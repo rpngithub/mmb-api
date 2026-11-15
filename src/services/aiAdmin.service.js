@@ -353,6 +353,12 @@ async function listJobs(q = {}) {
   const where = {};
   if (q.status) where.status = String(q.status).split(',').map((s) => s.trim()).filter(Boolean);
   for (const f of ['operation_key', 'provider_id', 'user_id', 'error_code']) if (q[f]) where[f] = q[f];
+  // The admin User Detail page links here by uid. An unknown uid matches nothing
+  // rather than silently dropping the filter and listing everyone's jobs.
+  if (q.user_uid) {
+    const user = await User.findOne({ where: { uid: String(q.user_uid) }, attributes: ['id'] });
+    where.user_id = user ? user.id : -1;
+  }
   if (q.from || q.to) {
     where.created_at = {};
     if (q.from) where.created_at[Op.gte] = new Date(q.from);

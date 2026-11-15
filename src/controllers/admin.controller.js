@@ -11,7 +11,11 @@ const feedbackService = require('../services/feedback.service');
 const pageContent     = require('../services/pageContent.service');
 const assetAudit      = require('../services/assetAudit.service');
 const fontPreview     = require('../services/fontPreview.service');
-const s3             = require('../utils/s3Helper');
+const user360         = require('../services/adminUser360.service');
+const subscriptionService = require('../services/subscription.service');
+const billingService  = require('../services/billing.service');
+const { hasPermission } = require('../middlewares/authorizeAdmin');
+const s3            = require('../utils/s3Helper');
 const { BusinessCategory, Tag, Template, TemplateFamily, Variant, VariantBadge, BrandSeries, StylePersonality, Color, Asset, TemplateSize, Plan, SpecialEvent, Coupon, Feedback, Font, FontFile, Language, sequelize } = require('../models');
 const { NotFoundError, ValidationError, ConflictError } = require('../errors');
 const { Op } = require('sequelize');
@@ -138,8 +142,47 @@ const listUsers = async (req, res) => {
   res.json({ success: true, data: result.rows, meta: { total: result.count } });
 };
 
+// The User Detail page. users.read gets the profile, counts and whether a plan is
+// active; billing_details (GSTIN, billing address) is added only when the admin
+// also holds billing.read — the key is absent otherwise, not null.
 const getUser = async (req, res) => {
-  res.json({ success: true, data: await adminService.getUser(req.params.uid) });
+  const user   = await adminService.getUser(req.params.uid);
+  const extras = await user360.detailExtras(user, { includeBilling: hasPermission(req.user.permissions, 'billing.read') });
+  res.json({ success: true, data: { ...user.toJSON(), ...extras } });
+};
+
+// ---- User 360 (read-only) ----
+const getUserSubscription = async (req, res) => {
+  const user = await user360.resolveUser(req.params.uid);
+  res.json({ success: true, data: await subscriptionService.getMySubscription(user.id, { readOnly: true }) });
+};
+
+const listUserSubscriptions = async (req, res) => {
+  const result = await user360.listSubscriptions(req.params.uid, req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+const listUserPayments = async (req, res) => {
+  const result = await user360.listPayments(req.params.uid, req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+const listUserBusinesses = async (req, res) => {
+  res.json({ success: true, data: await user360.listBusinesses(req.params.uid) });
+};
+
+const listUserProjects = async (req, res) => {
+  const result = await user360.listProjects(req.params.uid, req.query);
+  res.json({ success: true, data: result.rows, meta: { total: result.count } });
+};
+
+// Same document, headers and rules as GET /subscriptions/payments/:uid/document,
+// minus the ownership check.
+const paymentDocument = async (req, res) => {
+  const { html, filename } = await billingService.renderDocument(null, req.params.uid, req.query.type || 'invoice', { asAdmin: true });
+  res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.type('html').send(html);
 };
 
 const setUserStatus = async (req, res) => {
@@ -701,4 +744,4 @@ const resetTemplateBundle = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { setFontFiles, setFontLanguages, rebuildFontPreviews, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, getFrameForAdmin, listFrameVersions, moveFrameVersion, mergeFrame, confirmFrameBundle, resetFrameBundle, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };
+module.exports = { setFontFiles, setFontLanguages, rebuildFontPreviews, listFeedback, deleteFeedback, listAdmins, getAdmin, createAdmin, updateAdmin, setAdminStatus, listUsers, getUser, setUserStatus, listActivity, getUserSubscription, listUserSubscriptions, listUserPayments, listUserBusinesses, listUserProjects, paymentDocument, setBusinessCategoryTags, getRelatedIndustries, setRelatedIndustries, clonePageSections, previewPageSections, getAssetTags, setAssetTags, scanMissingAssetFiles, purgeMissingAssetFiles, getVariantTemplates, setVariantTemplates, getVariantRelations, setVariantRelations, getBrandSeriesRelations, setBrandSeriesRelations, getTemplateRelations, setTemplateRelations, getFamilyRelations, setFamilyRelations, listTemplateFamilies, moveTemplateVersion, mergeTemplateFamily, getEventTemplates, setEventTemplates, getCouponPlans, setCouponPlans, listTemplates, listFrames, getFrameForAdmin, listFrameVersions, moveFrameVersion, mergeFrame, confirmFrameBundle, resetFrameBundle, confirmTemplateBundle, resetTemplateBundle, listQuotaPacks, listUserQuotaGrants, grantUserQuota, revokeQuotaGrant };

@@ -355,6 +355,7 @@ C('/routes', {
  *       - { in: query, name: operation_key, schema: { type: string } }
  *       - { in: query, name: provider_id, schema: { type: integer } }
  *       - { in: query, name: user_id, schema: { type: integer } }
+ *       - { in: query, name: user_uid, schema: { type: string, format: uuid }, description: 'Same as user_id, by the user uid. An unknown uid returns no rows.' }
  *       - { in: query, name: error_code, schema: { type: string } }
  *       - { in: query, name: from, schema: { type: string, format: date-time } }
  *       - { in: query, name: to, schema: { type: string, format: date-time } }

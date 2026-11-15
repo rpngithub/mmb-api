@@ -259,16 +259,25 @@ router.patch('/admins/:uid/status', authenticate, authorizeAdmin('admins.update'
  * /admin/users:
  *   get:
  *     summary: List/search end users
+ *     description: >-
+ *       Newest first. Each row carries `current_plan` — the user's newest ACTIVE subscription,
+ *       or null for the free tier. `plan_state` reads the same row: `paid` (regular), `trial`,
+ *       `access_pass`; `expired` = nothing active now but a subscription existed before
+ *       (abandoned checkouts do not count); `free` = never subscribed.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
- *       - { in: query, name: search, schema: { type: string } }
+ *       - { in: query, name: search, schema: { type: string }, description: Matches name, phone or email }
+ *       - { in: query, name: account_type, schema: { type: string, enum: [business, personal] } }
+ *       - { in: query, name: plan_state, schema: { type: string, enum: [free, paid, trial, access_pass, expired] } }
+ *       - { in: query, name: is_active, schema: { type: integer, enum: [0, 1] } }
  *       - { in: query, name: limit,  schema: { type: integer, default: 20, maximum: 100 } }
  *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
  *     responses:
  *       200:
- *         description: Paged users (meta.total)
- *         content: { application/json: { schema: { $ref: '#/components/schemas/UserListResponse' } } }
+ *         description: Paged users (meta.total), password_hash excluded
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/AdminUserListResponse360' } } }
+ *       400: { description: Invalid filter value }
  */
 router.get('/users', authenticate, authorizeAdmin('users.read'), controller.listUsers);
 
@@ -276,14 +285,19 @@ router.get('/users', authenticate, authorizeAdmin('users.read'), controller.list
  * @swagger
  * /admin/users/{uid}:
  *   get:
- *     summary: Get a user by uid
+ *     summary: Get a user by uid (User Detail header)
+ *     description: >-
+ *       The user row (password_hash excluded) plus `has_active_subscription` and `counts`.
+ *       `billing_details` (GSTIN, billing address) is included only when the admin also holds
+ *       `billing.read` — the key is absent otherwise, and null when the user saved none.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
  *     responses:
  *       200:
- *         description: User object
- *         content: { application/json: { schema: { $ref: '#/components/schemas/UserResponse' } } }
+ *         description: User object with detail extras
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/AdminUserDetailResponse' } } }
+ *       403: { description: Missing users.read }
  *       404: { description: Not found }
  */
 router.get('/users/:uid', authenticate, authorizeAdmin('users.read'), controller.getUser);
@@ -315,18 +329,140 @@ router.get('/users/:uid', authenticate, authorizeAdmin('users.read'), controller
  */
 router.patch('/users/:uid/status', authenticate, authorizeAdmin('users.update'), validate(userStatusSchema), controller.setUserStatus);
 
+// ---- User 360 (read-only). Commerce views need billing.read, kept apart from
+//      users.read the same way quota_packs is; content views stay on users.read. ----
+/**
+ * @swagger
+ * /admin/users/{uid}/subscription:
+ *   get:
+ *     summary: A user's current subscription and usage (same shape as GET /subscriptions/me)
+ *     description: >-
+ *       Exactly what the user's app sees: has_active_subscription, is_on_trial, period, subscription,
+ *       plan, billing and features[] (limit/used/remaining/unlimited). A user without an active
+ *       subscription gets the free plan and its limits. Read-only: an ended usage period is
+ *       reported as the new one (stale monthly tallies as 0) but is NOT rolled over, and the user
+ *       is not sent a "credits refreshed" notification — that happens on their own next request.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200: { description: "Subscription state — see GET /subscriptions/me" }
+ *       403: { description: Missing billing.read }
+ *       404: { description: User not found }
+ * /admin/users/{uid}/subscriptions:
+ *   get:
+ *     summary: Every subscription the user ever had, newest first
+ *     description: All statuses (pending, active, overridden, cancelled, expired).
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: status, schema: { type: string, enum: [pending, active, overridden, cancelled, expired] } }
+ *       - { in: query, name: limit,  schema: { type: integer, default: 20, maximum: 100 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Paged subscriptions (meta.total)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/AdminUserSubscriptionListResponse' } } }
+ *       400: { description: Invalid status }
+ *       403: { description: Missing billing.read }
+ *       404: { description: User not found }
+ * /admin/users/{uid}/payments:
+ *   get:
+ *     summary: A user's payments, newest first
+ *     description: >-
+ *       Every attempt, including pending and failed. `status` filters on the stored status;
+ *       `display_status` is what the user's Billing screen shows. razorpay_signature is never returned.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: status, schema: { type: string, enum: [pending, success, failed, refunded] } }
+ *       - { in: query, name: purchase_type, schema: { type: string, enum: [subscription, frame, quota_pack, variant] }, description: '`frame` also matches legacy rows with no purchase_type' }
+ *       - { in: query, name: limit,  schema: { type: integer, default: 20, maximum: 100 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Paged payments (meta.total)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/AdminUserPaymentListResponse' } } }
+ *       400: { description: Invalid filter value }
+ *       403: { description: Missing billing.read }
+ *       404: { description: User not found }
+ * /admin/users/{uid}/businesses:
+ *   get:
+ *     summary: A user's businesses
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     responses:
+ *       200:
+ *         description: Businesses, newest first (not paged — one per account)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/AdminUserBusinessListResponse' } } }
+ *       403: { description: Missing users.read }
+ *       404: { description: User not found }
+ * /admin/users/{uid}/projects:
+ *   get:
+ *     summary: A user's designs, most recently edited first
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: limit,  schema: { type: integer, default: 20, maximum: 100 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *     responses:
+ *       200:
+ *         description: Paged projects (meta.total); design content is not included
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/AdminUserProjectListResponse' } } }
+ *       403: { description: Missing users.read }
+ *       404: { description: User not found }
+ * /admin/payments/{uid}/document:
+ *   get:
+ *     summary: Download any user's invoice or receipt
+ *     description: >-
+ *       The same print-ready HTML page as GET /subscriptions/payments/{uid}/document, without the
+ *       ownership check. Like the user endpoint, the first request for an older successful payment
+ *       issues its invoice number.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string, format: uuid } }
+ *       - { in: query, name: type, schema: { type: string, enum: [invoice, receipt], default: invoice } }
+ *     responses:
+ *       200:
+ *         description: The document
+ *         content: { text/html: { schema: { type: string } } }
+ *       400: { description: type must be invoice or receipt }
+ *       403: { description: Missing billing.read }
+ *       404: { description: Payment not found }
+ *       409: { description: Payment not successful — no document exists }
+ */
+router.get('/users/:uid/subscription',  authenticate, authorizeAdmin('billing.read'), controller.getUserSubscription);
+router.get('/users/:uid/subscriptions', authenticate, authorizeAdmin('billing.read'), controller.listUserSubscriptions);
+router.get('/users/:uid/payments',      authenticate, authorizeAdmin('billing.read'), controller.listUserPayments);
+router.get('/users/:uid/businesses',    authenticate, authorizeAdmin('users.read'),   controller.listUserBusinesses);
+router.get('/users/:uid/projects',      authenticate, authorizeAdmin('users.read'),   controller.listUserProjects);
+router.get('/payments/:uid/document',   authenticate, authorizeAdmin('billing.read'), controller.paymentDocument);
+
 // ---- Audit trail ----
 /**
  * @swagger
  * /admin/activity-logs:
  *   get:
  *     summary: Read the audit trail
+ *     description: >-
+ *       `user_uid` pages one user's trail: `user_scope=actor` is what the user did,
+ *       `subject` is what was done to the user (entity_type=user, e.g. an admin suspension),
+ *       `both` (default) is either.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
  *       - { in: query, name: entity_type, schema: { type: string } }
+ *       - { in: query, name: entity_id,   schema: { type: integer } }
  *       - { in: query, name: action,      schema: { type: string } }
  *       - { in: query, name: actor_type,  schema: { type: string, enum: [user, admin] } }
+ *       - { in: query, name: actor_id,    schema: { type: integer } }
+ *       - { in: query, name: user_uid,    schema: { type: string, format: uuid }, description: 'One user''s trail; 404 when the user does not exist' }
+ *       - { in: query, name: user_scope,  schema: { type: string, enum: [actor, subject, both], default: both } }
  *       - { in: query, name: limit,       schema: { type: integer, default: 50, maximum: 200 } }
  *       - { in: query, name: offset,      schema: { type: integer, default: 0 } }
  *     responses:
