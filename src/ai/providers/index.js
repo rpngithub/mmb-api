@@ -11,8 +11,11 @@ const { ValidationError } = require('../../errors');
 //   key                  string, matches ai_providers.key
 //   allowedHosts         hosts base_url and result URLs may point at
 //   requiresApiKey       false only for `fake`
-//   needsMediaUrls       true = media inputs arrive as { uid, url, content_type, bytes }
-//                        (short-lived presigned GETs); otherwise as upload uids
+//   needsMediaUrls       true = media inputs arrive as { uid, url, content_type, bytes };
+//                        otherwise as upload uids
+//   mediaUrlMode         'presigned' (default: 15-minute presigned GETs) or 'public'
+//                        (cdn_base_url + s3_key, for providers that cannot fetch a
+//                        presigned URL — see resolveMedia in ai/worker.js)
 //   acceptsInlineImages  true = submit also gets `attachments` [{ kind, mime, base64 }]
 //                        (the job context's project thumbnail), read at send time
 //   submit also always gets `context`: the job's server-side context snapshot
