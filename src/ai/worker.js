@@ -122,8 +122,26 @@ async function drain() {
 
 const backoffMs = (attempt, err) => err?.retryAfterMs || Math.min(2000 * 2 ** Math.max(attempt - 1, 0), 60000);
 
-// Media uids -> short-lived presigned GETs, for adapters that fetch inputs by URL.
-// Resolved at send time, never stored: the URL expires and must not outlive the job.
+// Media uids -> URLs, for adapters that fetch inputs by URL. Resolved at send
+// time, never stored.
+//
+// adapter.mediaUrlMode picks the kind of URL:
+//   'presigned' (default)  a 15-minute presigned GET
+//   'public'               cdn_base_url + s3_key — the same URL the app renders
+//                          the file with. For providers that cannot fetch a
+//                          presigned URL: Magnific answers "Failed to download
+//                          the image." for one that a browser opens fine
+//                          (2026-11-20), and fetches the plain object URL.
+//                          Exposes nothing new: uploads are already served
+//                          publicly at that URL, under unguessable uuid keys.
+async function publicMediaBase() {
+  const configSvc = require('../services/config.service');
+  const base = String(await configSvc.getSetting('cdn_base_url', '') || '').replace(/\/+$/, '');
+  // Our configuration, not the user's input: wait and fail as unavailable.
+  if (!base) throw new ProviderError(INTERNAL.PROVIDER_DOWN, 'before_send', { detail: 'cdn_base_url is not set; this provider fetches inputs by public URL' });
+  return base;
+}
+
 async function resolveMedia(job, operation, adapter) {
   const input = { ...(job.input || {}) };
   const refs = inputSchema.mediaRefs(operation.input_schema, input);
@@ -131,12 +149,17 @@ async function resolveMedia(job, operation, adapter) {
 
   const { UserUpload } = require('../models');
   const s3 = require('../utils/s3Helper');
+  const base = adapter.mediaUrlMode === 'public' ? await publicMediaBase() : null;
+  const urlFor = (key) => (base
+    ? `${base}/${String(key).split('/').map(encodeURIComponent).join('/')}`
+    : s3.getPresignedUrl(key, 900));
+
   const rows = await UserUpload.findAll({ where: { user_id: job.user_id, uid: refs.map((r) => r.uid) } });
   const byUid = new Map(rows.map((r) => [r.uid, r]));
   const toRef = async (uid) => {
     const row = byUid.get(uid);
     if (!row) throw new ProviderError(INTERNAL.INVALID_INPUT, 'before_send', { detail: 'input image was deleted' });
-    return { uid, url: await s3.getPresignedUrl(row.s3_key, 900), content_type: row.content_type, bytes: Number(row.bytes) };
+    return { uid, url: await urlFor(row.s3_key), content_type: row.content_type, bytes: Number(row.bytes) };
   };
   for (const [k, def] of Object.entries(operation.input_schema?.fields || {})) {
     if (def.type === 'media' && input[k]) input[k] = await toRef(input[k]);

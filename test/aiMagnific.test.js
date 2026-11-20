@@ -43,7 +43,10 @@ let seq = 0;
 // ---------- the transport stub ----------
 const calls = [];
 let handler = () => ({ status: 500, headers: {}, data: { message: 'no handler' } });
-const orig = { request: aiHttp.request, download: aiHttp.download, uploadFile: s3.uploadFile, presign: s3.getPresignedUrl };
+const configSvc = require('../src/services/config.service');
+const CDN = 'https://cdn.mmb.example.com';
+let cdnBase = `${CDN}/`;   // trailing slash on purpose: it is trimmed
+const orig = { request: aiHttp.request, download: aiHttp.download, uploadFile: s3.uploadFile, presign: s3.getPresignedUrl, getSetting: configSvc.getSetting };
 
 before(async () => {
   await models.sequelize.authenticate();
@@ -60,6 +63,7 @@ before(async () => {
   };
   s3.uploadFile = async () => {};
   s3.getPresignedUrl = async (key) => `https://mmb-bucket.s3.ap-south-1.amazonaws.com/${key}?X-Amz-Signature=abc`;
+  configSvc.getSetting = async (key, fallback) => (key === 'cdn_base_url' ? cdnBase : orig.getSetting(key, fallback));
 
   provider = await AiProvider.findOne({ where: { key: 'magnific' } });
   assert.ok(provider, 'migration 062 inserts the magnific provider');
@@ -85,6 +89,7 @@ after(async () => {
   Object.assign(aiHttp, { request: orig.request, download: orig.download });
   s3.uploadFile = orig.uploadFile;
   s3.getPresignedUrl = orig.presign;
+  configSvc.getSetting = orig.getSetting;
   if (track.users.length) {
     await AiJob.destroy({ where: { user_id: track.users } });
     await UserUpload.destroy({ where: { user_id: track.users } });
@@ -262,7 +267,7 @@ test('Nano Banana async: POST with the key → task id → status poll → files
   assert.equal(post.url, 'https://api.magnific.com/v1/ai/text-to-image/nano-banana-pro');
   assert.equal(post.headers['x-magnific-api-key'], API_KEY);
   assert.equal(post.data.resolution, '2K');
-  assert.match(post.data.reference_images[0].image, /^https:\/\/mmb-bucket\.s3\..*X-Amz-Signature/, 'the product photo goes as a short-lived presigned URL');
+  assert.equal(post.data.reference_images[0].image, `${CDN}/${img.s3_key}`, 'the product photo goes as its public CDN URL — Magnific cannot fetch presigned ones');
   assert.equal(post.data.webhook_url, undefined, 'no public base URL configured → no callback, the job is polled');
 
   let job = await jobOf(r);
@@ -292,19 +297,38 @@ test('remove background is synchronous: done in one dispatch, from the documente
   await worker.dispatch(new Date()); await worker.drain();
   const post = posts()[0];
   assert.equal(post.url, 'https://api.magnific.com/v1/ai/beta/remove-background');
-  assert.match(post.data.image_url, /^https:\/\/mmb-bucket/);
+  assert.equal(post.data.image_url, `${CDN}/${img.s3_key}`);
+  assert.ok(!post.data.image_url.includes('X-Amz-'), 'never a presigned URL');
   assert.equal(post.headers['Content-Type'], 'application/json');
   const job = await jobOf(r);
   assert.equal(job.status, 'done');
   assert.equal(job.provider_task_id, null);
 
-  // form encoding is a route setting, in case the live call shows it is needed
+  // form encoding is a route setting — the live endpoint reads only form bodies
   await AiOperationRoute.update({ fixed_params: { body_encoding: 'form' } }, { where: { operation_id: op.id } });
   calls.length = 0;
   await submit(u, op.key, { image: img.uid });
   await worker.dispatch(new Date()); await worker.drain();
   assert.equal(posts()[0].headers['Content-Type'], 'application/x-www-form-urlencoded');
-  assert.match(posts()[0].data, /^image_url=https%3A%2F%2Fmmb-bucket/);
+  assert.equal(new URLSearchParams(posts()[0].data).get('image_url'), `${CDN}/${img.s3_key}`);
+});
+
+test('no cdn_base_url: nothing is sent, the job waits as unavailable instead of blaming the input', async () => {
+  const u = await mkUser();
+  const img = await mkImage(u);
+  const op = await mkRoute('remove-background', SCHEMAS.bg, { body_encoding: 'form' });
+  handler = () => { throw new Error('must not be called'); };
+  cdnBase = '';
+  try {
+    const r = await submit(u, op.key, { image: img.uid });
+    await worker.dispatch(new Date()); await worker.drain();
+    assert.equal(posts().length, 0);
+    const job = await jobOf(r);
+    assert.equal(job.status, 'queued', 'requeued: our config, not the user\'s input');
+    const att = await AiJobAttempt.findOne({ where: { job_id: job.id } });
+    assert.equal(att.error_code, 'PROVIDER_DOWN');
+    assert.match(att.error_detail, /cdn_base_url/);
+  } finally { cdnBase = `${CDN}/`; }
 });
 
 test('GPT image 2.5 with num_images 2: one request, two files, charged per image', async () => {

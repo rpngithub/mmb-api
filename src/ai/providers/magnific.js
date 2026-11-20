@@ -19,6 +19,9 @@ const { serverFields } = require('../operationCheck');
 //                  per-request `webhook_url`; results are URLs that expire in 30 min
 //   remove bg      POST /v1/ai/beta/remove-background { image_url }, SYNCHRONOUS;
 //                  response { original, high_resolution, preview, url }, 5-min URLs
+//                  VERIFIED live 2026-11-20: only a URL-encoded form body is read
+//                  (JSON and multipart both get "Either image_url or image_file is
+//                  required") — the route needs fixed_params {"body_encoding":"form"}
 //   webhooks       Standard-Webhooks style: headers webhook-id, webhook-timestamp,
 //                  webhook-signature ("v1,<base64>" pairs, space-separated);
 //                  HMAC-SHA256 over `${id}.${timestamp}.${rawBody}`, base64
@@ -292,6 +295,10 @@ const adapter = {
   allowedHosts: ['api.magnific.com', '*.magnific.com', '*.freepik.com'],
   requiresApiKey: true,
   needsMediaUrls: true,
+  // Magnific cannot fetch S3 presigned URLs ("Failed to download the image.",
+  // verified by hand 2026-11-20) but fetches the plain object URL — so inputs go
+  // as cdn_base_url + s3_key. See resolveMedia in ai/worker.js.
+  mediaUrlMode: 'public',
   MODELS,
   maxImagesFor,
 
