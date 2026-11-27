@@ -3355,7 +3355,7 @@
                   }
                 ]
               },
-              "description": "`content` (the picked version's design) is served only once you own the frame — a free frame still has to be added first. `versions` lists every active version for a switcher."
+              "description": "`content` (the picked version's design — YOUR edited copy when you have one) is served only once you own the frame — a free frame still has to be added first. `design` describes your copy (null without one); `thumbnail_s3_key` stays the original's. `versions` lists every active version for a switcher, each with `customized`. Captures `{{frame_version_uid}}`."
             },
             "event": [
               {
@@ -3369,7 +3369,9 @@
                     "if (ct.includes('application/json')) {",
                     "  const body = pm.response.json();",
                     "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
-                    "}"
+                    "}",
+                    "const v = (((pm.response.json() || {}).data || {}).version || null);",
+                    "if (v) pm.environment.set('frame_version_uid', v.uid);"
                   ]
                 }
               }
@@ -3391,7 +3393,7 @@
                   "add"
                 ]
               },
-              "description": "Free frames only — a premium one is refused with 403. This is also the re-add path for a frame you bought and later removed, which costs nothing the second time."
+              "description": "Free frames only — a premium one is refused with 403. This is also the re-add path for a frame you bought and later removed, which costs nothing the second time. Becomes your business's active frame if it has none."
             },
             "event": [
               {
@@ -3427,7 +3429,7 @@
                   "purchase"
                 ]
               },
-              "description": "Creates a Razorpay order for the price plus GST and records the purchase as pending. Confirm it with **Subscriptions > Verify Payment** — frames reuse that endpoint rather than adding a second one — or let the webhook do it."
+              "description": "Creates a Razorpay order for the price plus GST and records the purchase as pending. Confirm it with **Subscriptions > Verify Payment** — frames reuse that endpoint rather than adding a second one — or let the webhook do it. On confirmation the frame becomes your business's active frame if it has none."
             },
             "event": [
               {
@@ -3501,7 +3503,97 @@
                   "{{frame_uid}}"
                 ]
               },
-              "description": "Takes it off the shelf. A paid frame stays re-addable for free. No refund."
+              "description": "Takes it off the shelf. A paid frame stays re-addable for free. No refund. Your edited copies of it are DELETED, and your business's active_frame_id is cleared if it was this frame."
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Save My Frame Edit",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/frames/mine/{{frame_uid}}/versions/{{frame_version_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "mine",
+                  "{{frame_uid}}",
+                  "versions",
+                  "{{frame_version_uid}}"
+                ]
+              },
+              "description": "Create/replace YOUR copy of one version (run **Get Frame** first for `{{frame_version_uid}}`). `{{frame_uid}}` is the FRAME uid (`Frame.uid` on a My Frames row, not the row's own `uid`). The frame must be in My Frames (403) and the version live (404). Autosave: `content` every tick (max 2 MB), `thumbnail` (data URL / base64 JPEG, PNG or WebP, max 500 KB) on a slower one — omitted keeps the current preview. `original_updated` = the admin changed the original since; offer a reset.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"content\": \"{\\\"layers\\\":[]}\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "// Generic status + envelope assertions.",
+                    "pm.test('status is 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                    "const ct = pm.response.headers.get('Content-Type') || '';",
+                    "if (ct.includes('application/json')) {",
+                    "  const body = pm.response.json();",
+                    "  pm.test('envelope has success flag', () => pm.expect(body).to.have.property('success'));",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Reset My Frame Edit",
+            "request": {
+              "method": "DELETE",
+              "header": [],
+              "url": {
+                "raw": "{{base_url}}/frames/mine/{{frame_uid}}/versions/{{frame_version_uid}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "frames",
+                  "mine",
+                  "{{frame_uid}}",
+                  "versions",
+                  "{{frame_version_uid}}"
+                ]
+              },
+              "description": "Deletes your copy of that version and its preview; the original is served again. 404 when you have no copy."
             },
             "event": [
               {
@@ -7024,6 +7116,12 @@
       },
       {
         "key": "frame_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "frame_version_uid",
         "value": "",
         "type": "default",
         "enabled": true

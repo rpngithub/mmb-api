@@ -9,7 +9,7 @@ const productService  = require('./product.service');
 const fontService     = require('./font.service');
 const frameService    = require('./frame.service');
 const variantAccess   = require('./variantAccess.service');
-const { sequelize, Variant, VariantBadge, TemplateFamily, Tag, Font, BusinessCategory, BusinessVariant, Product } = require('../models');
+const { sequelize, Variant, VariantBadge, TemplateFamily, Tag, Font, Frame, BusinessCategory, BusinessVariant, Product } = require('../models');
 const picker = require('./templateFamilyPicker');
 const favourites = require('./favourite.service');
 const { resolveRef, pick } = require('../utils/catalogRef');
@@ -50,6 +50,9 @@ const OWNER_INCLUDE = [
   { model: Tag, attributes: ['id', 'name', 'slug'], through: { attributes: [] } },
   { model: Font, as: 'headingFont', attributes: FONT_ATTRS },
   { model: Font, as: 'bodyFont',    attributes: FONT_ATTRS },
+  // The applied frame, so a client can go straight to GET /frames/{uid} — every
+  // frames route takes the uid, while active_frame_id is the numeric id.
+  { model: Frame, as: 'activeFrame', attributes: ['id', 'uid', 'name'] },
 ];
 
 // Fields safe to expose on the public storefront (everything user-private —

@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { sequelize, Frame, FrameVersion, FrameCategory, UserFrame, Business, Language, TemplateSize } = require('../models');
 const publish = require('./framePublish');
+const frameDesign = require('./frameDesign.service');
 const { NotFoundError, ValidationError, ConflictError } = require('../errors');
 
 // Regrouping versions between frames, the frames counterpart of
@@ -26,6 +27,11 @@ const { NotFoundError, ValidationError, ConflictError } = require('../errors');
 //     Businesses wearing the source as their active frame follow the same way:
 //     repointed to the target, or cleared for a dropped owner.
 // Version uids never change, so nothing that remembered one breaks.
+//
+// Users' edited copies of a version that moves (frameDesign.service) are DROPPED,
+// whoever ends up owning it: the owners who follow a version are not always the
+// same people, and the product owner chose a clean start over carrying them
+// (2026-11-27). The dry run counts them as `edited_copies_dropped`.
 
 const STATUS_RANK = { active: 2, pending: 1, removed: 0 };
 
@@ -173,18 +179,22 @@ async function moveVersion(versionUid, targetFrameUid, { dryRun = false } = {}) 
     target:    { uid: target.uid, name: target.name },
     changes,
     owners:    ownerPlan ? ownerSummary(ownerPlan) : null,
+    edited_copies_dropped: await frameDesign.countForVersions([version.id]),
     conflicts,
     applied:   false,
   };
   if (dryRun) return plan;
   if (conflicts.length) throw new ConflictError('The version cannot join that frame', conflicts);
 
+  let thumbs = [];
   await sequelize.transaction(async (transaction) => {
     await version.update({ frame_id: target.id }, { transaction });
+    thumbs = await frameDesign.dropForVersions([version.id], transaction);
     // Re-read inside the transaction so the owner rows applied are the current ones.
     const owners = outcome === 'archived' ? await planOwners(source, target, transaction) : null;
     await applyOutcome(source, target, outcome, owners, transaction);
   });
+  await frameDesign.deleteThumbnails(thumbs);
   plan.applied = true;
   return plan;
 }
@@ -205,16 +215,20 @@ async function mergeFrame(sourceUid, targetUid, { dryRun = false } = {}) {
     target:    { uid: target.uid, name: target.name },
     changes:   detailChanges(source, target),
     owners:    ownerSummary(await planOwners(source, target)),
+    edited_copies_dropped: await frameDesign.countForVersions(versions.map((v) => v.id)),
     conflicts,
     applied:   false,
   };
   if (dryRun) return plan;
   if (conflicts.length) throw new ConflictError('The frames cannot be merged', conflicts);
 
+  let thumbs = [];
   await sequelize.transaction(async (transaction) => {
+    thumbs = await frameDesign.dropForVersions(versions.map((v) => v.id), transaction);
     await FrameVersion.update({ frame_id: target.id }, { where: { frame_id: source.id }, transaction });
     await applyOutcome(source, target, 'archived', await planOwners(source, target, transaction), transaction);
   });
+  await frameDesign.deleteThumbnails(thumbs);
   plan.applied = true;
   return plan;
 }

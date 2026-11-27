@@ -213,8 +213,20 @@ module.exports = {
           version: { type: 'object', nullable: true, description: 'The version picked for the caller: { id, uid, language_id, size_id, thumbnail_s3_key, Language, TemplateSize }. On detail with `size`, null when the frame has no live version in that size.' },
           available_languages: { type: 'array', items: { type: 'object' }, description: 'Languages the frame has an active version in (text-free versions add none).' },
           available_sizes:     { type: 'array', items: { type: 'object' }, description: 'Sizes the frame has an active version in.' },
-          versions: { type: 'array', items: { type: 'object' }, description: 'Detail only: every active version (no content), for a switcher.' },
-          content:  { type: 'string', description: 'Detail only, owners only: the picked version\'s design payload.' },
+          versions: { type: 'array', items: { type: 'object' }, description: 'Detail only: every active version (no content), for a switcher. Each carries `customized` — true when the caller has an edited copy of it.' },
+          content:  { type: 'string', description: 'Detail only, owners only: the design payload to render for the picked version — the caller\'s edited copy when they have one (see `design`), else the original.' },
+          design: {
+            type: 'object', nullable: true,
+            description: 'Detail only: the caller\'s edited copy of the picked version, null when they have none (or do not own the frame). `thumbnail_s3_key` at the top level stays the ORIGINAL\'s; the copy\'s preview is here.',
+            properties: {
+              uid:              { type: 'string', format: 'uuid' },
+              thumbnail_s3_key: { type: 'string', nullable: true },
+              created_at:       { type: 'string', format: 'date-time' },
+              updated_at:       { type: 'string', format: 'date-time' },
+              original_updated: { type: 'boolean', description: 'The admin changed the original since this copy was made (or last reset). The copy may refer to files that change replaced — offer a reset. Stays true until the copy is reset.' },
+            },
+          },
+          customized: { type: 'boolean', description: 'My Frames only: the version this card shows has the caller\'s edited copy; `thumbnail_s3_key` is then that copy\'s preview when it has one.' },
         },
       },
       // Admin shape: the full row plus the publish-checklist signals the list adds,
@@ -240,6 +252,21 @@ module.exports = {
               },
             },
           },
+        },
+      },
+    },
+  },
+
+  // The owner's reads of a business carry the applied frame's uid next to its id.
+  Business: {
+    add: {
+      activeFrame: {
+        type: 'object', nullable: true,
+        description: 'Owner reads only (create, list, get, update): the applied frame (`active_frame_id`), or null. Use its `uid` for `GET /frames/{uid}` and the /frames/mine routes; `active_frame_id` itself stays the numeric id.',
+        properties: {
+          id:   { type: 'integer' },
+          uid:  { type: 'string', format: 'uuid' },
+          name: { type: 'string' },
         },
       },
     },

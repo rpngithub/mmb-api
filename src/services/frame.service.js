@@ -4,8 +4,10 @@ const frameRepo     = require('../repositories/frame.repository');
 const framePublish  = require('./framePublish');
 const picker        = require('./templateFamilyPicker');
 const userFrameRepo = require('../repositories/userFrame.repository');
+const designRepo    = require('../repositories/userFrameDesign.repository');
+const frameDesign   = require('./frameDesign.service');
 const paymentRepo   = require('../repositories/payment.repository');
-const { FrameCategory, FrameVersion, TemplateSize, Language } = require('../models');
+const { FrameCategory, FrameVersion, TemplateSize, Language, Business } = require('../models');
 const { resolveRef, pick } = require('../utils/catalogRef');
 const { containsPattern } = require('../utils/textSearch');
 // Imported as a namespace, not destructured: the gateway has no test double, so
@@ -153,10 +155,24 @@ async function getFrame(uid, viewer = null, filters = {}) {
 
   const data = withPick(frame, chosen ? { ...all, version: chosen.version } : { ...all, version: null });
   if (!chosen && all?.version) data.thumbnail_s3_key = all.version.thumbnail_s3_key;
-  data.versions  = (all ? all.versions : []).map(versionSummary);
+
+  // The owner's edited copies (frameDesign.service). `content` is always the one to
+  // render — their copy of the picked version when they have one — while
+  // `thumbnail_s3_key` stays the original's, as everywhere else; the copy's own
+  // preview is `design.thumbnail_s3_key`.
+  const versions = all ? all.versions : [];
+  const designs  = owned ? await designRepo.mapForUser(viewer.userId, versions.map((v) => v.id)) : new Map();
+  data.versions  = versions.map((v) => ({ ...versionSummary(v), customized: designs.has(v.id) }));
   data.owned     = owned;
   data.is_locked = Boolean(data.is_premium) && !owned;
-  if (owned && chosen) data.content = chosen.version.content;
+  data.design    = null;
+  if (owned && chosen) {
+    const mine = designs.has(chosen.version.id)
+      ? await designRepo.findForUserAndVersion(viewer.userId, chosen.version.id)
+      : null;
+    data.content = mine ? mine.content : chosen.version.content;
+    if (mine) data.design = frameDesign.summary(mine, chosen.version);
+  }
   return data;
 }
 
@@ -172,11 +188,31 @@ async function listMine(userId, viewer = null) {
     hide:        false,
     source:      SOURCE,
   });
+  // A shelf card shows the user's own edit of the version it shows, when they made one.
+  const pickedIds = [...picks.values()].map((p) => p.version.id);
+  const designs   = await designRepo.mapForUser(userId, pickedIds);
   return rows.map((row) => {
     const data = row.toJSON();
-    if (data.Frame) data.Frame = withPick(data.Frame, picks.get(row.frame_id));
+    if (data.Frame) {
+      data.Frame = withPick(data.Frame, picks.get(row.frame_id));
+      const mine = data.Frame.version ? designs.get(data.Frame.version.id) : null;
+      data.Frame.customized = Boolean(mine);
+      if (mine?.thumbnail_s3_key) data.Frame.thumbnail_s3_key = mine.thumbnail_s3_key;
+    }
     return data;
   });
+}
+
+// A frame landing on the shelf becomes the business's active frame when it has
+// none — so a user's first frame is applied without a second step. A business that
+// already has one keeps it: adding more never switches the frame they chose.
+// Every path that makes a user_frames row active calls this (add, re-add, the
+// already-owned purchase, payment fulfilment).
+async function applyIfNoActiveFrame(userId, frameId) {
+  await Business.update(
+    { active_frame_id: frameId },
+    { where: { user_id: userId, is_active: 1, active_frame_id: null } },
+  );
 }
 
 // Shared loader for the two acquisition paths: the frame must exist and be on
@@ -206,6 +242,7 @@ async function addFrame(uid, userId) {
   // paid for per frame, so the plan cap never stands between a user and it.
   if (alreadyPaid) {
     await userFrameRepo.update(owned.id, { status: 'active' });
+    await applyIfNoActiveFrame(userId, frame.id);
     return userFrameRepo.findById(owned.id);
   }
 
@@ -227,6 +264,7 @@ async function addFrame(uid, userId) {
   }
 
   await quota.consume(userId, 'frames', 1, { source: 'frame_add', ref_type: 'user_frame', ref_id: row.id });
+  await applyIfNoActiveFrame(userId, frame.id);
   return row;
 }
 
@@ -242,6 +280,7 @@ async function purchaseFrame(uid, userId) {
   // Bought once, removed, now buying again: give it back rather than charge twice.
   if (owned?.acquired_via === 'purchase' && owned.status === 'removed') {
     await userFrameRepo.update(owned.id, { status: 'active' });
+    await applyIfNoActiveFrame(userId, frame.id);
     return { type: 'already_owned', frame_uid: frame.uid };
   }
 
@@ -299,11 +338,16 @@ async function fulfilPayment(payment) {
   if (row.status === 'active') return { ok: true, idempotent: true };
 
   await userFrameRepo.update(row.id, { status: 'active', acquired_at: new Date() });
+  await applyIfNoActiveFrame(row.user_id, row.frame_id);
   return { ok: true };
 }
 
 // Take a frame off the shelf. The row is kept (status='removed') so a paid frame
-// can be re-added without paying again; there is no refund, deliberately.
+// can be re-added without paying again; there is no refund, deliberately. The
+// user's edited copies are NOT kept: re-adding starts from the original (a product
+// decision — see frameDesign.service). A business wearing the frame as its active
+// frame has it cleared: it may only point at a frame on the shelf (assertUsable),
+// and leaving it set would keep a frame applied that the owner no longer has.
 async function removeFrame(uid, userId) {
   const frame = await frameRepo.findOne({ uid });
   if (!frame) throw new NotFoundError('Frame not found');
@@ -312,6 +356,8 @@ async function removeFrame(uid, userId) {
   if (!owned || owned.status !== 'active') throw new NotFoundError('This frame is not in My Frames');
 
   await userFrameRepo.update(owned.id, { status: 'removed' });
+  await Business.update({ active_frame_id: null }, { where: { user_id: userId, active_frame_id: frame.id } });
+  await frameDesign.dropForUserFrame(userId, frame.id);
 }
 
 // Guard for businesses.active_frame_id: you may only apply a frame you own.

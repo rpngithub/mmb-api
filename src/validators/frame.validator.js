@@ -1,4 +1,5 @@
 const Joi = require('joi');
+const { MAX_BYTES: THUMB_MAX_BYTES } = require('../services/projectThumbnail.service');
 
 const FRAME_TYPES = ['static', 'animated'];
 const STATUSES    = ['draft', 'active', 'inactive'];
@@ -79,7 +80,19 @@ const createFrameCategorySchema = Joi.object({
 
 const updateFrameCategorySchema = Joi.object({ ...categoryFields }).min(1);
 
+// ---- A user's edited copy of a frame version (frameDesign.service) ----
+// Content is opaque, as on projects; the cap only stops the row being used as
+// storage — a frame design is a small fraction of it.
+const MAX_DESIGN_CONTENT = 2 * 1024 * 1024;
+
+const saveFrameDesignSchema = Joi.object({
+  content:   Joi.string().min(1).max(MAX_DESIGN_CONTENT).required(),
+  // Base64 is 4/3 the byte size, plus the data-URL prefix; the bytes are checked properly on decode.
+  thumbnail: Joi.string().max(Math.ceil(THUMB_MAX_BYTES * 4 / 3) + 64).optional(),
+});
+
 module.exports = {
+  saveFrameDesignSchema, MAX_DESIGN_CONTENT,
   createFrameSchema, updateFrameSchema,
   createFrameVersionSchema, updateFrameVersionSchema, moveFrameVersionSchema, mergeFrameSchema,
   createFrameCategorySchema, updateFrameCategorySchema,
