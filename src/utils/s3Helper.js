@@ -132,6 +132,19 @@ async function listKeys(prefix) {
   return keys;
 }
 
+// The same listing with each object's size, for checks that an upload landed whole
+// (bulk template import compares it against the sizes the admin panel declared).
+async function listObjects(prefix) {
+  const objects = [];
+  let token;
+  do {
+    const r = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, ContinuationToken: token }));
+    for (const o of r.Contents || []) objects.push({ key: o.Key, size: o.Size ?? null });
+    token = r.IsTruncated ? r.NextContinuationToken : undefined;
+  } while (token);
+  return objects;
+}
+
 async function deleteObjects(keys) {
   if (!keys.length) return;
   // DeleteObjects caps at 1000 keys per request.
@@ -153,5 +166,5 @@ const copyObject = (srcKey, destKey) =>
 module.exports = {
   uploadFile, getObjectBuffer, getPresignedUrl, getPresignedPutUrl, putObjectTagging, objectExists, readObjectStart,
   createMultipartUpload, presignUploadPart, completeMultipartUpload, abortMultipartUpload,
-  listKeys, deleteObjects, deleteByPrefix, copyObject, deleteFile,
+  listKeys, listObjects, deleteObjects, deleteByPrefix, copyObject, deleteFile,
 };

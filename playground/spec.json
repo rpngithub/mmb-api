@@ -7203,6 +7203,12 @@
         "enabled": true
       },
       {
+        "key": "template_import_uid",
+        "value": "",
+        "type": "default",
+        "enabled": true
+      },
+      {
         "key": "notification_uid",
         "value": "",
         "type": "default",
