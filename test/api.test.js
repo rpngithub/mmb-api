@@ -6635,12 +6635,216 @@ test('a business can only apply a frame from its owner shelf', async () => {
     'owning nothing means applying nothing, even for a free frame');
 
   await h.request('POST', `${P}/frames/${mine.uid}/add`, { token });
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, mine.id, 'the first frame on the shelf is applied by itself');
   const applied = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: mine.id } });
   assert.equal(applied.status, 200);
   assert.equal(applied.body.data.active_frame_id, mine.id);
+  assert.deepEqual(applied.body.data.activeFrame, { id: mine.id, uid: mine.uid, name: mine.name }, 'the uid comes with the id');
+  const read = await h.request('GET', `${P}/businesses/${biz.uid}`, { token });
+  assert.equal(read.body.data.activeFrame.uid, mine.uid);
+  assert.equal((await h.request('GET', `${P}/businesses`, { token })).body.data.find((b) => b.uid === biz.uid).activeFrame.uid, mine.uid);
+  assert.ok(!('activeFrame' in (await h.request('GET', `${P}/businesses/${biz.uid}/public`)).body.data), 'not on the public profile');
 
   const cleared = await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: null } });
   assert.equal(cleared.body.data.active_frame_id, null, 'null takes the frame off');
+  assert.equal(cleared.body.data.activeFrame, null);
+
+  // Removing the applied frame from My Frames takes it off the business too.
+  await h.request('PATCH', `${P}/businesses/${biz.uid}`, { token, body: { active_frame_id: mine.id } });
+  const other = await mkFrame({ category_id: cat.id });
+  await h.request('POST', `${P}/frames/${other.uid}/add`, { token });
+  assert.equal((await h.request('DELETE', `${P}/frames/mine/${other.uid}`, { token })).status, 200);
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, mine.id, 'removing a different frame leaves it alone');
+
+  assert.equal((await h.request('DELETE', `${P}/frames/mine/${mine.uid}`, { token })).status, 200);
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, null, 'removing the applied frame clears it');
+});
+
+test('a bought frame becomes the active frame only when the business has none', async () => {
+  const cat    = await mkFrameCategory();
+  const paid   = await mkFrame({ category_id: cat.id, is_premium: 1, price: 30 });
+  const free   = await mkFrame({ category_id: cat.id });
+  const u      = await mkUser('FrameAutoApply');
+  const token  = h.userTokenFor(u.id);
+  const biz    = await models.Business.create({ uid: uuid(), user_id: u.id, name: `TST AutoApply Biz ${Date.now()}` });
+
+  const order = await withStubbedRazorpay(async () => (await h.request('POST', `${P}/frames/${paid.uid}/purchase`, { token })).body.data);
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, null, 'not while the payment is pending');
+
+  const payment = await models.Payment.findOne({ where: { uid: order.payment_uid } });
+  const { raw, sig } = signWebhook({
+    event: 'payment.captured',
+    payload: { payment: { entity: { id: `pay_autoapply_${u.id}`, order_id: payment.razorpay_order_id, amount: 3540 } } },
+  });
+  assert.equal((await h.request('POST', `${P}/subscriptions/webhook`, { body: raw, headers: { 'x-razorpay-signature': sig } })).status, 200);
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, paid.id, 'applied on payment');
+
+  // A second frame never takes over the one already applied.
+  await h.request('POST', `${P}/frames/${free.uid}/add`, { token });
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, paid.id);
+
+  // Removing the applied one leaves none; re-adding the paid one (free, already bought) applies it again.
+  await h.request('DELETE', `${P}/frames/mine/${paid.uid}`, { token });
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, null, 'not switched to another owned frame');
+  assert.equal((await h.request('POST', `${P}/frames/${paid.uid}/add`, { token })).status, 201);
+  assert.equal((await models.Business.findByPk(biz.id)).active_frame_id, paid.id);
+});
+
+// ---------- Users' edited copies of frame versions ----------
+
+test('an owner edits a frame version: the copy is served in place of the original, which stays untouched', async () => {
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id });
+  const u     = await mkUser('FrameEdit');
+  const token = h.userTokenFor(u.id);
+  const other = await mkUser('FrameEditOther');
+  const oTok  = h.userTokenFor(other.id);
+
+  const versionUid = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data.version.uid;
+  const url = `${P}/frames/mine/${frame.uid}/versions/${versionUid}`;
+
+  await withStubbedThumbS3(async (calls) => {
+    assert.equal((await h.request('PUT', url, { token, body: { content: '{"mine":1}' } })).status, 403, 'not in My Frames yet');
+    await h.request('POST', `${P}/frames/${frame.uid}/add`, { token });
+    await h.request('POST', `${P}/frames/${frame.uid}/add`, { token: oTok });
+
+    const saved = await h.request('PUT', url, { token, body: { content: '{"mine":1}', thumbnail: dataUrl(PNG_1PX) } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.data.version_uid, versionUid);
+    assert.equal(saved.body.data.original_updated, false);
+    assert.ok(!('content' in saved.body.data), 'the save response carries no content');
+    const thumb = saved.body.data.thumbnail_s3_key;
+    assert.match(thumb, new RegExp(`^users/${u.uid}/frames/${versionUid}/thumb-[0-9a-f]{12}\\.png$`));
+
+    const detail = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data;
+    assert.equal(detail.content, '{"mine":1}', 'content is the copy');
+    assert.equal(detail.thumbnail_s3_key, 'frames/thumbnail/x.png', 'the top-level thumbnail stays the original');
+    assert.equal(detail.design.thumbnail_s3_key, thumb);
+    assert.equal(detail.design.original_updated, false);
+    assert.equal(detail.versions.find((v) => v.uid === versionUid).customized, true);
+
+    const theirs = (await h.request('GET', `${P}/frames/${frame.uid}`, { token: oTok })).body.data;
+    assert.equal(theirs.content, '{"layers":[]}', 'another owner still gets the original');
+    assert.equal(theirs.design, null);
+    assert.equal(theirs.versions[0].customized, false);
+    assert.equal((await models.FrameVersion.findOne({ where: { uid: versionUid } })).content, '{"layers":[]}', 'the original row is untouched');
+
+    // Content-only autosave keeps the preview; nothing uploaded.
+    const tick = await h.request('PUT', url, { token, body: { content: '{"mine":2}' } });
+    assert.equal(tick.body.data.thumbnail_s3_key, thumb);
+    assert.equal(calls.uploaded.length, 1);
+    assert.equal(await models.UserFrameDesign.count({ where: { user_id: u.id } }), 1, 'one copy per version, replaced');
+
+    const shelf = (await h.request('GET', `${P}/frames/mine`, { token })).body.data.find((r) => r.Frame.uid === frame.uid);
+    assert.equal(shelf.Frame.customized, true);
+    assert.equal(shelf.Frame.thumbnail_s3_key, thumb, 'My Frames shows the copy');
+    const theirShelf = (await h.request('GET', `${P}/frames/mine`, { token: oTok })).body.data.find((r) => r.Frame.uid === frame.uid);
+    assert.equal(theirShelf.Frame.customized, false);
+    assert.equal(theirShelf.Frame.thumbnail_s3_key, 'frames/thumbnail/x.png');
+
+    // The admin changes the original afterwards: flagged, and saving does not clear it.
+    await models.sequelize.query('UPDATE frame_versions SET updated_at = DATE_ADD(NOW(), INTERVAL 1 MINUTE) WHERE uid = ?', { replacements: [versionUid] });
+    assert.equal((await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data.design.original_updated, true);
+    assert.equal((await h.request('PUT', url, { token, body: { content: '{"mine":3}' } })).body.data.original_updated, true,
+      'autosaving does not quietly clear the flag');
+
+    // Reset: the original comes back and the preview is deleted.
+    assert.equal((await h.request('DELETE', url, { token })).status, 200);
+    assert.deepEqual(calls.deleted, [thumb]);
+    const back = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data;
+    assert.equal(back.content, '{"layers":[]}');
+    assert.equal(back.design, null);
+    assert.equal((await h.request('DELETE', url, { token })).status, 404, 'nothing left to reset');
+
+    // A fresh copy after the reset is based on the current original — no flag.
+    assert.equal((await h.request('PUT', url, { token, body: { content: '{"mine":4}' } })).body.data.original_updated, false);
+  });
+});
+
+test('frame edits: bad input saves nothing, and only a live version of that frame can be edited', async () => {
+  const cat    = await mkFrameCategory();
+  const frame  = await mkFrame({ category_id: cat.id });
+  const elsewhere = await mkFrame({ category_id: cat.id });
+  const u      = await mkUser('FrameEditBad');
+  const token  = h.userTokenFor(u.id);
+  await h.request('POST', `${P}/frames/${frame.uid}/add`, { token });
+  const versionUid = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data.version.uid;
+  const otherVersionUid = (await h.request('GET', `${P}/frames/${elsewhere.uid}`)).body.data.version.uid;
+  const url = `${P}/frames/mine/${frame.uid}/versions/${versionUid}`;
+
+  await withStubbedThumbS3(async (calls) => {
+    assert.equal((await h.request('PUT', url, { token, body: {} })).status, 400, 'content is required');
+    assert.equal((await h.request('PUT', url, { token, body: { content: '' } })).status, 400);
+    assert.equal((await h.request('PUT', url, { token, body: { content: '{"x":1}', thumbnail: 'data:image/png;base64,aGVsbG8gd29ybGQ=' } })).status, 400,
+      'text pretending to be a png');
+    assert.equal(await models.UserFrameDesign.count({ where: { user_id: u.id } }), 0, 'a bad thumbnail saves nothing');
+    assert.equal(calls.uploaded.length, 0);
+
+    assert.equal((await h.request('PUT', `${P}/frames/mine/${frame.uid}/versions/${otherVersionUid}`, { token, body: { content: '{"x":1}' } })).status, 404,
+      'a version of another frame');
+    assert.equal((await h.request('PUT', `${P}/frames/mine/${frame.uid}/versions/${uuid()}`, { token, body: { content: '{"x":1}' } })).status, 404);
+
+    await models.FrameVersion.update({ status: 'inactive' }, { where: { uid: versionUid } });
+    assert.equal((await h.request('PUT', url, { token, body: { content: '{"x":1}' } })).status, 404, 'an inactive version cannot be edited');
+  });
+});
+
+test('removing a frame from My Frames deletes the edited copies; re-adding starts from the original', async () => {
+  const cat   = await mkFrameCategory();
+  const frame = await mkFrame({ category_id: cat.id });
+  const u     = await mkUser('FrameEditRemove');
+  const token = h.userTokenFor(u.id);
+  await h.request('POST', `${P}/frames/${frame.uid}/add`, { token });
+  const versionUid = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data.version.uid;
+
+  await withStubbedThumbS3(async (calls) => {
+    const saved = await h.request('PUT', `${P}/frames/mine/${frame.uid}/versions/${versionUid}`, { token, body: { content: '{"mine":1}', thumbnail: dataUrl(PNG_1PX) } });
+    assert.equal(saved.status, 200);
+
+    assert.equal((await h.request('DELETE', `${P}/frames/mine/${frame.uid}`, { token })).status, 200);
+    assert.equal(await models.UserFrameDesign.count({ where: { user_id: u.id } }), 0);
+    assert.deepEqual(calls.deleted, [saved.body.data.thumbnail_s3_key]);
+  });
+
+  assert.equal((await h.request('POST', `${P}/frames/${frame.uid}/add`, { token })).status, 201);
+  const back = (await h.request('GET', `${P}/frames/${frame.uid}`, { token })).body.data;
+  assert.equal(back.content, '{"layers":[]}');
+  assert.equal(back.design, null);
+});
+
+test('merging a frame drops users’ edited copies of the moved versions', async () => {
+  const token  = h.adminToken();
+  const cat    = await mkFrameCategory();
+  const square = await mkFrameSize('e1x1', 1080, 1080);
+  const tall   = await mkFrameSize('e4x5', 1080, 1350);
+  const target = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  await mkFrameVersion(target, { size_id: square.id });
+  const source = await mkFrame({ category_id: cat.id, content: null, thumbnail_s3_key: null });
+  const moving = await mkFrameVersion(source, { size_id: tall.id });
+
+  const u = await mkUser('FrameEditMerge');
+  const uTok = h.userTokenFor(u.id);
+  await h.request('POST', `${P}/frames/${source.uid}/add`, { token: uTok });
+
+  await withStubbedThumbS3(async (calls) => {
+    const saved = await h.request('PUT', `${P}/frames/mine/${source.uid}/versions/${moving.uid}`, { token: uTok, body: { content: '{"mine":1}', thumbnail: dataUrl(PNG_1PX) } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+
+    const dry = await h.request('POST', `${P}/admin/frames/${source.uid}/merge?dry_run=1`, { token, body: { into_frame_uid: target.uid } });
+    assert.equal(dry.body.data.edited_copies_dropped, 1);
+    assert.equal(await models.UserFrameDesign.count({ where: { user_id: u.id } }), 1, 'a dry run drops nothing');
+
+    const merged = await h.request('POST', `${P}/admin/frames/${source.uid}/merge`, { token, body: { into_frame_uid: target.uid } });
+    assert.equal(merged.status, 200);
+    assert.equal(await models.UserFrameDesign.count({ where: { user_id: u.id } }), 0);
+    assert.deepEqual(calls.deleted, [saved.body.data.thumbnail_s3_key]);
+  });
+
+  // The owner followed the version to the target and sees the original there.
+  const detail = (await h.request('GET', `${P}/frames/${target.uid}?size=${tall.slug}`, { token: uTok })).body.data;
+  assert.equal(detail.owned, true);
+  assert.equal(detail.content, '{"layers":[]}');
+  assert.equal(detail.design, null);
 });
 
 test('the admin publish gate holds a frame back until it is complete and priced coherently', async () => {

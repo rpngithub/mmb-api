@@ -7,7 +7,7 @@ const config    = require('./config.service');
 const reviewLogin = require('../utils/reviewLogin');
 
 const {
-  User, Business, Project, ProjectExport, UserFrame, UserVariant, UserUpload, UserQuotaUsage, UserQuotaCounter, UserQuotaGrant,
+  User, Business, Project, ProjectExport, UserFrame, UserFrameDesign, UserVariant, UserUpload, UserQuotaUsage, UserQuotaCounter, UserQuotaGrant,
   QuotaUsageEvent, UserBillingDetail, UserPreference, UserLanguage, UserNotification,
   UserNotificationSetting, Feedback, Font, UserSession, TokenBlacklist, OtpCode, UserSubscription,
   Payment, BusinessCategory, ActivityLog, UserOtpChallenge, EmailVerificationToken, PhoneChangeRequest,
@@ -104,6 +104,7 @@ async function purgeUser(user) {
     await Business.destroy(byUser);
     await ProjectExport.destroy(byUser);
     await Project.destroy(byUser);
+    await UserFrameDesign.destroy(byUser);   // edited frame copies; their previews went with users/<uid>/
     await UserFrame.destroy(byUser);
     await UserVariant.destroy(byUser);   // bought variants; the payments stay with the tombstone
     // Required here, not at the top: user.service loads this module, and favourites

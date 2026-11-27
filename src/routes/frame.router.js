@@ -4,6 +4,8 @@ const controller   = require('../controllers/frame.controller');
 const authenticate = require('../middlewares/authenticate');
 const optionalAuth = require('../middlewares/optionalAuth');
 const rateLimiter  = require('../middlewares/rateLimiter');
+const validate     = require('../middlewares/validate');
+const { saveFrameDesignSchema } = require('../validators/frame.validator');
 
 /**
  * @swagger
@@ -103,10 +105,12 @@ router.get('/mine', authenticate, controller.listMine);
  *     description: >
  *       Takes the frame off the shelf. A frame that was PAID for stays re-addable
  *       for free afterwards — the ownership record is kept, not deleted. There is
- *       no refund.
+ *       no refund. The caller's edited copies of the frame ARE deleted — re-adding
+ *       it starts from the original design — and a business wearing it as its
+ *       `active_frame_id` has that cleared.
  *     tags: [Frames]
  *     security: [{ bearerAuth: [] }]
- *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid }, description: "The FRAME uid — `Frame.uid` on a My Frames row, not the row's own `uid`" }]
  *     responses:
  *       200:
  *         description: Removed
@@ -116,6 +120,64 @@ router.get('/mine', authenticate, controller.listMine);
  *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
  */
 router.delete('/mine/:uid', authenticate, controller.remove);
+
+/**
+ * @swagger
+ * /frames/mine/{uid}/versions/{versionUid}:
+ *   put:
+ *     summary: Save my edited copy of a frame version
+ *     description: >
+ *       Creates or replaces the caller's own copy of one version (language × size) of a
+ *       frame in their My Frames. The original is never changed. From then on
+ *       `GET /frames/{uid}` returns this copy as `content` for that version, with
+ *       `design` describing it, and My Frames shows its preview.
+ *
+ *       Autosave: send `content` on every tick and `thumbnail` on a slower one (15–30 s,
+ *       blur, close) — an omitted `thumbnail` keeps the current preview. Content is not
+ *       checked beyond its size: which parts a user may change is the editor's rule.
+ *       Not metered.
+ *     tags: [Frames]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid,        required: true, schema: { type: string, format: uuid }, description: "The FRAME uid — `Frame.uid` on a My Frames row, not the row's own `uid`" }
+ *       - { in: path, name: versionUid, required: true, schema: { type: string, format: uuid }, description: "A `versions[].uid` of that frame" }
+ *     requestBody:
+ *       required: true
+ *       content: { application/json: { schema: { $ref: '#/components/schemas/FrameDesignRequest' } } }
+ *     responses:
+ *       200:
+ *         description: The saved copy (no content)
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/FrameDesignResponse' } } }
+ *       400:
+ *         description: Missing/oversize content, or a thumbnail that is not a JPEG/PNG/WebP under 500 KB — nothing is saved
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       403:
+ *         description: The frame is not in the caller's My Frames
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *       404:
+ *         description: No live frame with that uid, or no live version of it with that uid
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ *   delete:
+ *     summary: Reset a frame version to the original
+ *     description: >
+ *       Deletes the caller's edited copy of this version and its preview;
+ *       `GET /frames/{uid}` serves the original again. Removing the frame from My Frames
+ *       does this for every version of it.
+ *     tags: [Frames]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid,        required: true, schema: { type: string, format: uuid }, description: "The FRAME uid — `Frame.uid` on a My Frames row, not the row's own `uid`" }
+ *       - { in: path, name: versionUid, required: true, schema: { type: string, format: uuid } }
+ *     responses:
+ *       200:
+ *         description: Reset
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/SuccessResponse' } } }
+ *       404:
+ *         description: No such frame or version, or the caller has no edited copy of it
+ *         content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+ */
+router.put('/mine/:uid/versions/:versionUid', authenticate, validate(saveFrameDesignSchema), controller.saveDesign);
+router.delete('/mine/:uid/versions/:versionUid', authenticate, controller.resetDesign);
 
 /**
  * @swagger
@@ -156,7 +218,8 @@ router.get('/:uid', optionalAuth, rateLimiter.publicTiered, controller.getOne);
  *     description: >
  *       Free frames only. Also the re-add path for a frame that was bought and
  *       later removed — that costs nothing, because it was already paid for.
- *       A premium frame that was never bought is refused with 403.
+ *       A premium frame that was never bought is refused with 403. If the caller's
+ *       business has no active frame, this one becomes it (`active_frame_id`).
  *     tags: [Frames]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]
@@ -182,7 +245,8 @@ router.post('/:uid/add', authenticate, controller.add);
  *       Creates a Razorpay order for the frame's price plus GST and records the
  *       purchase as pending. Confirm it with `POST /subscriptions/verify-payment`
  *       (the same endpoint plans use) — or let the webhook do it. The frame lands
- *       in My Frames on confirmation and is owned permanently.
+ *       in My Frames on confirmation and is owned permanently — and becomes the
+ *       business's active frame if it has none.
  *     tags: [Frames]
  *     security: [{ bearerAuth: [] }]
  *     parameters: [{ in: path, name: uid, required: true, schema: { type: string, format: uuid } }]

@@ -1,4 +1,5 @@
 const frameService = require('../services/frame.service');
+const frameDesign  = require('../services/frameDesign.service');
 
 const list = async (req, res) => {
   const { total, items } = await frameService.listStore(req.query, req.user || null);
@@ -33,4 +34,14 @@ const remove = async (req, res) => {
   res.json({ success: true, data: null });
 };
 
-module.exports = { list, listCategories, getOne, listMine, add, purchase, remove };
+const saveDesign = async (req, res) => {
+  const design = await frameDesign.saveDesign(req.params.uid, req.params.versionUid, req.user.userId, req.body);
+  res.json({ success: true, data: design });
+};
+
+const resetDesign = async (req, res) => {
+  await frameDesign.resetDesign(req.params.uid, req.params.versionUid, req.user.userId);
+  res.json({ success: true, data: null });
+};
+
+module.exports = { list, listCategories, getOne, listMine, add, purchase, remove, saveDesign, resetDesign };

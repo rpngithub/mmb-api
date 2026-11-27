@@ -1023,8 +1023,9 @@ router.get('/frame-versions', authenticate, authorizeAdmin('frames.read'), contr
  *       plan without doing it: `changes`, the source's `outcome` (unchanged | draft |
  *       archived), `owners` (when the source is emptied and archived: how many owners are
  *       `carried` to the target, `combined` with a row they already have there, or
- *       `dropped` — a free owner never carries into a premium frame) and `conflicts`.
- *       Applying with conflicts is a 409.
+ *       `dropped` — a free owner never carries into a premium frame), `edited_copies_dropped`
+ *       (users' own edited copies of the moving version, which are deleted — nobody's
+ *       edits follow a version) and `conflicts`. Applying with conflicts is a 409.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]
  *     parameters:
@@ -1041,7 +1042,8 @@ router.get('/frame-versions', authenticate, authorizeAdmin('frames.read'), contr
  *     summary: Merge a whole frame into another (dry run available)
  *     description: >
  *       Every version moves, all-or-nothing; the emptied source is archived (inactive) and
- *       its owners and businesses using it follow to the target by the rules above.
+ *       its owners and businesses using it follow to the target by the rules above. Users'
+ *       edited copies of the moved versions are deleted (`edited_copies_dropped`).
  *       `?dry_run=1` previews.
  *     tags: [Admin]
  *     security: [{ bearerAuth: [] }]

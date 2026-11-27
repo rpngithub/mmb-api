@@ -57,6 +57,7 @@ const modelFiles = [
   'frame.model',
   'frameVersion.model',
   'userFrame.model',
+  'userFrameDesign.model',
   'userVariant.model',
   'project.model',
   'projectExport.model',

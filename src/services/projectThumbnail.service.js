@@ -60,24 +60,27 @@ function decode(input, { field = 'thumbnail' } = {}) {
   return { bytes, ...sig };
 }
 
-const keyFor = (userUid, projectUid, hash, ext) => `users/${userUid}/projects/${projectUid}/thumb-${hash}.${ext}`;
-
 /**
- * Stores the thumbnail and returns the key to save on the project — or the
- * current key, unchanged, when the bytes are identical to what is already there.
- * The caller persists the key; this only handles the object.
+ * Stores the thumbnail and returns the key to save on the row — or the current
+ * key, unchanged, when the bytes are identical to what is already there. The
+ * caller persists the key; this only handles the object.
+ *
+ * `folder` is where the preview lives (trailing slash); it defaults to the
+ * project's own. A user's edited frame copy passes its folder — same rules, one
+ * preview per copy (frame.service).
  */
-async function store(input, { userUid, projectUid, currentKey }) {
+async function store(input, { userUid, projectUid, currentKey, folder }) {
+  const dir = folder || `users/${userUid}/projects/${projectUid}/`;
   const { bytes, type, ext } = decode(input);
   const hash = crypto.createHash('sha1').update(bytes).digest('hex').slice(0, 12);
-  const key  = keyFor(userUid, projectUid, hash, ext);
+  const key  = `${dir}thumb-${hash}.${ext}`;
   if (key === currentKey) return key;
 
   await s3.uploadFile(key, bytes, type);
 
   // Only our own previous thumbnail is cleaned up. A key from anywhere else (an
   // older scheme, a hand-set value) is left alone rather than deleted on a guess.
-  if (currentKey && currentKey.startsWith(`users/${userUid}/projects/${projectUid}/`)) {
+  if (currentKey && currentKey.startsWith(dir)) {
     try { await s3.deleteFile(currentKey); } catch (err) {
       // Leaving one orphaned preview behind is not worth failing the user's save.
       console.warn(`[ProjectThumbnail] could not delete replaced ${currentKey}: ${err.message}`);
