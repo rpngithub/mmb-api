@@ -319,16 +319,22 @@ test('no cdn_base_url: nothing is sent, the job waits as unavailable instead of 
   const op = await mkRoute('remove-background', SCHEMAS.bg, { body_encoding: 'form' });
   handler = () => { throw new Error('must not be called'); };
   cdnBase = '';
+  let job;
   try {
     const r = await submit(u, op.key, { image: img.uid });
     await worker.dispatch(new Date()); await worker.drain();
     assert.equal(posts().length, 0);
-    const job = await jobOf(r);
+    job = await jobOf(r);
     assert.equal(job.status, 'queued', 'requeued: our config, not the user\'s input');
     const att = await AiJobAttempt.findOne({ where: { job_id: job.id } });
     assert.equal(att.error_code, 'PROVIDER_DOWN');
     assert.match(att.error_detail, /cdn_base_url/);
-  } finally { cdnBase = `${CDN}/`; }
+  } finally {
+    cdnBase = `${CDN}/`;
+    // The job is deliberately left queued for a retry. Take it out of the queue,
+    // or a later test's dispatch (which runs ahead of the clock) sends it.
+    if (job) await AiJob.update({ status: 'failed', next_attempt_at: null }, { where: { id: job.id } });
+  }
 });
 
 test('GPT image 2.5 with num_images 2: one request, two files, charged per image', async () => {

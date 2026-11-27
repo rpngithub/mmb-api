@@ -7,6 +7,8 @@ const adminCrud    = require('../utils/adminCrud');
 const controller   = require('../controllers/admin.controller');
 const uploadController = require('../controllers/upload.controller');
 const importController = require('../controllers/import.controller');
+const templateImportController = require('../controllers/templateImport.controller');
+const { createImportSchema, replaceManifestSchema, importFilesSchema } = require('../validators/templateImport.validator');
 const dashboardController = require('../controllers/dashboard.controller');
 const { IMPORT_ENTITIES } = require('../services/import.service');
 const fontPreview  = require('../services/fontPreview.service');
@@ -1581,6 +1583,231 @@ for (const { key, permission } of IMPORT_ENTITIES) {
   router.get(`/imports/${key}/template`, authenticate, authorizeAdmin(`${permission}.read`),   importController.template(key));
   router.post(`/imports/${key}`,         authenticate, authorizeAdmin(`${permission}.create`), importController.uploadCsv, importController.run(key));
 }
+
+// ---- Template bulk import (manifest + direct-to-S3, tracked as a batch) ----
+// The admin panel drives each step; the server keeps the state, so every step can
+// be repeated after a dropped connection or a closed tab. See
+// docs/template-bulk-import-design.md and src/services/templateImport.service.js.
+/**
+ * @swagger
+ * /admin/template-imports/manifest-template:
+ *   get:
+ *     summary: Download the manifest.csv template for a bulk template import
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: example, schema: { type: boolean }, description: "Adds two commented example rows" }
+ *     responses:
+ *       200: { description: "CSV file (text/csv)", content: { text/csv: { schema: { type: string } } } }
+ * /admin/template-imports:
+ *   get:
+ *     summary: List bulk template imports, newest first
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: query, name: limit,  schema: { type: integer, default: 20, maximum: 100 } }
+ *       - { in: query, name: offset, schema: { type: integer, default: 0 } }
+ *       - { in: query, name: status, schema: { type: string, enum: [draft, validated, running, completed, completed_with_issues, cancelled] } }
+ *     responses:
+ *       200: { description: "[{ uid, label, status, is_paused, total_items, counts, created_by, last_activity_at, started_at, finished_at, created_at }], meta.total. `is_paused` = running with no call for 30 minutes." }
+ *   post:
+ *     summary: "Step 1 — create an import from manifest.csv (dry run, part 1)"
+ *     description: >-
+ *       Parses the manifest (one row per version: family_name, category, industries, tags,
+ *       is_premium, template_type, search_keywords, language, size, folder, thumbnail; lists
+ *       separated by `|`) and checks it against the catalog. Nothing in the catalog changes.
+ *       Each row becomes an item: `invalid` (with `errors`) or `awaiting_files`. Design-level
+ *       columns may be blank after a design's first row; two different values are an error for
+ *       the whole design. Unknown tags are reported as `info` and created at start; categories,
+ *       industries, languages and sizes must exist. A (design, language, size) that already
+ *       exists is an error — re-import never replaces a version. Limits: 300 rows, 100 designs.
+ *       `folder` is the version's ZIP bundle (`x.zip`) or an unzipped folder; `family_name`
+ *       alone groups rows into a design. A blank `thumbnail` is detected in step 2.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [manifest]
+ *             properties:
+ *               label:    { type: string, maxLength: 200 }
+ *               manifest: { type: string, description: "manifest.csv as text" }
+ *     responses:
+ *       201: { description: "The import report: { uid, status, is_paused, counts, files, limits, designs: [{ family_name, family_uid, existing, rows, outcome, warnings }], items: [{ row, line, family_name, language, size, folder, thumbnail, stage, result, failed_stage, template_uid, template_status, files, errors, warnings }] }" }
+ *       400: { description: "Empty manifest, missing required column, or over the row/design limit" }
+ *       403: { description: Missing templates.create }
+ * /admin/template-imports/{uid}:
+ *   get:
+ *     summary: The full report of one import
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     responses:
+ *       200: { description: "The import report (see POST /admin/template-imports)" }
+ *       404: { description: Not found }
+ *   delete:
+ *     summary: Cancel an import — remove the drafts it created
+ *     description: >-
+ *       Deletes the versions this import created that are still drafts (and their S3 folders),
+ *       then the designs it created that are left with no versions. Anything that existed before
+ *       the import, and anything published, is left alone. Tags it created are kept.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     responses:
+ *       200: { description: "The import report, status cancelled; summary.cancelled = { removed_versions, removed_designs }" }
+ * /admin/template-imports/{uid}/manifest:
+ *   put:
+ *     summary: "Step 1b — replace the manifest of an import that has not started"
+ *     description: >-
+ *       Sends a corrected manifest.csv (same format, rules and limits as POST
+ *       /admin/template-imports). Only while the import is `draft` or `validated`; 409 after
+ *       start, finalize or cancel. Every row is replaced: rows the new manifest accepts go back to
+ *       `awaiting_files` and their earlier file checks are dropped (the ZIP or folder may have
+ *       changed) — send step 2 again for them; rows it rejects are `invalid` with scope `manifest`
+ *       errors. The import returns to `draft`. Rows are numbered afresh: `row` is the 1-based index
+ *       among the NEW manifest's data rows (comments and blank lines not counted) and `line` its
+ *       CSV line, so adding or removing a row shifts the numbers of the rows after it. Key cached
+ *       per-row state on `folder`, not `row`, across a replace.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [manifest]
+ *             properties:
+ *               manifest: { type: string, description: "The full manifest.csv as text" }
+ *     responses:
+ *       200: { description: "The import report (same shape as GET /admin/template-imports/{uid})" }
+ *       400: { description: "Empty manifest, missing required column, or over the row/design limit (same details as create)" }
+ *       403: { description: Missing templates.create }
+ *       404: { description: Not found }
+ *       409: { description: "The import has started (or finished, or was cancelled)" }
+ * /admin/template-imports/{uid}/files:
+ *   post:
+ *     summary: "Step 2 — send each row's file list and design JSON (dry run, part 2)"
+ *     description: >-
+ *       Up to 25 rows per call; send a row again to replace its files after fixing its ZIP or
+ *       folder. `files` is the bundle's flat file list (base names, uncompressed sizes) — ZIPs are
+ *       read in the browser. Checks: the design JSON (any file name) is valid (max 2 MB); the
+ *       thumbnail is in the bundle (blank in the manifest = thumbnail.png, .jpg, .jpeg or .webp,
+ *       first found); names use only letters, digits, `.`, `_`, `-`; types and sizes are within the
+ *       `upload_admin_*` limits. Referenced files, matched to bundle files by exact
+ *       (case-sensitive) name: a bare `name.ext` (or `./name.ext`) with an image, video, json or
+ *       audio extension; the last segment of an http(s) URL (`src`, `sourceUrl`, … — the editor's
+ *       export); the file name of a relative path (`assets/bg.png`, with a warning that it may not
+ *       render). Values under display keys (`name`, `title`, `label`, `originalName`, `fileName`…)
+ *       are labels: uploaded if bundled, never required. A bare name that is NOT in the bundle is a
+ *       warning (scope `files`, field `files`), not an error — the row stays `valid`, but its
+ *       version and design are kept as drafts. A URL whose file is not in the bundle is a warning
+ *       too, but does not hold publishing (it still loads from that URL; font URLs are exempt).
+ *       Paths not in the bundle are treated as library files. Font files are never required. Files the design does not use are a warning
+ *       and are not uploaded. Limits per import: 3,000 files, 1 GB. The batch becomes `validated`
+ *       once no row is `awaiting_files`.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [items]
+ *             properties:
+ *               items:
+ *                 type: array
+ *                 maxItems: 25
+ *                 items:
+ *                   type: object
+ *                   required: [row, files, content]
+ *                   properties:
+ *                     row:     { type: integer }
+ *                     files:   { type: array, items: { type: object, required: [name, size], properties: { name: { type: string }, size: { type: integer }, content_type: { type: string } } } }
+ *                     content: { type: string, description: "Text of the bundle's design JSON; empty when there is none" }
+ *     responses:
+ *       200: { description: "The import report" }
+ *       409: { description: "The import is past the dry run" }
+ * /admin/template-imports/{uid}/start:
+ *   post:
+ *     summary: "Step 3 — create the designs and versions as drafts"
+ *     description: >-
+ *       Re-checks the valid rows against the catalog, creates unknown tags, then per design (one
+ *       transaction each) finds the design by name or creates it as a draft, and creates each
+ *       version as a draft. An existing design keeps its settings; tags and industries are added
+ *       and its category is filled only if it had none. Safe to call again: rows already created
+ *       are skipped. 409 while rows still await files or when no row is valid.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     responses:
+ *       200: { description: "The import report; created rows carry template_uid" }
+ * /admin/template-imports/{uid}/items/{row}/presign:
+ *   post:
+ *     summary: "Step 4 — presigned upload URLs for one row"
+ *     description: >-
+ *       Ask just before uploading that row (URLs expire in 15 minutes). Files already in storage
+ *       at the declared size are listed in `already_uploaded` and not signed again, so calling
+ *       this after an interruption resumes the row. Each `single` URL is bound to the file's exact
+ *       size and type; send `required_headers` with the PUT. Files over 100 MB come back as
+ *       `multipart` with a `target` for the existing /admin/uploads/multipart/* endpoints.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string } }
+ *       - { in: path, name: row, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: "{ row, template_uid, files: [{ name, key, size, content_type, upload_method, upload_url?, required_headers?, target? }], already_uploaded: [name], expires_in }" }
+ *       409: { description: "The row is not ready to upload (invalid, failed at start, completed, or its version was deleted)" }
+ * /admin/template-imports/{uid}/items/{row}/complete:
+ *   post:
+ *     summary: "Step 5 — finish one row: check files, activate them, save the version"
+ *     description: >-
+ *       Lists the row's folder in storage. A missing file or one of the wrong size makes the row
+ *       `failed` (failed_stage `upload`) — presign and upload again, then retry. Otherwise the files
+ *       are tagged active, the design JSON and thumbnail are saved, and the version is published if
+ *       the version publish checks pass (else kept as a draft with the reasons in `warnings`).
+ *       Calling it on a completed row returns the same result.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: uid, required: true, schema: { type: string } }
+ *       - { in: path, name: row, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: "{ row, stage, result, failed_stage, template_uid, errors, warnings }" }
+ * /admin/template-imports/{uid}/finalize:
+ *   post:
+ *     summary: "Step 6 — publish the designs that are ready"
+ *     description: >-
+ *       For every design the import touched: publish it when the design publish checks pass (a
+ *       category or an industry, a tag, an active English or text-free version), else keep it a
+ *       draft with the reasons. A design that is already live is never set back to draft. The
+ *       import ends `completed`, or `completed_with_issues` when any row or design did not go
+ *       live. Safe to call again, e.g. after retrying failed rows.
+ *     tags: [Admin]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: uid, required: true, schema: { type: string } }]
+ *     responses:
+ *       200: { description: "The import report; summary.families = [{ family_id, uid, name, outcome: published|draft|already_live|deleted, warnings }]" }
+ */
+router.get('/template-imports/manifest-template',         authenticate, authorizeAdmin('templates.read'),   templateImportController.manifestTemplate);
+router.get('/template-imports',                           authenticate, authorizeAdmin('templates.read'),   templateImportController.list);
+router.post('/template-imports',                          authenticate, authorizeAdmin('templates.create'), validate(createImportSchema), templateImportController.create);
+router.get('/template-imports/:uid',                      authenticate, authorizeAdmin('templates.read'),   templateImportController.get);
+router.delete('/template-imports/:uid',                   authenticate, authorizeAdmin('templates.create'), templateImportController.cancel);
+router.put('/template-imports/:uid/manifest',              authenticate, authorizeAdmin('templates.create'), validate(replaceManifestSchema), templateImportController.replaceManifest);
+router.post('/template-imports/:uid/files',               authenticate, authorizeAdmin('templates.create'), validate(importFilesSchema), templateImportController.files);
+router.post('/template-imports/:uid/start',               authenticate, authorizeAdmin('templates.create'), templateImportController.start);
+router.post('/template-imports/:uid/items/:row/presign',  authenticate, authorizeAdmin('templates.create'), templateImportController.presign);
+router.post('/template-imports/:uid/items/:row/complete', authenticate, authorizeAdmin('templates.create'), templateImportController.complete);
+router.post('/template-imports/:uid/finalize',            authenticate, authorizeAdmin('templates.create'), templateImportController.finalize);
 
 // ---- Business-category tag assignment (full replace; M2M not handled by generic CRUD) ----
 /**

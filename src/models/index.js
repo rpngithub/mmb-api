@@ -31,6 +31,8 @@ const modelFiles = [
   'templateTag.model',
   'templateSize.model',
   'templateFamily.model',
+  'templateImportBatch.model',
+  'templateImportItem.model',
   'brandSeries.model',
   'variantBadge.model',
   'variant.model',
