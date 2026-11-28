@@ -88,7 +88,7 @@ test('magnific: prompt required, unknown fields refused, too many references, un
 
 // ---------- google ----------
 
-test('google: every placeholder has a field, every field reaches the prompt, no uploaded images', () => {
+test('google: every placeholder has a field, every field reaches the prompt, uploaded images go as images', () => {
   const schema = { fields: { notes: { type: 'string' } } };
   assert.deepEqual(check(google, 'gemini-3.5-flash-lite', schema, GOOGLE_FIXED({ user_template: 'Notes: {{notes}}' })), []);
   assert.deepEqual(check(google, 'gemini-3.5-flash-lite', schema, GOOGLE_FIXED()), [], 'the default template sends {{input_json}}');
@@ -96,7 +96,8 @@ test('google: every placeholder has a field, every field reaches the prompt, no 
   assert.match(check(google, 'gemini-3.5-flash-lite', { fields: { notes: { type: 'string' }, tone: { type: 'enum', values: ['fun'] } } },
     GOOGLE_FIXED({ user_template: '{{notes}}' })).join(), /field "tone" is never sent/);
   assert.match(check(google, 'gemini-3.5-flash-lite', schema, GOOGLE_FIXED({ user_template: '{{brand_context}} {{notes}}' })).join(), /declares no "context"/);
-  assert.match(check(google, 'gemini-3.5-flash-lite', { fields: { photo: { type: 'media' } } }, GOOGLE_FIXED()).join(), /take no uploaded images/);
+  // Since the AI Dev Kit foundation (2026-11-28): uploads are sent inline as images.
+  assert.deepEqual(check(google, 'gemini-3.5-flash-lite', { fields: { photo: { type: 'media' } } }, GOOGLE_FIXED()), []);
 });
 
 // ---------- wired into admin saves ----------

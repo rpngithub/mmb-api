@@ -60,7 +60,7 @@ function checkRules(priceRules, inputSchema) {
       if (!(Number(m) > 0)) return `multiplier "${param}.${v}" must be a positive number`;
     }
     if (f.type === 'enum') {
-      const missing = (f.values || []).filter((v) => table[v] === undefined);
+      const missing = require('./inputSchema').enumValues(f).filter((v) => table[v] === undefined);
       if (missing.length) return `multiplier "${param}" has no price for ${missing.join(', ')}`;
     }
   }

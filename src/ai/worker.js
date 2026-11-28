@@ -142,10 +142,48 @@ async function publicMediaBase() {
   return base;
 }
 
+// adapter.inlineMedia: the provider takes images in the request body (Google).
+// Each media field becomes { uid, mime, base64, bytes }, read from S3 now and never
+// stored. Only PNG, JPEG and WEBP go (sniffed, never the stored type); a file over
+// MAX_INLINE_BYTES, or over MAX_INLINE_TOTAL together, fails as INVALID_INPUT
+// (terminal: refunded) — Google refuses requests past ~20 MB, base64 included.
+const {
+  INLINE_MAX_BYTES: MAX_INLINE_BYTES, INLINE_MAX_TOTAL: MAX_INLINE_TOTAL, INLINE_MIMES,
+} = require('./mediaLimits');
+
+async function resolveInlineMedia(job, operation, input, refs) {
+  const { UserUpload } = require('../models');
+  const s3 = require('../utils/s3Helper');
+  const { sniff } = require('./resultStore');
+  const rows = await UserUpload.findAll({ where: { user_id: job.user_id, uid: refs.map((r) => r.uid) } });
+  const byUid = new Map(rows.map((r) => [r.uid, r]));
+  const invalidInput = (detail) => new ProviderError(INTERNAL.INVALID_INPUT, 'before_send', { detail });
+
+  const total = rows.reduce((n, r) => n + Number(r.bytes || 0), 0);
+  if (total > MAX_INLINE_TOTAL) throw invalidInput(`input images are larger than ${MAX_INLINE_TOTAL / 1024 / 1024} MB together`);
+
+  const toInline = async (uid) => {
+    const row = byUid.get(uid);
+    if (!row) throw invalidInput('input image was deleted');
+    if (Number(row.bytes) > MAX_INLINE_BYTES) throw invalidInput(`input image is larger than ${MAX_INLINE_BYTES / 1024 / 1024} MB`);
+    const bytes = await s3.getObjectBuffer(row.s3_key, { maxBytes: MAX_INLINE_BYTES });
+    const mime = sniff(bytes);
+    if (!INLINE_MIMES.includes(mime)) throw invalidInput('input image must be PNG, JPEG or WEBP');
+    return { uid, mime, base64: bytes.toString('base64'), bytes: bytes.length };
+  };
+  for (const [k, def] of Object.entries(operation.input_schema?.fields || {})) {
+    if (def.type === 'media' && input[k]) input[k] = await toInline(input[k]);
+    if (def.type === 'media_list' && Array.isArray(input[k])) input[k] = await Promise.all(input[k].map(toInline));
+  }
+  return input;
+}
+
 async function resolveMedia(job, operation, adapter) {
   const input = { ...(job.input || {}) };
   const refs = inputSchema.mediaRefs(operation.input_schema, input);
-  if (!refs.length || !adapter.needsMediaUrls) return input;
+  if (!refs.length) return input;
+  if (adapter.inlineMedia) return resolveInlineMedia(job, operation, input, refs);
+  if (!adapter.needsMediaUrls) return input;
 
   const { UserUpload } = require('../models');
   const s3 = require('../utils/s3Helper');
@@ -183,7 +221,7 @@ async function resolveAttachments(job, adapter) {
     try {
       const bytes = await s3.getObjectBuffer(a.s3_key, { maxBytes: MAX_ATTACHMENT_BYTES });
       const mime = sniff(bytes);
-      if (!mime || mime === 'image/svg+xml') continue;
+      if (!INLINE_MIMES.includes(mime)) continue;
       out.push({ kind: a.kind, mime, base64: bytes.toString('base64') });
     } catch (err) {
       console.warn(`[AI] job ${job.uid}: attachment ${a.kind} skipped (${err.message})`);

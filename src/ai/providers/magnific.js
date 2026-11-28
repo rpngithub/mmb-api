@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const http = require('../http');
 const { INTERNAL, ProviderError } = require('../errors');
 const { serverFields } = require('../operationCheck');
+const { enumValues } = require('../inputSchema');
+const promptTemplate = require('../promptTemplate');
 
 // Magnific (https://docs.magnific.com) — the adapter for our launch operations.
 //
@@ -67,7 +69,15 @@ const MODELS = {
   },
 };
 
-const FIXED_KEYS = ['resolution', 'quality', 'aspect_ratio', 'aspect_ratio_map', 'background', 'output_format', 'body_encoding', 'extra_body'];
+// prompt_template  the MMB prompt for this route (ai/promptTemplate.js syntax),
+//                  filled from the input and the server's context; when set it IS
+//                  the prompt, and the operation needs no "prompt" field
+// num_images       a fixed count per request (models with num_images only); an
+//                  input field of that name still wins
+const FIXED_KEYS = [
+  'resolution', 'quality', 'aspect_ratio', 'aspect_ratio_map', 'background', 'output_format', 'body_encoding', 'extra_body',
+  'prompt_template', 'num_images',
+];
 
 const maxImagesFor = (model) => MODELS[model]?.maxImages ?? null;
 
@@ -169,7 +179,7 @@ function assertSize(ref) {
 
 // Our input (validated against the operation's schema, media already resolved to
 // presigned URLs by the worker) + the route's fixed params -> Magnific's body.
-function buildBody(spec, input, fixed, callbackUrl) {
+function buildBody(spec, input, fixed, callbackUrl, context = null) {
   const extra = fixed.extra_body || {};
   const body = {};
 
@@ -181,10 +191,13 @@ function buildBody(spec, input, fixed, callbackUrl) {
     return body;   // synchronous: no webhook
   }
 
-  if (!input.prompt) throw invalid('a prompt is required');
-  body.prompt = input.prompt;
+  const prompt = typeof fixed.prompt_template === 'string' && fixed.prompt_template.trim()
+    ? promptTemplate.render(fixed.prompt_template, input, context).trim()
+    : input.prompt;
+  if (!prompt) throw invalid('a prompt is required');
+  body.prompt = prompt;
 
-  const n = Number(input.num_images || 1);
+  const n = Number(input.num_images ?? fixed.num_images ?? 1);
   if (n > spec.maxImages) throw invalid(`this model makes at most ${spec.maxImages} image(s) per request`);
 
   const ar = input.aspect_ratio ?? fixed.aspect_ratio;
@@ -302,6 +315,17 @@ const adapter = {
   MODELS,
   maxImagesFor,
 
+  // What an input image must be for this model — checked at submit, before any
+  // charge. 20 MB is Magnific's documented cap; remove-background takes PNG, JPEG
+  // or WEBP (the doc's "supported formats").
+  inputLimits(model) {
+    const spec = MODELS[model];
+    if (!spec) return null;
+    return spec.family === 'bg'
+      ? { maxBytes: MAX_INPUT_BYTES, mimes: ['image/png', 'image/jpeg', 'image/webp'] }
+      : { maxBytes: MAX_INPUT_BYTES };
+  },
+
   validateRoute({ model, fixedParams }) {
     const spec = MODELS[model];
     if (!spec) return `model must be one of: ${Object.keys(MODELS).join(', ')}`;
@@ -325,6 +349,16 @@ const adapter = {
     if (f.aspect_ratio_map !== undefined && (typeof f.aspect_ratio_map !== 'object' || Array.isArray(f.aspect_ratio_map))) {
       return 'aspect_ratio_map must map our ratios to the provider\'s, e.g. {"1:1":"square_1_1"}';
     }
+    if (f.prompt_template !== undefined) {
+      if (spec.family === 'bg') return `${model} takes no prompt, so no prompt_template`;
+      if (typeof f.prompt_template !== 'string' || !f.prompt_template.trim()) return 'prompt_template must be a non-empty string';
+      const bad = promptTemplate.checkSyntax(f.prompt_template);
+      if (bad) return bad;
+    }
+    if (f.num_images !== undefined) {
+      const n = Number(f.num_images);
+      if (!Number.isInteger(n) || n < 1 || n > spec.maxImages) return `num_images must be 1..${spec.maxImages} for ${model}`;
+    }
     const extra = f.extra_body || {};
     const badExtra = Object.keys(extra).filter((k) => !spec.extraBody.includes(k));
     if (badExtra.length) return `extra_body may only set: ${spec.extraBody.join(', ') || '(nothing for this model)'}`;
@@ -346,17 +380,31 @@ const adapter = {
       ? ['image', 'product_image']
       : ['prompt', 'aspect_ratio', 'num_images', 'product_image', 'reference_images', 'image', ...(spec.family === 'gpt' ? ['quality'] : [])];
 
+    const template = spec.family !== 'bg' && typeof f.prompt_template === 'string' && f.prompt_template.trim() ? f.prompt_template : null;
+    const used = template ? promptTemplate.names(template) : [];
+
     if (spec.family === 'bg') {
       const img = typeIs('image', 'media') ? 'image' : typeIs('product_image', 'media') ? 'product_image' : null;
       if (!img) out.push('needs a required media field named "image" (or "product_image")');
       else if (!fields[img].required) out.push(`"${img}" must be required — the call fails without an image`);
-    } else {
-      if (!typeIs('prompt', 'string')) out.push('needs a string field "prompt"');
-      else if (!fields.prompt.required) out.push('"prompt" must be required — the call fails without one');
+    } else if (template) {
+      // The template is the prompt: every name in it needs a field (or is reserved).
+      for (const p of used) {
+        if (!promptTemplate.RESERVED.includes(p) && !fields[p]) out.push(`prompt_template uses {{${p}}} but the operation has no "${p}" field`);
+      }
+      const hasContext = Array.isArray(inputSchema?.context) && inputSchema.context.length;
+      for (const p of ['brand_context', 'industry', 'location']) {
+        if (used.includes(p) && !hasContext) out.push(`prompt_template uses {{${p}}} but the operation declares no "context"`);
+      }
+    } else if (!typeIs('prompt', 'string')) {
+      out.push('needs a string field "prompt"');
+    } else if (!fields.prompt.required) {
+      out.push('"prompt" must be required — the call fails without one');
     }
 
+    const sendsAll = used.includes('input_json');
     for (const k of Object.keys(fields)) {
-      if (!accepts.includes(k) && !server.has(k)) out.push(`field "${k}" is never sent to ${model}`);
+      if (!accepts.includes(k) && !server.has(k) && !used.includes(k) && !sendsAll) out.push(`field "${k}" is never sent to ${model}`);
     }
     for (const k of ['image', 'product_image']) if (fields[k] && !typeIs(k, 'media')) out.push(`"${k}" must be of type media`);
     if (fields.reference_images && !typeIs('reference_images', 'media_list')) out.push('"reference_images" must be of type media_list');
@@ -369,20 +417,20 @@ const adapter = {
 
     // Enum values the model cannot take.
     if (typeIs('aspect_ratio', 'enum') && f.aspect_ratio_map && typeof f.aspect_ratio_map === 'object') {
-      const missing = fields.aspect_ratio.values.filter((v) => !(v in f.aspect_ratio_map));
+      const missing = enumValues(fields.aspect_ratio).filter((v) => !(v in f.aspect_ratio_map));
       if (missing.length) out.push(`aspect_ratio ${missing.join(', ')} has no entry in the route's aspect_ratio_map`);
     }
     if (spec.family === 'gpt' && typeIs('quality', 'enum')) {
-      const bad = fields.quality.values.filter((v) => !spec.qualities.includes(v));
+      const bad = enumValues(fields.quality).filter((v) => !spec.qualities.includes(v));
       if (bad.length) out.push(`quality ${bad.join(', ')} is not one of ${model}'s: ${spec.qualities.join(', ')}`);
     }
     return out;
   },
 
-  async submit({ input, route, provider, apiKey, callbackUrl }) {
+  async submit({ input, route, provider, apiKey, callbackUrl, context }) {
     const spec = specFor(route);
     const fixed = route.fixed_params || {};
-    const body = buildBody(spec, input || {}, fixed, spec.mode === 'async' ? callbackUrl : null);
+    const body = buildBody(spec, input || {}, fixed, spec.mode === 'async' ? callbackUrl : null, context || null);
     const { data, contentType } = requestFor(spec, fixed, body);
 
     const res = await http.request({
@@ -400,7 +448,9 @@ const adapter = {
       if (!url) {
         throw Object.assign(new ProviderError(INTERNAL.TASK_FAILED, 'after_start', { detail: 'no result url in response' }), { responseExcerpt: raw });
       }
-      return { kind: 'sync', files: [{ url }], raw };
+      // The doc's rule: a transparent PNG, never a white or solid background.
+      // resultStore fails (and refunds) a result that cannot hold transparency.
+      return { kind: 'sync', files: [{ url, require_alpha: true }], raw };
     }
 
     const parsed = parseTask(res.data);

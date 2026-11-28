@@ -53,9 +53,10 @@
  *         media_uid: { type: string, format: uuid, description: The file in the media library (slot ai_result) }
  *         s3_key: { type: string, description: Prepend cdn_base_url (GET /config) to render }
  *         url: { type: string, nullable: true, description: 'cdn_base_url + s3_key, or null when cdn_base_url is not set' }
- *         mime: { type: string, example: image/png }
+ *         mime: { type: string, example: image/png, description: 'image/png, image/jpeg, image/webp, image/svg+xml, audio/wav or audio/mpeg' }
  *         width: { type: integer, nullable: true }
  *         height: { type: integer, nullable: true }
+ *         duration_ms: { type: integer, nullable: true, description: Audio results only; null for images }
  *
  *     AiJob:
  *       type: object

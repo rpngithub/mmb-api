@@ -22,7 +22,12 @@ const { httpError } = require('./errors');
 //   { language: { code, name, native_name },
 //     business: { name, description, industry, city, state, keywords[], contact? } | null,
 //     project:  { name, design: { name, category, industries[], events[], keywords[] } } | null,
+//     location?: string,       // only when the request sent `location`
 //     attachments: [{ kind: 'project_thumbnail', s3_key }] }   // fetched at send time
+//
+// `context_rules` on the input schema (see ai/inputSchema.js) decide what is
+// refused here, before any charge: no subject at all (default on), or a business
+// with no industry (off unless the operation needs it).
 
 const MAX_TEXT = 1000;
 const MAX_LIST = 20;
@@ -145,8 +150,19 @@ async function build(operation, input, userId) {
     }
   }
 
-  const userText = typeof input.context === 'string' && input.context.trim();
-  if (!out.business && !out.project && !userText) {
+  // A location the user typed overrides the business city for this request only.
+  const location = clip(typeof input.location === 'string' ? input.location.trim() : null, 100);
+  if (location) out.location = location;
+
+  const rules = { need_subject: true, need_industry: false, ...(schema.context_rules || {}) };
+  if (rules.need_industry && !out.business?.industry) {
+    throw new ValidationError('Validation failed', [{
+      field: 'industry',
+      message: 'add an industry to your business profile first',
+    }]);
+  }
+  const userText = ['context', 'instructions'].some((k) => typeof input[k] === 'string' && input[k].trim());
+  if (rules.need_subject && !out.business && !out.project && !userText) {
     throw new ValidationError('Validation failed', [{
       field: ref ? ref.field : 'context',
       message: 'nothing to write about: send a project, describe the post in context, or add a business profile first',
@@ -159,8 +175,8 @@ async function build(operation, input, userId) {
 // internal fields (storage keys never leave our side).
 function forPrompt(snapshot) {
   if (!snapshot) return {};
-  const { business, project } = snapshot;
-  return { ...(business ? { business } : {}), ...(project ? { project } : {}) };
+  const { business, project, location } = snapshot;
+  return { ...(business ? { business } : {}), ...(project ? { project } : {}), ...(location ? { location } : {}) };
 }
 
 module.exports = { build, forPrompt, resolveLanguage, DEFAULT_LANGUAGE };
