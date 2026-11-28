@@ -9,6 +9,8 @@ const pricing      = require('../ai/pricing');
 const inputSchema  = require('../ai/inputSchema');
 const resultStore  = require('../ai/resultStore');
 const aiContext    = require('../ai/context');
+const mediaLimits  = require('../ai/mediaLimits');
+const { ValidationError } = require('../errors');
 const { INTERNAL, PUBLIC_MESSAGES, toPublic, httpError } = require('../ai/errors');
 const { STATUS, IN_FLIGHT } = queue;
 
@@ -113,19 +115,43 @@ function replayOrConflict(existing, key, hash) {
 // Every referenced upload must be the caller's own image, in the media library or
 // a previous AI result. A uid that is someone else's is a 404, not a 403 — there
 // is nothing to tell them.
+// @returns [{ field, uid, content_type, bytes }] — the images, for assertMediaFits.
 async function assertMediaOwned(op, input, userId) {
   const refs = inputSchema.mediaRefs(op.input_schema, input);
-  if (!refs.length) return;
+  if (!refs.length) return [];
   const { UserUpload } = models();
   const rows = await UserUpload.findAll({
     where: { user_id: userId, uid: refs.map((r) => r.uid), slot: MEDIA_SLOTS },
-    attributes: ['uid', 'content_type'],
+    attributes: ['uid', 'content_type', 'bytes'],
   });
   const byUid = new Map(rows.map((r) => [r.uid, r]));
-  for (const ref of refs) {
+  return refs.map((ref) => {
     const row = byUid.get(ref.uid);
     if (!row || !String(row.content_type || '').startsWith('image/')) throw httpError.inputNotFound(ref.field);
+    return { field: ref.field, uid: ref.uid, content_type: String(row.content_type).toLowerCase(), bytes: Number(row.bytes || 0) };
+  });
+}
+
+// Every image must suit every route the job may go to (adapter.inputLimits per
+// model): a wrong format or an oversized file is a 400 here, before any charge,
+// instead of a paid job that fails at send. The worker checks the real bytes again.
+function assertMediaFits(media, cands) {
+  if (!media.length) return;
+  const problems = [];
+  for (const c of cands) {
+    const limits = c.adapter?.inputLimits?.(c.route.model);
+    if (!limits) continue;
+    for (const m of media) {
+      if (limits.mimes && !limits.mimes.includes(m.content_type)) {
+        problems.push({ field: m.field, message: `must be a ${mediaLimits.describe(limits.mimes)} image` });
+      } else if (limits.maxBytes && m.bytes > limits.maxBytes) {
+        problems.push({ field: m.field, message: `must be at most ${Math.floor(limits.maxBytes / mediaLimits.MB)} MB` });
+      }
+    }
   }
+  const seen = new Set();
+  const unique = problems.filter((p) => { const k = `${p.field}|${p.message}`; return seen.has(k) ? false : seen.add(k); });
+  if (unique.length) throw new ValidationError('Validation failed', unique);
 }
 
 async function moderationStrikes(userId, since) {
@@ -169,13 +195,15 @@ async function submit(userId, key, rawInput, idempotencyKey) {
   await assertPlanAllowed(op, userId);
   if (!aiConfig.allowUnmetered() && (await quota.limitFor(userId, 'ai_credits')) === null) throw httpError.notInPlan();
 
-  await assertMediaOwned(op, input, userId);
+  const media = await assertMediaOwned(op, input, userId);
   // Business / design details the server adds — resolved (and a foreign project
   // refused) before anything is charged, then frozen on the job.
   const context = await aiContext.build(op, input, userId);
   // A route the job may actually go to — a primary that forbids fallback and is
   // down right now does not count its fallbacks (refused here, nothing charged).
-  if (!routing.eligible(await routing.candidates(op.id)).length) throw httpError.unavailable();
+  const eligible = routing.eligible(await routing.candidates(op.id));
+  if (!eligible.length) throw httpError.unavailable();
+  assertMediaFits(media, eligible);
 
   const s = await aiConfig.settings();
   const since = new Date(Date.now() - 3600 * 1000);
@@ -394,6 +422,8 @@ async function serialize(job, { cdnBase } = {}) {
     mime: f.mime,
     width: f.width,
     height: f.height,
+    // Audio results only; null for images (and for jobs stored before audio existed).
+    duration_ms: f.duration_ms ?? null,
   }));
   return {
     uid: job.uid,
@@ -431,5 +461,5 @@ async function listForUser(userId, { status, limit, offset } = {}) {
 
 module.exports = {
   listOperations, estimate, submit, failJob, completeJob, applyProviderUpdate, retryElsewhere, MAX_TASKS_PER_JOB,
-  getForUser, listForUser, serialize, track, drain, hashInput, MEDIA_SLOTS,
+  getForUser, listForUser, serialize, track, drain, hashInput, MEDIA_SLOTS, assertMediaFits,
 };

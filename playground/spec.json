@@ -6870,6 +6870,261 @@
             ]
           },
           {
+            "name": "Generate Logo (2 options)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/logo.generate",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "logo.generate"
+                ]
+              },
+              "description": "Two logo options from one request. Send `company_name` (required, ≤ 60), `tagline` (optional, ≤ 80), `auto_tagline` (default true), `logo_type`, `logo_style`, `colour_preference` (required, free text ≤ 100 for now). Tagline: a typed tagline is used as written; with none, `auto_tagline: true` lets the AI write an industry-relevant one, `false` = no tagline. The server adds the business's industry — a business with no industry is a 400 (nothing charged). The finished job has `result.files` with 2 images. Ships inactive (404 until an admin activates it).",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"company_name\": \"Sri Lakshmi Sweets\",\n  \"tagline\": \"\",\n  \"auto_tagline\": true,\n  \"logo_type\": \"wordmark with an icon\",\n  \"logo_style\": \"modern minimal\",\n  \"colour_preference\": \"maroon and gold\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 400, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Generate Image (from a description)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/image.generate",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "image.generate"
+                ]
+              },
+              "description": "One image from a text description. Send `prompt` (required, 3–2000) and `aspect_ratio` (`1:1` default, `4:5`, `9:16`, `16:9`). No image input. The server adds the business's industry as soft context when it has one. Normal fashion and commercial imagery is allowed; explicit content is refused — the job then fails with MODERATION_BLOCKED and is refunded. Result: `result.files` with 1 image. Ships inactive (404 until an admin activates it).",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"prompt\": \"A model in a sleeveless red silk dress on a beach at sunset, fashion catalogue photo\",\n  \"aspect_ratio\": \"4:5\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 400, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Generate Product Background",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/image.product_background",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "image.product_background"
+                ]
+              },
+              "description": "A new background for a product photo, keeping the product as it is. Send `product_image` (an upload uid from the media library, or the `media_uid` of a background-removal result), `prompt` (the background, required) and optionally `product_category`. PNG, JPEG or WEBP up to 7 MB (else 400, nothing charged). The server adds the business's industry — a business with no industry is a 400. Result: `result.files` with 1 image. Ships inactive.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"product_image\": \"{{my_upload_uid}}\",\n  \"prompt\": \"on a white marble kitchen counter with soft morning light\",\n  \"product_category\": \"cookware\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 400, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Write Caption (image or project)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/text.caption",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "text.caption"
+                ]
+              },
+              "description": "One caption + exactly 5 hashtags for a post image. Send EXACTLY ONE of `image` (an upload uid — a post or ad image the user already has) or `project` (a project uid — its thumbnail is the image); neither or both is a 400. `language` is required: `en`, `ta` or `hi`. Optional `instructions` (≤ 500) and `location` (≤ 100; default: the business city). The server adds the business's industry (none = 400). Result: `result.text` = `{ caption, hashtags: [5] }` — caption ≤ 250 characters, hashtags separate. Regenerate = the same body with a NEW Idempotency-Key. The per-platform `text.post.*` operations are separate and unchanged. Ships inactive.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"image\": \"{{my_upload_uid}}\",\n  \"language\": \"ta\",\n  \"instructions\": \"Diwali special gift box\",\n  \"location\": \"Madurai\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 400, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "Text to Voice",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Idempotency-Key",
+                  "value": "{{$guid}}",
+                  "description": "A fresh UUID per user action; the app reuses it on retry so a retry never charges twice."
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/ai/operations/voice.tts",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "ai",
+                  "operations",
+                  "voice.tts"
+                ]
+              },
+              "description": "Text read aloud. Send `text` (≤ 300 words, spoken exactly as written), `language` (`en` | `ta` | `hi`), `voice_gender` (`male` | `female`), `voice` (a value from the operation's `input_schema.fields.voice.options` in GET /ai/operations — filter by the option's `gender` and `languages`), `tone` (natural, humorous, cheerful, professional, emotional, calm, energetic, storytelling) and `pace` (slow | normal | fast, default normal). A voice that does not fit the gender or language is a 400. Result: `result.files` with 1 `audio/wav` file and `duration_ms`. Ships inactive.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"text\": \"Fresh sweets are ready today! Visit us before 8 pm.\",\n  \"language\": \"en\",\n  \"voice_gender\": \"female\",\n  \"voice\": \"kore\",\n  \"tone\": \"cheerful\",\n  \"pace\": \"normal\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test('responded', () => pm.expect(pm.response.code).to.be.oneOf([200, 202, 400, 402, 403, 404, 409, 429, 503]));",
+                    "const d = (pm.response.json() || {}).data || {};",
+                    "const _id = d.uid || d.id; if (_id) pm.environment.set('ai_job_uid', _id);"
+                  ]
+                }
+              }
+            ]
+          },
+          {
             "name": "Get Job",
             "request": {
               "method": "GET",
